@@ -107,18 +107,31 @@ class AlertService:
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = AlertRepository(self.db)
 
-    def create_rule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        fields = self._normalize_rule_payload(payload)
+    def create_rule(
+        self,
+        payload: Dict[str, Any],
+        *,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        fields = self._normalize_rule_payload(payload, user_id=user_id)
+        fields["user_id"] = user_id
+        fields["owner_scope"] = "user" if user_id is not None else "global"
         return self._serialize_rule(self.repo.create_rule(fields))
 
-    def get_rule(self, rule_id: int) -> Dict[str, Any]:
-        row = self.repo.get_rule(rule_id)
+    def get_rule(self, rule_id: int, *, user_id: Optional[int] = None) -> Dict[str, Any]:
+        row = self.repo.get_rule(rule_id, user_id=user_id)
         if row is None:
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
         return self._serialize_rule(row)
 
-    def update_rule(self, rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-        row = self.repo.get_rule(rule_id)
+    def update_rule(
+        self,
+        rule_id: int,
+        payload: Dict[str, Any],
+        *,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        row = self.repo.get_rule(rule_id, user_id=user_id)
         if row is None:
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
         if not payload:
@@ -127,17 +140,27 @@ class AlertService:
 
         merged = self._serialize_rule_base(row)
         merged.update(payload)
-        fields = self._normalize_rule_payload(merged, source=merged.get("source") or "api")
-        updated = self.repo.update_rule(rule_id, fields)
+        fields = self._normalize_rule_payload(
+            merged,
+            source=merged.get("source") or "api",
+            user_id=user_id,
+        )
+        updated = self.repo.update_rule(rule_id, fields, user_id=user_id)
         if updated is None:
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
         return self._serialize_rule(updated)
 
-    def delete_rule(self, rule_id: int) -> bool:
-        return self.repo.delete_rule(rule_id)
+    def delete_rule(self, rule_id: int, *, user_id: Optional[int] = None) -> bool:
+        return self.repo.delete_rule(rule_id, user_id=user_id)
 
-    def enable_rule(self, rule_id: int, enabled: bool) -> Dict[str, Any]:
-        updated = self.repo.update_rule(rule_id, {"enabled": enabled})
+    def enable_rule(
+        self,
+        rule_id: int,
+        enabled: bool,
+        *,
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        updated = self.repo.update_rule(rule_id, {"enabled": enabled}, user_id=user_id)
         if updated is None:
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
         return self._serialize_rule(updated)
@@ -145,6 +168,7 @@ class AlertService:
     def list_rules(
         self,
         *,
+        user_id: Optional[int] = None,
         enabled: Optional[bool] = None,
         alert_type: Optional[str] = None,
         target_scope: Optional[str] = None,
@@ -154,6 +178,7 @@ class AlertService:
         page_size: int = 20,
     ) -> Dict[str, Any]:
         rows, total = self.repo.list_rules(
+            user_id=user_id,
             enabled=enabled,
             alert_type=alert_type,
             target_scope=target_scope,
@@ -169,8 +194,8 @@ class AlertService:
             "page_size": page_size,
         }
 
-    def test_rule(self, rule_id: int) -> Dict[str, Any]:
-        row = self.repo.get_rule(rule_id)
+    def test_rule(self, rule_id: int, *, user_id: Optional[int] = None) -> Dict[str, Any]:
+        row = self.repo.get_rule(rule_id, user_id=user_id)
         if row is None:
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
 
@@ -824,6 +849,7 @@ class AlertService:
     def list_triggers(
         self,
         *,
+        user_id: Optional[int] = None,
         rule_id: Optional[int] = None,
         target: Optional[str] = None,
         status: Optional[str] = None,
@@ -831,6 +857,7 @@ class AlertService:
         page_size: int = 20,
     ) -> Dict[str, Any]:
         rows, total = self.repo.list_triggers(
+            user_id=user_id,
             rule_id=rule_id,
             target=target,
             status=status,
@@ -847,6 +874,7 @@ class AlertService:
     def list_notifications(
         self,
         *,
+        user_id: Optional[int] = None,
         trigger_id: Optional[int] = None,
         channel: Optional[str] = None,
         success: Optional[bool] = None,
@@ -854,6 +882,7 @@ class AlertService:
         page_size: int = 20,
     ) -> Dict[str, Any]:
         rows, total = self.repo.list_notifications(
+            user_id=user_id,
             trigger_id=trigger_id,
             channel=channel,
             success=success,
@@ -867,7 +896,13 @@ class AlertService:
             "page_size": page_size,
         }
 
-    def _normalize_rule_payload(self, payload: Dict[str, Any], *, source: str = "api") -> Dict[str, Any]:
+    def _normalize_rule_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        source: str = "api",
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         target_scope = str(payload.get("target_scope") or "single_symbol").strip()
         if target_scope not in SUPPORTED_TARGET_SCOPES:
             raise AlertServiceError(f"unsupported target_scope: {target_scope}")
@@ -886,7 +921,7 @@ class AlertService:
             raise AlertServiceError(f"unsupported severity: {severity}")
 
         parameters = self._normalize_parameters(alert_type, payload.get("parameters") or {})
-        target = self._normalize_target(target_scope, target)
+        target = self._normalize_target(target_scope, target, user_id=user_id)
         if target_scope == "single_symbol" and alert_type in LEGACY_RUNTIME_ALERT_TYPES:
             serialized_rule = {"stock_code": target, "alert_type": alert_type, **parameters}
             try:
@@ -933,7 +968,13 @@ class AlertService:
         if target_scope in {"single_symbol", "watchlist", "portfolio_holdings"} and alert_type not in SYMBOL_ALERT_TYPES:
             raise UnsupportedAlertTypeError(f"unsupported alert_type for {target_scope}: {alert_type}")
 
-    def _normalize_target(self, target_scope: str, target: str) -> str:
+    def _normalize_target(
+        self,
+        target_scope: str,
+        target: str,
+        *,
+        user_id: Optional[int] = None,
+    ) -> str:
         if target_scope == "single_symbol":
             return target.strip()
         if target_scope == "market":
@@ -944,7 +985,10 @@ class AlertService:
         try:
             normalized = normalize_batch_target_scope_target(target_scope, target)
             if target_scope in {"portfolio_holdings", "portfolio_account"}:
-                ensure_active_portfolio_account(normalized)
+                ensure_active_portfolio_account(
+                    normalized,
+                    owner_id=str(user_id) if user_id is not None else None,
+                )
             return normalized
         except ValueError as exc:
             raise AlertServiceError(str(exc)) from exc
@@ -1017,7 +1061,13 @@ class AlertService:
         )
 
         if data["alert_type"] in PORTFOLIO_ALERT_TYPES:
-            return [make_portfolio_risk_payload(parent_key=parent_key, data=data)]
+            return [
+                make_portfolio_risk_payload(
+                    parent_key=parent_key,
+                    data=data,
+                    owner_id=str(row.user_id) if row.user_id is not None else None,
+                )
+            ]
 
         if data["alert_type"] in MARKET_ALERT_TYPES:
             return [make_market_light_payload(parent_key=parent_key, data=data, config=config)]
@@ -1032,6 +1082,7 @@ class AlertService:
                     target_scope=data["target_scope"],
                     target=data["target"],
                     config=config,
+                    owner_id=str(row.user_id) if row.user_id is not None else None,
                 )
             except Exception as exc:
                 return [

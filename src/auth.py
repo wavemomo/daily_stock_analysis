@@ -12,6 +12,7 @@ import base64
 import getpass
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import secrets
@@ -365,6 +366,23 @@ def verify_session(value: str) -> bool:
     if time.time() - ts > max_age_hours * 3600:
         return False
     return True
+
+
+def is_direct_loopback_request(request) -> bool:
+    """Return whether the direct ASGI peer is a loopback IP.
+
+    This deliberately ignores forwarding headers.  It protects first-time
+    administrator bootstrap, where trusting a caller-controlled forwarded
+    address would turn remote setup into an account-takeover primitive.
+    """
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", "") if client is not None else ""
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def get_client_ip(request) -> str:

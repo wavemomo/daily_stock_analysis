@@ -54,6 +54,66 @@ class TestStorage(unittest.TestCase):
                 unique_indexes[index_name] = index_columns
             return unique_indexes
 
+    def test_miniapp_owner_migration_repairs_legacy_column_and_missing_index(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(temp_dir.name, "legacy_alert_owner.sqlite")
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE alert_rules (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+                conn.execute("INSERT INTO alert_rules DEFAULT VALUES")
+
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            db = DatabaseManager(db_url=f"sqlite:///{db_path}")
+
+            with sqlite3.connect(db_path) as conn:
+                columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(alert_rules)").fetchall()
+                }
+                legacy_owner, legacy_scope = conn.execute(
+                    "SELECT user_id, owner_scope FROM alert_rules WHERE id = 1"
+                ).fetchone()
+                conn.execute("DROP INDEX ix_alert_rule_user_id")
+
+            self.assertIn("user_id", columns)
+            self.assertIn("owner_scope", columns)
+            self.assertIsNone(legacy_owner)
+            self.assertIsNone(legacy_scope)
+
+            errors = []
+            error_lock = threading.Lock()
+            threads = []
+
+            def ensure_owner_schema() -> None:
+                try:
+                    db._ensure_miniapp_resource_owner_columns()
+                except Exception as exc:
+                    with error_lock:
+                        errors.append(exc)
+
+            for _ in range(4):
+                thread = threading.Thread(target=ensure_owner_schema)
+                threads.append(thread)
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                self._list_sqlite_indexes(db_path, "alert_rules").get(
+                    "ix_alert_rule_user_id"
+                ),
+                ["user_id"],
+            )
+
+            db._ensure_miniapp_resource_owner_columns()
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            temp_dir.cleanup()
+
     def test_legacy_intelligence_items_url_unique_index_rebuilds_without_collision(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()
         db_path = os.path.join(temp_dir.name, "legacy_intel.sqlite")
@@ -426,10 +486,11 @@ class TestStorage(unittest.TestCase):
 
         DatabaseManager.reset_instance()
         try:
+            db = DatabaseManager(db_url="sqlite:///:memory:")
             with patch("src.storage.inspect", return_value=BrokenInspector()):
                 with self.assertLogs("src.storage", level="ERROR") as logs:
                     with self.assertRaises(RuntimeError):
-                        DatabaseManager(db_url="sqlite:///:memory:")
+                        db._ensure_decision_signal_profile_schema()
 
             self.assertIn(
                 "profile migration cannot continue safely",

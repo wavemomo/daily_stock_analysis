@@ -52,7 +52,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
                 [
                     "STOCK_LIST=600519",
                     "GEMINI_API_KEY=test",
-                    "ADMIN_AUTH_ENABLED=false",
+                    "ADMIN_AUTH_ENABLED=true",
                     "PORTFOLIO_RISK_CONCENTRATION_ALERT_PCT=70.0",
                     "PORTFOLIO_RISK_DRAWDOWN_ALERT_PCT=10.0",
                     "PORTFOLIO_RISK_STOP_LOSS_ALERT_PCT=25.0",
@@ -77,6 +77,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self._board_fetch_patcher = patch.object(PortfolioRiskService, "_fetch_belong_boards", return_value=[])
         self._board_fetch_patcher.start()
         self.client = TestClient(create_app(static_dir=data_dir / "empty-static"))
+        self.client.cookies.set("dsa_session", auth.create_session())
 
     def tearDown(self) -> None:
         DatabaseManager.reset_instance()

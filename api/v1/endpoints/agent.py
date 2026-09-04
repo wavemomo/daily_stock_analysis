@@ -8,13 +8,14 @@ import json
 import logging
 import threading
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from api.deps import get_agent_chat_session_service
+from api.deps import get_agent_chat_session_service, get_request_resource_owner
 from api.v1.schemas.system_config import AgentBackendStatusResponse
 from src.config import get_config
 from src.services.agent_chat_session_service import AgentChatSessionService
@@ -44,8 +45,73 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_ACTIVE_CODEX_STREAMS: Dict[str, threading.Event] = {}
+
+@dataclass(frozen=True)
+class _ActiveCodexStream:
+    owner_id: Optional[str]
+    cancel_event: threading.Event
+
+
+_ACTIVE_CODEX_STREAMS: Dict[str, _ActiveCodexStream] = {}
 _ACTIVE_CODEX_STREAMS_LOCK = threading.Lock()
+
+
+def _active_stream_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "error": "request_not_active",
+            "message": "This Agent request is no longer running",
+        },
+    )
+
+
+def _cancel_owned_active_stream(
+    *,
+    request_id: str,
+    owner_id: Optional[str],
+) -> None:
+    """Validate ownership and signal cancellation at one registry lock point."""
+    with _ACTIVE_CODEX_STREAMS_LOCK:
+        stream = _ACTIVE_CODEX_STREAMS.get(request_id)
+        if stream is None or (
+            owner_id is not None and stream.owner_id != owner_id
+        ):
+            raise _active_stream_not_found()
+        stream.cancel_event.set()
+
+
+def _miniapp_session_prefix(owner_id: str) -> str:
+    return f"miniapp:{owner_id}:"
+
+
+def _resolve_session_id(
+    *,
+    requested_session_id: Optional[str],
+    owner_id: Optional[str],
+) -> str:
+    """Allocate or validate a chat session inside the caller's owner scope."""
+    if owner_id is None:
+        return requested_session_id or str(uuid.uuid4())
+    prefix = _miniapp_session_prefix(owner_id)
+    if requested_session_id:
+        if not requested_session_id.startswith(prefix):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": "Chat session not found"},
+            )
+        return requested_session_id
+    return f"{prefix}{uuid.uuid4()}"
+
+
+def _require_owned_session(*, session_id: str, owner_id: Optional[str]) -> str:
+    if owner_id is not None and not session_id.startswith(_miniapp_session_prefix(owner_id)):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "not_found", "message": "Chat session not found"},
+        )
+    return session_id
+
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -197,6 +263,7 @@ async def get_strategies():
 @router.post("/chat", response_model=ChatResponse)
 async def agent_chat(
     request: ChatRequest,
+    http_request: Request,
     session_service: AgentChatSessionService = Depends(get_agent_chat_session_service),
 ):
     """
@@ -216,8 +283,11 @@ async def agent_chat(
                 "message": "Codex Agent requires the Chat interface with progress and stop support",
             },
         )
-    
-    session_id = request.session_id or str(uuid.uuid4())
+    owner_id = get_request_resource_owner(http_request)
+    session_id = _resolve_session_id(
+        requested_session_id=request.session_id,
+        owner_id=owner_id,
+    )
     
     try:
         skill_selection = session_service.resolve_skill_selection(
@@ -273,35 +343,32 @@ class SessionMessagesResponse(BaseModel):
 
 @router.get("/chat/sessions", response_model=SessionsResponse)
 async def list_chat_sessions(
+    http_request: Request,
     limit: int = 50,
-    user_id: Optional[str] = None,
     session_service: AgentChatSessionService = Depends(get_agent_chat_session_service),
+    user_id: Optional[str] = None,
 ):
-    """获取聊天会话列表
-
-    Args:
-        limit: Maximum number of sessions to return.
-        user_id: Optional platform-prefixed user identifier for session
-            isolation.  When provided, only sessions whose session_id
-            starts with this prefix are returned.  The value must
-            include the platform prefix, e.g. ``telegram_12345``,
-            ``feishu_ou_abc``.
-    """
-    sessions = session_service.list_sessions(limit, user_id)
+    """List owned miniapp sessions or apply an optional admin legacy prefix."""
+    owner_id = get_request_resource_owner(http_request)
+    if owner_id is not None:
+        session_prefix = _miniapp_session_prefix(owner_id)
+    else:
+        session_prefix = str(user_id).strip() or None if user_id is not None else None
+    sessions = session_service.list_sessions(limit, session_prefix)
     return SessionsResponse(sessions=sessions)
 
 
 @router.get("/chat/sessions/{session_id}", response_model=SessionMessagesResponse)
 async def get_chat_session_messages(
     session_id: str,
+    http_request: Request,
     limit: int = 100,
     session_service: AgentChatSessionService = Depends(get_agent_chat_session_service),
 ):
-    """获取单个会话的完整消息"""
-    detail = session_service.get_session_detail(
-        session_id,
-        limit,
-    )
+    """Load one owned session without exposing cross-user history."""
+    owner_id = get_request_resource_owner(http_request)
+    session_id = _require_owned_session(session_id=session_id, owner_id=owner_id)
+    detail = session_service.get_session_detail(session_id, limit)
     return SessionMessagesResponse(
         session_id=session_id,
         messages=detail.messages,
@@ -314,9 +381,12 @@ async def get_chat_session_messages(
 @router.delete("/chat/sessions/{session_id}")
 async def delete_chat_session(
     session_id: str,
+    http_request: Request,
     session_service: AgentChatSessionService = Depends(get_agent_chat_session_service),
 ):
-    """删除指定会话"""
+    """Delete one owned session; foreign identifiers intentionally look absent."""
+    owner_id = get_request_resource_owner(http_request)
+    session_id = _require_owned_session(session_id=session_id, owner_id=owner_id)
     count = session_service.delete_session(session_id)
     return {"deleted": count}
 
@@ -476,6 +546,7 @@ async def agent_research(request: ResearchRequest):
 @router.post("/chat/stream")
 async def agent_chat_stream(
     request: ChatRequest,
+    http_request: Request,
     session_service: AgentChatSessionService = Depends(get_agent_chat_session_service),
 ):
     """
@@ -496,10 +567,13 @@ async def agent_chat_stream(
     config = get_config()
     backend_id = _select_agent_chat_backend(config)
 
-    session_id = request.session_id or str(uuid.uuid4())
+    owner_id = get_request_resource_owner(http_request)
+    session_id = _resolve_session_id(
+        requested_session_id=request.session_id,
+        owner_id=owner_id,
+    )
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
-    cancel_event = threading.Event()
     request_id = request.request_id or str(uuid.uuid4())
     skill_selection = session_service.resolve_skill_selection(
         config,
@@ -509,6 +583,11 @@ async def agent_chat_stream(
     skills = skill_selection.effective_skill_ids
     selected_skill_ids = skill_selection.selected_skill_ids_update
     stream_ctx = _build_agent_chat_context(request, config, skills)
+    active_stream = _ActiveCodexStream(
+        owner_id=owner_id,
+        cancel_event=threading.Event(),
+    )
+    cancel_event = active_stream.cancel_event
 
     if backend_id == "codex_app_server":
         with _ACTIVE_CODEX_STREAMS_LOCK:
@@ -520,7 +599,7 @@ async def agent_chat_stream(
                         "message": "This Agent request is already running",
                     },
                 )
-            _ACTIVE_CODEX_STREAMS[request_id] = cancel_event
+            _ACTIVE_CODEX_STREAMS[request_id] = active_stream
 
     def progress_callback(event: dict):
         if backend_id == "codex_app_server" and cancel_event.is_set():
@@ -646,7 +725,7 @@ async def agent_chat_stream(
             finally:
                 if backend_id == "codex_app_server":
                     with _ACTIVE_CODEX_STREAMS_LOCK:
-                        if _ACTIVE_CODEX_STREAMS.get(request_id) is cancel_event:
+                        if _ACTIVE_CODEX_STREAMS.get(request_id) is active_stream:
                             _ACTIVE_CODEX_STREAMS.pop(request_id, None)
 
     return StreamingResponse(
@@ -661,17 +740,11 @@ async def agent_chat_stream(
 
 
 @router.post("/chat/stream/{request_id}/cancel")
-async def cancel_agent_chat_stream(request_id: str):
-    """Signal cancellation while the original Codex SSE remains open."""
-    with _ACTIVE_CODEX_STREAMS_LOCK:
-        cancel_event = _ACTIVE_CODEX_STREAMS.get(request_id)
-    if cancel_event is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "request_not_active",
-                "message": "This Agent request is no longer running",
-            },
-        )
-    cancel_event.set()
+async def cancel_agent_chat_stream(request_id: str, http_request: Request):
+    """Cancel one owned Codex stream without exposing foreign request ids."""
+    owner_id = get_request_resource_owner(http_request)
+    _cancel_owned_active_stream(
+        request_id=request_id,
+        owner_id=owner_id,
+    )
     return {"accepted": True, "request_id": request_id}

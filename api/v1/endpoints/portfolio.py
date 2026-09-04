@@ -7,8 +7,10 @@ import logging
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
+
+from api.deps import get_request_resource_owner
 
 from api.v1.errors import api_error
 from api.v1.schemas.analysis import DuplicateTaskErrorResponse, TaskAccepted
@@ -41,6 +43,7 @@ from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import (
     PortfolioBusyError,
     PortfolioConflictError,
+    PortfolioNotFoundError,
     PortfolioOversellError,
     PortfolioService,
 )
@@ -52,6 +55,10 @@ router = APIRouter()
 
 def _bad_request(exc: Exception) -> HTTPException:
     return api_error(400, "validation_error", str(exc))
+
+
+def _not_found() -> HTTPException:
+    return api_error(404, "not_found", "Portfolio resource not found")
 
 
 def _internal_error(message: str, exc: Exception) -> HTTPException:
@@ -79,15 +86,18 @@ def _serialize_import_record(item: dict) -> PortfolioImportTradeItem:
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Create portfolio account",
 )
-def create_account(request: PortfolioAccountCreateRequest) -> PortfolioAccountItem:
+def create_account(
+    request: Request,
+    payload: PortfolioAccountCreateRequest,
+) -> PortfolioAccountItem:
     service = PortfolioService()
     try:
         row = service.create_account(
-            name=request.name,
-            broker=request.broker,
-            market=request.market,
-            base_currency=request.base_currency,
-            owner_id=request.owner_id,
+            name=payload.name,
+            broker=payload.broker,
+            market=payload.market,
+            base_currency=payload.base_currency,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioAccountItem(**row)
     except ValueError as exc:
@@ -103,11 +113,15 @@ def create_account(request: PortfolioAccountCreateRequest) -> PortfolioAccountIt
     summary="List portfolio accounts",
 )
 def list_accounts(
+    request: Request,
     include_inactive: bool = Query(False, description="Whether to include inactive accounts"),
 ) -> PortfolioAccountListResponse:
     service = PortfolioService()
     try:
-        rows = service.list_accounts(include_inactive=include_inactive)
+        rows = service.list_accounts(
+            include_inactive=include_inactive,
+            owner_id=get_request_resource_owner(request),
+        )
         return PortfolioAccountListResponse(accounts=[PortfolioAccountItem(**item) for item in rows])
     except Exception as exc:
         raise _internal_error("List accounts failed", exc)
@@ -119,17 +133,21 @@ def list_accounts(
     responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Update portfolio account",
 )
-def update_account(account_id: int, request: PortfolioAccountUpdateRequest) -> PortfolioAccountItem:
+def update_account(
+    request: Request,
+    account_id: int,
+    payload: PortfolioAccountUpdateRequest,
+) -> PortfolioAccountItem:
     service = PortfolioService()
     try:
         updated = service.update_account(
             account_id,
-            name=request.name,
-            broker=request.broker,
-            market=request.market,
-            base_currency=request.base_currency,
-            owner_id=request.owner_id,
-            is_active=request.is_active,
+            name=payload.name,
+            broker=payload.broker,
+            market=payload.market,
+            base_currency=payload.base_currency,
+            is_active=payload.is_active,
+            owner_id=get_request_resource_owner(request),
         )
         if updated is None:
             raise api_error(404, "not_found", f"Account not found: {account_id}")
@@ -147,10 +165,13 @@ def update_account(account_id: int, request: PortfolioAccountUpdateRequest) -> P
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Deactivate portfolio account",
 )
-def delete_account(account_id: int):
+def delete_account(request: Request, account_id: int):
     service = PortfolioService()
     try:
-        ok = service.deactivate_account(account_id)
+        ok = service.deactivate_account(
+            account_id,
+            owner_id=get_request_resource_owner(request),
+        )
         if not ok:
             raise api_error(404, "not_found", f"Account not found: {account_id}")
         return {"deleted": 1}
@@ -166,24 +187,30 @@ def delete_account(account_id: int):
     responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Record trade event",
 )
-def create_trade(request: PortfolioTradeCreateRequest) -> PortfolioEventCreatedResponse:
+def create_trade(
+    request: Request,
+    payload: PortfolioTradeCreateRequest,
+) -> PortfolioEventCreatedResponse:
     service = PortfolioService()
     try:
         data = service.record_trade(
-            account_id=request.account_id,
-            symbol=request.symbol,
-            trade_date=request.trade_date,
-            side=request.side,
-            quantity=request.quantity,
-            price=request.price,
-            fee=request.fee,
-            tax=request.tax,
-            market=request.market,
-            currency=request.currency,
-            trade_uid=request.trade_uid,
-            note=request.note,
+            account_id=payload.account_id,
+            symbol=payload.symbol,
+            trade_date=payload.trade_date,
+            side=payload.side,
+            quantity=payload.quantity,
+            price=payload.price,
+            fee=payload.fee,
+            tax=payload.tax,
+            market=payload.market,
+            currency=payload.currency,
+            trade_uid=payload.trade_uid,
+            note=payload.note,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except PortfolioBusyError as exc:
         raise _conflict_error(error="portfolio_busy", message=str(exc))
     except PortfolioOversellError as exc:
@@ -203,6 +230,7 @@ def create_trade(request: PortfolioTradeCreateRequest) -> PortfolioEventCreatedR
     summary="List trade events",
 )
 def list_trades(
+    request: Request,
     account_id: Optional[int] = Query(None, description="Optional account id"),
     date_from: Optional[date] = Query(None, description="Trade date from"),
     date_to: Optional[date] = Query(None, description="Trade date to"),
@@ -221,8 +249,11 @@ def list_trades(
             side=side,
             page=page,
             page_size=page_size,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioTradeListResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -235,10 +266,13 @@ def list_trades(
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete trade event",
 )
-def delete_trade(trade_id: int) -> PortfolioDeleteResponse:
+def delete_trade(request: Request, trade_id: int) -> PortfolioDeleteResponse:
     service = PortfolioService()
     try:
-        ok = service.delete_trade_event(trade_id)
+        ok = service.delete_trade_event(
+            trade_id,
+            owner_id=get_request_resource_owner(request),
+        )
         if not ok:
             raise api_error(404, "not_found", f"Trade not found: {trade_id}")
         return PortfolioDeleteResponse(deleted=1)
@@ -256,18 +290,24 @@ def delete_trade(trade_id: int) -> PortfolioDeleteResponse:
     responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Record cash event",
 )
-def create_cash_ledger(request: PortfolioCashLedgerCreateRequest) -> PortfolioEventCreatedResponse:
+def create_cash_ledger(
+    request: Request,
+    payload: PortfolioCashLedgerCreateRequest,
+) -> PortfolioEventCreatedResponse:
     service = PortfolioService()
     try:
         data = service.record_cash_ledger(
-            account_id=request.account_id,
-            event_date=request.event_date,
-            direction=request.direction,
-            amount=request.amount,
-            currency=request.currency,
-            note=request.note,
+            account_id=payload.account_id,
+            event_date=payload.event_date,
+            direction=payload.direction,
+            amount=payload.amount,
+            currency=payload.currency,
+            note=payload.note,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except PortfolioBusyError as exc:
         raise _conflict_error(error="portfolio_busy", message=str(exc))
     except ValueError as exc:
@@ -283,6 +323,7 @@ def create_cash_ledger(request: PortfolioCashLedgerCreateRequest) -> PortfolioEv
     summary="List cash ledger events",
 )
 def list_cash_ledger(
+    request: Request,
     account_id: Optional[int] = Query(None, description="Optional account id"),
     date_from: Optional[date] = Query(None, description="Cash event date from"),
     date_to: Optional[date] = Query(None, description="Cash event date to"),
@@ -299,8 +340,11 @@ def list_cash_ledger(
             direction=direction,
             page=page,
             page_size=page_size,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioCashLedgerListResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -313,10 +357,13 @@ def list_cash_ledger(
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete cash ledger event",
 )
-def delete_cash_ledger(entry_id: int) -> PortfolioDeleteResponse:
+def delete_cash_ledger(request: Request, entry_id: int) -> PortfolioDeleteResponse:
     service = PortfolioService()
     try:
-        ok = service.delete_cash_ledger_event(entry_id)
+        ok = service.delete_cash_ledger_event(
+            entry_id,
+            owner_id=get_request_resource_owner(request),
+        )
         if not ok:
             raise api_error(404, "not_found", f"Cash ledger entry not found: {entry_id}")
         return PortfolioDeleteResponse(deleted=1)
@@ -334,21 +381,27 @@ def delete_cash_ledger(entry_id: int) -> PortfolioDeleteResponse:
     responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Record corporate action event",
 )
-def create_corporate_action(request: PortfolioCorporateActionCreateRequest) -> PortfolioEventCreatedResponse:
+def create_corporate_action(
+    request: Request,
+    payload: PortfolioCorporateActionCreateRequest,
+) -> PortfolioEventCreatedResponse:
     service = PortfolioService()
     try:
         data = service.record_corporate_action(
-            account_id=request.account_id,
-            symbol=request.symbol,
-            effective_date=request.effective_date,
-            action_type=request.action_type,
-            market=request.market,
-            currency=request.currency,
-            cash_dividend_per_share=request.cash_dividend_per_share,
-            split_ratio=request.split_ratio,
-            note=request.note,
+            account_id=payload.account_id,
+            symbol=payload.symbol,
+            effective_date=payload.effective_date,
+            action_type=payload.action_type,
+            market=payload.market,
+            currency=payload.currency,
+            cash_dividend_per_share=payload.cash_dividend_per_share,
+            split_ratio=payload.split_ratio,
+            note=payload.note,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except PortfolioBusyError as exc:
         raise _conflict_error(error="portfolio_busy", message=str(exc))
     except ValueError as exc:
@@ -364,6 +417,7 @@ def create_corporate_action(request: PortfolioCorporateActionCreateRequest) -> P
     summary="List corporate action events",
 )
 def list_corporate_actions(
+    request: Request,
     account_id: Optional[int] = Query(None, description="Optional account id"),
     date_from: Optional[date] = Query(None, description="Corporate action effective date from"),
     date_to: Optional[date] = Query(None, description="Corporate action effective date to"),
@@ -382,8 +436,11 @@ def list_corporate_actions(
             action_type=action_type,
             page=page,
             page_size=page_size,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioCorporateActionListResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -396,10 +453,13 @@ def list_corporate_actions(
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete corporate action event",
 )
-def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
+def delete_corporate_action(request: Request, action_id: int) -> PortfolioDeleteResponse:
     service = PortfolioService()
     try:
-        ok = service.delete_corporate_action_event(action_id)
+        ok = service.delete_corporate_action_event(
+            action_id,
+            owner_id=get_request_resource_owner(request),
+        )
         if not ok:
             raise api_error(404, "not_found", f"Corporate action not found: {action_id}")
         return PortfolioDeleteResponse(deleted=1)
@@ -418,6 +478,7 @@ def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
     summary="Get portfolio snapshot",
 )
 def get_snapshot(
+    request: Request,
     account_id: Optional[int] = Query(None, description="Optional account id, default returns all accounts"),
     as_of: Optional[date] = Query(None, description="Snapshot date, default today"),
     cost_method: str = Query("fifo", description="Cost method: fifo or avg"),
@@ -433,8 +494,11 @@ def get_snapshot(
             as_of=as_of,
             cost_method=cost_method,
             include_realtime=include_realtime,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioSnapshotResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -448,12 +512,23 @@ def get_snapshot(
     responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 409: {"model": DuplicateTaskErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Submit manual analysis for a held portfolio position",
 )
-def analyze_position(symbol: str, request: PortfolioPositionAnalysisRequest) -> TaskAccepted | JSONResponse:
+def analyze_position(
+    request: Request,
+    symbol: str,
+    payload: PortfolioPositionAnalysisRequest,
+) -> TaskAccepted | JSONResponse:
     service = PortfolioService()
     try:
-        context = _resolve_position_analysis_context(service, symbol=symbol, account_id=request.account_id)
+        context = _resolve_position_analysis_context(
+            service,
+            symbol=symbol,
+            account_id=payload.account_id,
+            owner_id=get_request_resource_owner(request),
+        )
     except HTTPException:
         raise
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -468,8 +543,8 @@ def analyze_position(symbol: str, request: PortfolioPositionAnalysisRequest) -> 
         query_source="portfolio",
         portfolio_context=context,
         report_type="detailed",
-        analysis_phase=request.analysis_phase,
-        force_refresh=bool(request.force),
+        analysis_phase=payload.analysis_phase,
+        force_refresh=bool(payload.force),
         notify=True,
     )
     if duplicates:
@@ -497,12 +572,17 @@ def _resolve_position_analysis_context(
     *,
     symbol: str,
     account_id: Optional[int],
+    owner_id: Optional[str] = None,
 ) -> dict:
     target = service._normalize_symbol_for_position(symbol)
     if not target:
         raise ValueError("symbol must not be empty")
 
-    snapshot = service.get_portfolio_snapshot(account_id=account_id, cost_method="fifo")
+    snapshot = service.get_portfolio_snapshot(
+        account_id=account_id,
+        cost_method="fifo",
+        owner_id=owner_id,
+    )
     matches = []
     for account in snapshot.get("accounts") or []:
         for position in account.get("positions") or []:
@@ -604,6 +684,7 @@ def list_csv_brokers() -> PortfolioImportBrokerListResponse:
     summary="Parse and commit broker CSV with dedup",
 )
 def commit_csv_import(
+    request: Request,
     account_id: int = Form(...),
     broker: str = Form(..., description="Broker id: huatai/citic/cmb"),
     dry_run: bool = Form(False),
@@ -618,8 +699,11 @@ def commit_csv_import(
             broker=parsed["broker"],
             records=list(parsed.get("records", [])),
             dry_run=dry_run,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioImportCommitResponse(**result)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -633,13 +717,20 @@ def commit_csv_import(
     summary="Refresh FX cache online with stale fallback",
 )
 def refresh_fx_rates(
+    request: Request,
     account_id: Optional[int] = Query(None, description="Optional account id"),
     as_of: Optional[date] = Query(None, description="Rate date, default today"),
 ) -> PortfolioFxRefreshResponse:
     service = PortfolioService()
     try:
-        data = service.refresh_fx_rates(account_id=account_id, as_of=as_of)
+        data = service.refresh_fx_rates(
+            account_id=account_id,
+            as_of=as_of,
+            owner_id=get_request_resource_owner(request),
+        )
         return PortfolioFxRefreshResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -653,6 +744,7 @@ def refresh_fx_rates(
     summary="Get portfolio risk report",
 )
 def get_risk_report(
+    request: Request,
     account_id: Optional[int] = Query(None, description="Optional account id"),
     as_of: Optional[date] = Query(None, description="Risk report date, default today"),
     cost_method: str = Query("fifo", description="Cost method: fifo or avg"),
@@ -668,8 +760,11 @@ def get_risk_report(
             as_of=as_of,
             cost_method=cost_method,
             include_realtime=include_realtime,
+            owner_id=get_request_resource_owner(request),
         )
         return PortfolioRiskResponse(**data)
+    except PortfolioNotFoundError:
+        raise _not_found()
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:

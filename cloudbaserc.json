@@ -1,0 +1,6 @@
+{
+  "envId": "cloud1-d0g3somul9e05a201",
+  "cloudrun": {
+    "name": "daily-stock-analysis-api"
+  }
+}

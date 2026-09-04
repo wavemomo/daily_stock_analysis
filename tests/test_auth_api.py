@@ -68,12 +68,12 @@ class AuthApiTestCase(unittest.TestCase):
         return (values.get("ADMIN_AUTH_ENABLED") or "").strip().lower() in ("true", "1", "yes")
 
     @staticmethod
-    def _build_request(cookies=None):
+    def _build_request(cookies=None, host="127.0.0.1"):
         return SimpleNamespace(
             headers={},
             url=SimpleNamespace(scheme="http"),
             cookies=cookies or {},
-            client=SimpleNamespace(host="127.0.0.1"),
+            client=SimpleNamespace(host=host),
         )
 
     def test_auth_status_when_password_not_set(self) -> None:
@@ -102,6 +102,18 @@ class AuthApiTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn(b'"error":"password_mismatch"', response.body)
+
+    def test_login_rejects_remote_first_time_password_setup(self) -> None:
+        response = asyncio.run(
+            auth_endpoint.auth_login(
+                self._build_request(host="203.0.113.10"),
+                auth_endpoint.LoginRequest(password="attacker-pass", passwordConfirm="attacker-pass"),
+            )
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b'"error":"local_setup_required"', response.body)
+        self.assertFalse(auth.has_stored_password())
 
     def test_login_after_set_normal_login(self) -> None:
         first_response = asyncio.run(
@@ -293,7 +305,7 @@ class AuthApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_auth_settings_is_reachable_when_auth_disabled(self) -> None:
+    def test_auth_settings_is_reachable_from_loopback_when_auth_disabled(self) -> None:
         scope = {
             "type": "http",
             "method": "POST",
@@ -315,6 +327,50 @@ class AuthApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         call_next.assert_awaited_once()
+
+    def test_auth_settings_rejects_remote_bootstrap_when_auth_disabled(self) -> None:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/settings",
+            "headers": [(b"x-forwarded-for", b"127.0.0.1")],
+            "query_string": b"",
+            "scheme": "http",
+            "client": ("203.0.113.10", 1234),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        request = Request(scope)
+        middleware = AuthMiddleware(app=MagicMock())
+        call_next = AsyncMock(return_value=Response(status_code=200))
+
+        with patch("api.middlewares.auth.is_auth_enabled", return_value=False):
+            response = asyncio.run(middleware.dispatch(request, call_next))
+
+        self.assertEqual(response.status_code, 401)
+        call_next.assert_not_awaited()
+
+    def test_auth_settings_endpoint_rejects_remote_initialization(self) -> None:
+        self.env_path.write_text(
+            "STOCK_LIST=600519\nGEMINI_API_KEY=test\nADMIN_AUTH_ENABLED=false\n",
+            encoding="utf-8",
+        )
+        with patch.object(auth, "_is_auth_enabled_from_env", side_effect=self._read_auth_enabled_from_env):
+            auth.refresh_auth_state()
+            response = asyncio.run(
+                auth_endpoint.auth_update_settings(
+                    self._build_request(host="203.0.113.10"),
+                    auth_endpoint.AuthSettingsRequest(
+                        authEnabled=True,
+                        password="attacker-pass",
+                        passwordConfirm="attacker-pass",
+                    ),
+                )
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b'"error":"local_setup_required"', response.body)
+        self.assertFalse(auth.has_stored_password())
 
     def test_auth_settings_enable_sets_initial_password_and_logs_in(self) -> None:
         self.env_path.write_text(

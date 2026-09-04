@@ -186,8 +186,13 @@ class PortfolioImportService:
         broker: str,
         records: List[Dict[str, Any]],
         dry_run: bool = False,
+        owner_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         broker_norm = self._normalize_broker(broker)
+        self.portfolio_service._require_active_account(
+            account_id,
+            owner_id=owner_id,
+        )
 
         inserted_count = 0
         duplicate_count = 0
@@ -245,6 +250,7 @@ class PortfolioImportService:
                     trade_uid=trade_uid,
                     dedup_hash=dedup_hash_to_use,
                     note=(record.get("note") or "").strip() or f"csv_import:{broker_norm}",
+                    owner_id=owner_id,
                 )
                 inserted_count += 1
             except PortfolioConflictError:

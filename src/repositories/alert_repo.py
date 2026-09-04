@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, delete, desc, func, select
+from sqlalchemy import and_, delete, desc, func, or_, select
 
 from src.storage import (
     AlertCooldownRecord,
@@ -34,17 +34,25 @@ class AlertRepository:
             session.refresh(row)
             return row
 
-    def get_rule(self, rule_id: int) -> Optional[AlertRuleRecord]:
+    def get_rule(self, rule_id: int, *, user_id: Optional[int] = None) -> Optional[AlertRuleRecord]:
         with self.db.get_session() as session:
-            return session.execute(
-                select(AlertRuleRecord).where(AlertRuleRecord.id == rule_id).limit(1)
-            ).scalar_one_or_none()
+            query = select(AlertRuleRecord).where(AlertRuleRecord.id == rule_id)
+            if user_id is not None:
+                query = query.where(AlertRuleRecord.user_id == user_id)
+            return session.execute(query.limit(1)).scalar_one_or_none()
 
-    def update_rule(self, rule_id: int, fields: Dict[str, Any]) -> Optional[AlertRuleRecord]:
+    def update_rule(
+        self,
+        rule_id: int,
+        fields: Dict[str, Any],
+        *,
+        user_id: Optional[int] = None,
+    ) -> Optional[AlertRuleRecord]:
         with self.db.get_session() as session:
-            row = session.execute(
-                select(AlertRuleRecord).where(AlertRuleRecord.id == rule_id).limit(1)
-            ).scalar_one_or_none()
+            query = select(AlertRuleRecord).where(AlertRuleRecord.id == rule_id)
+            if user_id is not None:
+                query = query.where(AlertRuleRecord.user_id == user_id)
+            row = session.execute(query.limit(1)).scalar_one_or_none()
             if row is None:
                 return None
             for key, value in fields.items():
@@ -54,15 +62,19 @@ class AlertRepository:
             session.refresh(row)
             return row
 
-    def delete_rule(self, rule_id: int) -> bool:
+    def delete_rule(self, rule_id: int, *, user_id: Optional[int] = None) -> bool:
         with self.db.get_session() as session:
-            result = session.execute(delete(AlertRuleRecord).where(AlertRuleRecord.id == rule_id))
+            conditions = [AlertRuleRecord.id == rule_id]
+            if user_id is not None:
+                conditions.append(AlertRuleRecord.user_id == user_id)
+            result = session.execute(delete(AlertRuleRecord).where(and_(*conditions)))
             session.commit()
             return bool(result.rowcount)
 
     def list_rules(
         self,
         *,
+        user_id: Optional[int] = None,
         enabled: Optional[bool] = None,
         alert_type: Optional[str] = None,
         target_scope: Optional[str] = None,
@@ -72,6 +84,8 @@ class AlertRepository:
         page_size: int = 20,
     ) -> Tuple[List[AlertRuleRecord], int]:
         conditions = []
+        if user_id is not None:
+            conditions.append(AlertRuleRecord.user_id == user_id)
         if enabled is not None:
             conditions.append(AlertRuleRecord.enabled.is_(enabled))
         if alert_type:
@@ -106,7 +120,13 @@ class AlertRepository:
         with self.db.get_session() as session:
             rows = session.execute(
                 select(AlertRuleRecord)
-                .where(AlertRuleRecord.enabled.is_(True))
+                .where(
+                    AlertRuleRecord.enabled.is_(True),
+                    or_(
+                        AlertRuleRecord.user_id.is_not(None),
+                        AlertRuleRecord.owner_scope == "global",
+                    ),
+                )
                 .order_by(desc(AlertRuleRecord.updated_at), desc(AlertRuleRecord.id))
                 .limit(safe_limit)
             ).scalars().all()
@@ -266,6 +286,7 @@ class AlertRepository:
     def list_triggers(
         self,
         *,
+        user_id: Optional[int] = None,
         rule_id: Optional[int] = None,
         target: Optional[str] = None,
         status: Optional[str] = None,
@@ -273,6 +294,8 @@ class AlertRepository:
         page_size: int = 20,
     ) -> Tuple[List[AlertTriggerRecord], int]:
         conditions = []
+        if user_id is not None:
+            conditions.append(AlertRuleRecord.user_id == user_id)
         if rule_id is not None:
             conditions.append(AlertTriggerRecord.rule_id == rule_id)
         if target:
@@ -283,11 +306,20 @@ class AlertRepository:
         where_clause = and_(*conditions) if conditions else True
         offset = (page - 1) * page_size
         with self.db.get_session() as session:
-            total = session.execute(
-                select(func.count(AlertTriggerRecord.id)).select_from(AlertTriggerRecord).where(where_clause)
-            ).scalar() or 0
+            count_query = select(func.count(AlertTriggerRecord.id)).select_from(AlertTriggerRecord)
+            rows_query = select(AlertTriggerRecord)
+            if user_id is not None:
+                count_query = count_query.join(
+                    AlertRuleRecord,
+                    AlertTriggerRecord.rule_id == AlertRuleRecord.id,
+                )
+                rows_query = rows_query.join(
+                    AlertRuleRecord,
+                    AlertTriggerRecord.rule_id == AlertRuleRecord.id,
+                )
+            total = session.execute(count_query.where(where_clause)).scalar() or 0
             rows = session.execute(
-                select(AlertTriggerRecord)
+                rows_query
                 .where(where_clause)
                 .order_by(desc(AlertTriggerRecord.triggered_at), desc(AlertTriggerRecord.id))
                 .offset(offset)
@@ -298,6 +330,7 @@ class AlertRepository:
     def list_notifications(
         self,
         *,
+        user_id: Optional[int] = None,
         trigger_id: Optional[int] = None,
         channel: Optional[str] = None,
         success: Optional[bool] = None,
@@ -305,6 +338,8 @@ class AlertRepository:
         page_size: int = 20,
     ) -> Tuple[List[AlertNotificationRecord], int]:
         conditions = []
+        if user_id is not None:
+            conditions.append(AlertRuleRecord.user_id == user_id)
         if trigger_id is not None:
             conditions.append(AlertNotificationRecord.trigger_id == trigger_id)
         if channel:
@@ -315,13 +350,34 @@ class AlertRepository:
         where_clause = and_(*conditions) if conditions else True
         offset = (page - 1) * page_size
         with self.db.get_session() as session:
-            total = session.execute(
-                select(func.count(AlertNotificationRecord.id))
-                .select_from(AlertNotificationRecord)
-                .where(where_clause)
-            ).scalar() or 0
+            count_query = select(func.count(AlertNotificationRecord.id)).select_from(AlertNotificationRecord)
+            rows_query = select(AlertNotificationRecord)
+            if user_id is not None:
+                count_query = (
+                    count_query
+                    .join(
+                        AlertTriggerRecord,
+                        AlertNotificationRecord.trigger_id == AlertTriggerRecord.id,
+                    )
+                    .join(
+                        AlertRuleRecord,
+                        AlertTriggerRecord.rule_id == AlertRuleRecord.id,
+                    )
+                )
+                rows_query = (
+                    rows_query
+                    .join(
+                        AlertTriggerRecord,
+                        AlertNotificationRecord.trigger_id == AlertTriggerRecord.id,
+                    )
+                    .join(
+                        AlertRuleRecord,
+                        AlertTriggerRecord.rule_id == AlertRuleRecord.id,
+                    )
+                )
+            total = session.execute(count_query.where(where_clause)).scalar() or 0
             rows = session.execute(
-                select(AlertNotificationRecord)
+                rows_query
                 .where(where_clause)
                 .order_by(desc(AlertNotificationRecord.created_at), desc(AlertNotificationRecord.id))
                 .offset(offset)

@@ -39,6 +39,7 @@ from src.services.decision_signal_summary import (
 )
 from src.services.history_service import HistoryService
 from src.services.market_light_service import normalize_market_alert_region
+from src.services.rbac_service import RbacService
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class RuntimeAlertRule:
     cooldown_policy: Optional[Dict[str, Any]] = None
     effective_target: Optional[str] = None
     display_target: Optional[str] = None
+    owner_id: Optional[int] = None
+    external_notification_allowed: bool = True
 
 
 @dataclass
@@ -84,6 +87,7 @@ class AlertWorker:
         config_provider: Optional[Callable[[], Any]] = None,
         service: Optional[AlertService] = None,
         decision_signal_service: Optional[DecisionSignalService] = None,
+        rbac_service: Optional[RbacService] = None,
         notifier: Optional[Any] = None,
         now_provider: Optional[Callable[[], float]] = None,
         fingerprint_ttl_seconds: int = ALERT_WORKER_FINGERPRINT_TTL_SECONDS,
@@ -91,6 +95,7 @@ class AlertWorker:
         self.config_provider = config_provider or self._default_config_provider
         self.service = service or AlertService()
         self.decision_signal_service = decision_signal_service or DecisionSignalService()
+        self.rbac_service = rbac_service
         self.notifier = notifier
         self.now_provider = now_provider or time.time
         self.fingerprint_ttl_seconds = max(1, int(fingerprint_ttl_seconds))
@@ -103,6 +108,22 @@ class AlertWorker:
         from src.config import get_config
 
         return get_config()
+
+    def _external_notification_allowed(self, user_id: Optional[int]) -> bool:
+        """Fail closed for user-owned rules unless RBAC grants alerts.notify."""
+        if user_id is None:
+            return True
+        try:
+            if self.rbac_service is None:
+                self.rbac_service = RbacService()
+            return self.rbac_service.is_allowed(int(user_id), "alerts.notify")
+        except Exception as exc:
+            logger.warning(
+                "[AlertWorker] Failed to resolve alerts.notify for user %s; external notification denied: %s",
+                user_id,
+                self.service._sanitize_text(str(exc) or "RBAC lookup failed"),
+            )
+            return False
 
     def run_once(self) -> Dict[str, int]:
         """Run one alert worker cycle.
@@ -176,6 +197,13 @@ class AlertWorker:
             if record_status == "triggered":
                 stats["triggered"] += 1
                 if runtime_rule.source == "db":
+                    if not runtime_rule.external_notification_allowed:
+                        dispatch = self._notification_permission_denied_dispatch(runtime_rule)
+                        stats["notification_attempts"] += self._record_notification_attempts_safely(
+                            trigger_id,
+                            dispatch,
+                        )
+                        continue
                     cooldown_decision = self._check_db_cooldown(runtime_rule, trigger_id)
                     if cooldown_decision.suppressed:
                         stats["cooldown_suppressed"] += 1
@@ -207,6 +235,8 @@ class AlertWorker:
         for row in self.service.repo.list_enabled_rules(limit=ALERT_WORKER_RULE_LIMIT):
             try:
                 cooldown_policy = self.service._load_json(row.cooldown_policy, default=None)
+                owner_id = int(row.user_id) if row.user_id is not None else None
+                external_notification_allowed = self._external_notification_allowed(owner_id)
                 for payload in self.service.build_runtime_payloads(row, config=config, include_overflow_payload=False):
                     if len(runtime_rules) >= ALERT_WORKER_RULE_LIMIT:
                         logger.warning(
@@ -223,6 +253,8 @@ class AlertWorker:
                             cooldown_policy=cooldown_policy,
                             effective_target=payload.effective_target,
                             display_target=payload.display_target,
+                            owner_id=owner_id,
+                            external_notification_allowed=external_notification_allowed,
                         )
                     )
                     seen_keys.add(payload.key)
@@ -633,6 +665,29 @@ class AlertWorker:
     @staticmethod
     def _db_cooldown_fallback_key(rule_key: str) -> str:
         return f"db_cooldown:{rule_key}"
+
+    @staticmethod
+    def _notification_permission_denied_dispatch(
+        runtime_rule: RuntimeAlertRule,
+    ) -> "NotificationDispatchResult":
+        from src.notification import ChannelAttemptResult, NotificationDispatchResult
+
+        owner_label = str(runtime_rule.owner_id) if runtime_rule.owner_id is not None else "unknown"
+        return NotificationDispatchResult(
+            dispatched=False,
+            success=False,
+            status="permission_denied",
+            channel_results=[
+                ChannelAttemptResult(
+                    channel="__authorization__",
+                    success=False,
+                    error_code="permission_denied",
+                    retryable=False,
+                    diagnostics=f"alerts.notify is required for user {owner_label}",
+                )
+            ],
+            message="External alert notification denied by RBAC",
+        )
 
     def _send_notification(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any]) -> "NotificationDispatchResult":
         from src.notification import NotificationBuilder, NotificationService

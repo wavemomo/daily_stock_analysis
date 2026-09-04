@@ -337,9 +337,9 @@ sudo systemctl reload nginx
 ADMIN_AUTH_ENABLED=true
 ```
 
-重启服务后，第一次访问网页时会要求设置初始密码。设置完成后，每次打开设置页面都需要输入密码，可以防止 API Key 等敏感配置被他人看到。
+重启服务后需要设置初始密码。首次 Auth Settings/初始密码设置入口仅接受 direct ASGI client 为 loopback 的请求，不会采信 `X-Forwarded-For` 来获得本地资格；上面的 `TRUST_X_FORWARDED_FOR` 仅服务于登录限流等真实 IP 判断，不能把远程请求变成本地首次设置请求。远程部署请在服务主机本地完成、通过 SSH 隧道直连服务的 loopback 地址，或使用已有的 `python -m src.auth reset_password` CLI 设置/重置密码。设置完成后，每次打开设置页面都需要输入密码，可以防止 API Key 等敏感配置被他人看到。
 
-> 如果忘了密码，可以在服务器上执行：`python -m src.auth reset_password`
+> 如果忘了密码，也可以在服务器上执行：`python -m src.auth reset_password`
 
 ---
 

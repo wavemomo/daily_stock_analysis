@@ -237,6 +237,10 @@ def _load_runtime_scheduler_args() -> dict:
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
+    # 认证和权限表必须在服务接收请求前可用，避免 health 已成功而首个请求才失败。
+    from src.services.rbac_service import RbacService
+
+    RbacService()
     runtime_owns_schedule = os.getenv(CLI_SCHEDULER_OWNER_ENV, "").strip().lower() not in {
         "1",
         "true",
@@ -336,8 +340,8 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
             "- 历史记录：查询历史分析报告\n"
             "- 股票数据：获取行情数据\n\n"
             "## 认证方式\n"
-            "支持可选管理员认证：ADMIN_AUTH_ENABLED=true 时，除登录、状态、健康检查和 "
-            "OpenAPI 文档外，/api/v1/* 需要有效管理员会话 Cookie；关闭时不强制认证。"
+            "除登录、状态、健康检查和 OpenAPI 文档外，/api/v1/* 必须认证。"
+            "ADMIN_AUTH_ENABLED=true 时可使用管理员会话 Cookie；微信小程序使用 Bearer 会话并按 RBAC 权限授权。"
         ),
         version="1.0.0",
         lifespan=app_lifespan,

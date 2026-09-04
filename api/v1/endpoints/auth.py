@@ -21,6 +21,7 @@ from src.auth import (
     get_client_ip,
     has_stored_password,
     is_auth_enabled,
+    is_direct_loopback_request,
     is_password_changeable,
     is_password_set,
     record_login_failure,
@@ -211,6 +212,17 @@ async def auth_update_settings(request: Request, body: AuthSettingsRequest):
     current_enabled = is_auth_enabled()
     stored_password_exists = has_stored_password()
 
+    # 首次管理员初始化只能从服务进程看到的直连 loopback 发起。
+    # 不信任 X-Forwarded-For，避免公网请求伪造本地来源接管管理员账号。
+    if not current_enabled and not is_direct_loopback_request(request):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "local_setup_required",
+                "message": "首次管理员初始化仅允许从本机访问",
+            },
+        )
+
     password = (body.password or "").strip()
     confirm = (body.password_confirm or "").strip()
     current_password = (body.current_password or "").strip()
@@ -390,6 +402,15 @@ async def auth_login(request: Request, body: LoginRequest):
         )
 
     password_set = is_password_set()
+
+    if not password_set and not is_direct_loopback_request(request):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "local_setup_required",
+                "message": "首次管理员密码仅允许从本机设置",
+            },
+        )
 
     if not password_set:
         # First-time setup: require passwordConfirm

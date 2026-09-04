@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [改进] 小程序登录页在状态区下明确显示将使用或已使用微信登录，并说明一次性凭证由服务端完成身份验证
+- [文档] 更新小程序 RBAC 使用指南与接入说明，涵盖管理员页面、Bootstrap 自动回授语义、完整管理 API、数据库审计和微信登录安全边界
+- [新功能] 小程序新增仅管理员可见的权限管理页面，支持安全用户目录、角色替换、账号启停、自定义角色及权限配置和审计浏览
+- [新功能] 小程序 RBAC 管理端新增数据库持久化的用户状态、自定义角色、角色权限和审计记录 API，并保留最后管理员与当前操作者保护
+- [修复] RBAC 管理保护改为按有效 `rbac.manage` 权限而非系统 `admin` 角色名计算，覆盖自定义管理角色的自降权、停用和最后活跃管理者场景；Bootstrap 自动授予同步写入脱敏审计记录
+- [测试] 新增小程序 RBAC 管理 API 的 SQLite 集成测试，覆盖隐私字段、角色与账号状态生命周期、审计、Bootstrap 自动授予和有效管理权限保护
+- [新功能] 微信小程序登录后可由用户授权同步昵称和头像，并在“我的”页面展示或重新同步；微信展示资料不参与身份、权限或资源归属判断
+- [改进] 小程序头像上传改为完整解码、像素限制并重编码，公开头像仅允许 GET/HEAD 读取合法不透明文件名；资料引导的完成或跳过状态按用户独立保存
+- [文档] 明确小程序 `BACKEND_BASE_URL`、后端 `WEBUI_PORT`/`--port` 的配置位置及真机联调地址要求
+- [修复] 微信小程序持仓、告警与 Agent Chat 增加可信用户级资源隔离，跨用户详情、修改、删除、测试、导入、风险计算、会话读取及流取消统一隐藏为 404，legacy NULL 资源仅管理员全局范围可见
+- [改进] 收紧默认 member 权限并新增 operator 角色；外部通知发送拆分为 `agent.share`，普通业务路由继续执行 fail-closed 认证与授权
+- [修复] SQLite 启动迁移幂等补齐 `alert_rules.user_id` 及索引，保留历史行 NULL，并验证并发重复初始化与半迁移恢复
+- [测试] 新增告警、组合告警、持仓、Agent Chat 与 SQLite owner migration 的多用户隔离回归覆盖
+- [文档] 更新小程序角色矩阵、认证开关、个人资源边界、管理员兼容与 legacy 数据语义
+- [改进] 小程序告警与系统设置按 `/me.permissions` 区分 read/manage/notify，隐藏或只读无权限写操作并保留后端最终校验
+- [文档] 明确用户告警缺少 `alerts.notify` 时只评估记录不外发、legacy 空 owner 不进 worker，以及 Web 首次设密仅接受 direct ASGI loopback
+- [新功能] 新增可持久化微信小程序 RBAC，内置 member/admin 角色、稳定权限码、服务端授权管理接口及普通 v1 API 的 fail-closed 401/403 强制策略
+- [改进] 小程序新增冷启动登录入口、全局页面生命周期门禁、路由权限表、Mine 菜单显隐与 request/download/upload 统一 401/403 处理
+- [新功能] 新增微信小程序 `code2session` 登录、SQLite 用户与可撤销 Bearer 会话，并提供按用户隔离、每日唯一的“渡劫”心得 CRUD API
+- [文档] 新增微信小程序后端配置、认证边界与每日心得 API 接入说明
 - [修复] 将 litellm 依赖窗口上界收敛到 `<1.99.0`：1.99.0 起把 `prompt_cache_key` 透传给 OpenAI provider，破坏 provider 缓存测试对不透传行为的既有断言（CI backend-tests 3/3 与 backend-gate 失败）；保留历史最低版本与 `!=1.82.7`/`!=1.82.8` 事故排除，同时同步更新各 LLM 兼容文档中写死的依赖约束表述，避免文档与 requirements.txt 漂移
 
 - [新功能] 新增 `SEARXNG_TIMEOUT_SECONDS` 配置自建 SearXNG 单次搜索超时（默认 10 秒），已接线全部 SearchService 构造入口（含题材搜索子进程重建）与默认 GitHub Actions 工作流

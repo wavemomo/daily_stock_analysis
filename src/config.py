@@ -1300,6 +1300,44 @@ class Config:
     # Telegram 机器人 - 已有 telegram_bot_token, telegram_chat_id
     telegram_webhook_secret: Optional[str] = None   # Webhook 密钥
 
+    # === 微信小程序配置 ===
+    @property
+    def wechat_miniapp_app_id(self) -> str:
+        return (os.getenv('WECHAT_MINIAPP_APP_ID') or '').strip()
+
+    @property
+    def wechat_miniapp_app_secret(self) -> str:
+        return (os.getenv('WECHAT_MINIAPP_APP_SECRET') or '').strip()
+
+    @property
+    def wechat_miniapp_code2session_timeout_seconds(self) -> int:
+        return parse_env_int(
+            os.getenv('WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS'),
+            8,
+            field_name='WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS',
+            minimum=1,
+            maximum=30,
+        )
+
+    @property
+    def wechat_miniapp_session_ttl_hours(self) -> int:
+        return parse_env_int(
+            os.getenv('WECHAT_MINIAPP_SESSION_TTL_HOURS'),
+            720,
+            field_name='WECHAT_MINIAPP_SESSION_TTL_HOURS',
+            minimum=1,
+            maximum=8760,
+        )
+
+    @property
+    def rbac_bootstrap_admin_openids(self) -> frozenset[str]:
+        """仅用于幂等授予管理员角色；删除配置不会自动收权。"""
+        return frozenset(
+            item.strip()
+            for item in (os.getenv('RBAC_BOOTSTRAP_ADMIN_OPENIDS') or '').split(',')
+            if item.strip()
+        )
+
     # === 配置校验模式 ===
     # CONFIG_VALIDATE_MODE=warn (default): log all issues but always continue startup
     # CONFIG_VALIDATE_MODE=strict: exit(1) when any "error" severity issue is found

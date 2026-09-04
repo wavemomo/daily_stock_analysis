@@ -931,12 +931,150 @@ _LLM_PROMPT_CACHE_TELEMETRY_COLUMNS = {
 }
 
 
+class MiniappUserRecord(Base):
+    """微信小程序用户；openid 只在服务端用于唯一识别。"""
+
+    __tablename__ = 'miniapp_users'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    openid = Column(String(128), nullable=False, unique=True, index=True)
+    unionid = Column(String(128), nullable=True, unique=True, index=True)
+    nickname = Column(String(64), nullable=True)
+    avatar_url = Column(String(2048), nullable=True)
+    profile_updated_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    last_login_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+
+class MiniappSessionRecord(Base):
+    """小程序本地会话；仅保存随机 Bearer token 的 SHA-256 摘要。"""
+
+    __tablename__ = 'miniapp_sessions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_miniapp_session_user_expiry', 'user_id', 'expires_at'),
+    )
+
+
+class RbacRoleRecord(Base):
+    """可分配给小程序用户的 RBAC 角色。"""
+
+    __tablename__ = 'rbac_roles'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(64), nullable=False)
+    description = Column(String(255), nullable=False, default='')
+    is_system = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+
+class RbacPermissionRecord(Base):
+    """稳定的 domain.action 权限码。"""
+
+    __tablename__ = 'rbac_permissions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(96), nullable=False, unique=True, index=True)
+    group_code = Column(String(64), nullable=False, index=True)
+    description = Column(String(255), nullable=False, default='')
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+
+class RbacRolePermissionRecord(Base):
+    """角色与权限的多对多关联。"""
+
+    __tablename__ = 'rbac_role_permissions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    role_id = Column(Integer, ForeignKey('rbac_roles.id', ondelete='CASCADE'), nullable=False, index=True)
+    permission_id = Column(Integer, ForeignKey('rbac_permissions.id', ondelete='CASCADE'), nullable=False, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('role_id', 'permission_id', name='uix_rbac_role_permission'),
+    )
+
+
+class MiniappUserRoleRecord(Base):
+    """小程序用户与角色的多对多关联。"""
+
+    __tablename__ = 'miniapp_user_roles'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    role_id = Column(Integer, ForeignKey('rbac_roles.id', ondelete='CASCADE'), nullable=False, index=True)
+    assigned_by_user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='SET NULL'), nullable=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'role_id', name='uix_miniapp_user_role'),
+    )
+
+
+class RbacAuditEventRecord(Base):
+    """权限管理变更审计；仅保存角色、状态等非敏感管理元数据。"""
+
+    __tablename__ = 'rbac_audit_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action = Column(String(64), nullable=False, index=True)
+    target_type = Column(String(32), nullable=False, index=True)
+    target_id = Column(String(128), nullable=False, index=True)
+    actor_user_id = Column(
+        Integer,
+        ForeignKey('miniapp_users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    metadata_json = Column(Text, nullable=False, default='{}')
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_rbac_audit_target_created', 'target_type', 'target_id', 'created_at'),
+    )
+
+
+class DailyReflectionRecord(Base):
+    """“渡劫”每日心得；每个用户每天最多一条。"""
+
+    __tablename__ = 'daily_reflections'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    reflection_date = Column(Date, nullable=False, index=True)
+    title = Column(String(80), nullable=False, default='')
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'reflection_date', name='uix_daily_reflection_user_date'),
+        Index('ix_daily_reflection_user_date', 'user_id', 'reflection_date'),
+    )
+
+
 class AlertRuleRecord(Base):
     """Persisted alert rule managed through the Alert API."""
 
     __tablename__ = 'alert_rules'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # user_id identifies a miniapp owner. owner_scope distinguishes explicit
+    # administrator-global rules from pre-migration NULL rows, which must never
+    # silently expand across every tenant in the background worker.
+    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=True, index=True)
+    owner_scope = Column(String(16), nullable=True)
     name = Column(String(64), nullable=False)
     target_scope = Column(String(32), nullable=False, default='single_symbol', index=True)
     target = Column(String(64), nullable=False, index=True)
@@ -1379,6 +1517,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
             # 创建所有表
             Base.metadata.create_all(self._engine)
+            self._ensure_miniapp_user_profile_columns()
+            self._ensure_miniapp_resource_owner_columns()
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
             self._ensure_stock_daily_canonical_id()
@@ -1428,6 +1568,110 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             raise
         finally:
             session.close()
+
+    def _ensure_miniapp_user_profile_columns(self) -> None:
+        """Add optional display-profile fields to existing SQLite users."""
+        if not self._is_sqlite_engine:
+            return
+        table_name = MiniappUserRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        existing = {
+            column["name"] for column in inspector.get_columns(table_name)
+        }
+        expected = {
+            "nickname": "VARCHAR(64)",
+            "avatar_url": "VARCHAR(2048)",
+            "profile_updated_at": "DATETIME",
+        }
+        for column_name, column_type in expected.items():
+            if column_name in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+
+        verified_columns = {
+            column["name"]
+            for column in inspect(self._engine).get_columns(table_name)
+        }
+        missing = sorted(set(expected) - verified_columns)
+        if missing:
+            raise RuntimeError(
+                "miniapp user profile migration verification failed: "
+                f"missing={missing}"
+            )
+
+    def _ensure_miniapp_resource_owner_columns(self) -> None:
+        """Add nullable owner columns required to isolate existing SQLite data.
+
+        Existing operational rows deliberately remain unowned and unscoped
+        rather than being silently assigned to the first miniapp user or
+        promoted to an administrator-global worker rule. New miniapp resources
+        carry an authenticated user id; new administrator rules explicitly use
+        ``owner_scope=global``.
+        """
+        if not self._is_sqlite_engine:
+            return
+        table_name = AlertRuleRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if "user_id" not in columns:
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN user_id INTEGER"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, "user_id"):
+                    raise
+
+        if "owner_scope" not in columns:
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN owner_scope VARCHAR(16)"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, "owner_scope"):
+                    raise
+
+        index_name = "ix_alert_rule_user_id"
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} (user_id)"
+            )
+
+        verified_inspector = inspect(self._engine)
+        verified_columns = {
+            column["name"] for column in verified_inspector.get_columns(table_name)
+        }
+        verified_indexes = {
+            index["name"]: index["column_names"]
+            for index in verified_inspector.get_indexes(table_name)
+        }
+        if (
+            "user_id" not in verified_columns
+            or "owner_scope" not in verified_columns
+            or verified_indexes.get(index_name) != ["user_id"]
+        ):
+            raise RuntimeError(
+                "miniapp resource owner migration verification failed: "
+                f"columns={sorted(verified_columns)} "
+                f"index={verified_indexes.get(index_name)}"
+            )
 
     def _ensure_decision_signal_profile_schema(self) -> None:
         """Add and backfill nullable decision_profile for existing SQLite DBs."""

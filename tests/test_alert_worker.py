@@ -26,7 +26,8 @@ from src.services.alert_indicators import (
 from src.services.alert_service import AlertService
 from src.services.alert_worker import AlertWorker
 from src.services.decision_signal_service import DecisionSignalService
-from src.storage import DatabaseManager
+from src.services.rbac_service import ROLES, RbacService
+from src.storage import DatabaseManager, MiniappUserRecord
 
 
 class AlertIndicatorHelperTestCase(unittest.TestCase):
@@ -271,6 +272,14 @@ class AlertWorkerTestCase(unittest.TestCase):
         }
         payload.update(overrides)
         return self.service.create_rule(payload)
+
+    def _create_user(self, openid: str = "alert-worker-user") -> int:
+        with self.service.repo.db.get_session() as session:
+            user = MiniappUserRecord(openid=openid)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            return int(user.id)
 
     def _triggers(self, **filters) -> list[dict]:
         return self.service.list_triggers(page_size=100, **filters)["items"]
@@ -648,6 +657,116 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(len(triggers), 2)
         self.assertTrue(all(item["rule_id"] is None for item in triggers))
         self.assertTrue(all(item["data_timestamp"] is None for item in triggers))
+        notifier.send_with_results.assert_called_once()
+
+    def test_legacy_unscoped_db_rule_is_not_loaded_by_worker(self) -> None:
+        fields = self.service._normalize_rule_payload({
+            "name": "Legacy unscoped rule",
+            "target_scope": "single_symbol",
+            "target": "600519",
+            "alert_type": "price_cross",
+            "parameters": {"direction": "above", "price": 1800},
+            "severity": "warning",
+            "enabled": True,
+        })
+        legacy_row = self.service.repo.create_rule(fields)
+        self.assertIsNone(legacy_row.user_id)
+        self.assertIsNone(legacy_row.owner_scope)
+        notifier = self._notifier()
+        worker = AlertWorker(
+            config_provider=lambda: self._config(),
+            service=self.service,
+            notifier=notifier,
+        )
+
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ) as quote:
+            stats = worker.run_once()
+
+        self.assertEqual(stats["loaded"], 0)
+        self.assertEqual(stats["evaluated"], 0)
+        self.assertEqual(self._triggers(), [])
+        quote.assert_not_awaited()
+        notifier.send_with_results.assert_not_called()
+
+    def test_user_rule_without_alerts_notify_records_denial_without_dispatch(self) -> None:
+        self.assertNotIn("alerts.notify", ROLES["member"]["permissions"])
+        self.assertIn("alerts.notify", ROLES["operator"]["permissions"])
+        self.assertIn("alerts.notify", ROLES["admin"]["permissions"])
+        user_id = self._create_user()
+        rule = self.service.create_rule(
+            {
+                "name": "Member-owned alert",
+                "target_scope": "single_symbol",
+                "target": "600519",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 1800},
+                "severity": "warning",
+                "enabled": True,
+            },
+            user_id=user_id,
+        )
+        notifier = self._notifier()
+        rbac_service = RbacService()
+        rbac_service.repository.ensure_role(user_id, "member")
+        self.assertFalse(rbac_service.is_allowed(user_id, "alerts.notify"))
+        worker = AlertWorker(
+            config_provider=lambda: self._config(),
+            service=self.service,
+            notifier=notifier,
+        )
+
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            stats = worker.run_once()
+
+        self.assertEqual(stats["triggered"], 1)
+        self.assertEqual(stats["notified"], 0)
+        self.assertEqual(stats["notification_attempts"], 1)
+        notifier.send_with_results.assert_not_called()
+        notifications = self._notifications(user_id=user_id)
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["trigger_id"], self._triggers(rule_id=rule["id"])[0]["id"])
+        self.assertEqual(notifications[0]["channel"], "__authorization__")
+        self.assertEqual(notifications[0]["error_code"], "permission_denied")
+        self.assertFalse(notifications[0]["retryable"])
+
+    def test_user_rule_with_alerts_notify_can_dispatch(self) -> None:
+        user_id = self._create_user("alert-worker-operator")
+        self.service.create_rule(
+            {
+                "name": "Operator-owned alert",
+                "target_scope": "single_symbol",
+                "target": "600519",
+                "alert_type": "price_cross",
+                "parameters": {"direction": "above", "price": 1800},
+                "severity": "warning",
+                "enabled": True,
+            },
+            user_id=user_id,
+        )
+        notifier = self._notifier()
+        rbac_service = RbacService()
+        rbac_service.repository.ensure_role(user_id, "operator")
+        self.assertTrue(rbac_service.is_allowed(user_id, "alerts.notify"))
+        worker = AlertWorker(
+            config_provider=lambda: self._config(),
+            service=self.service,
+            notifier=notifier,
+        )
+
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            stats = worker.run_once()
+
+        self.assertEqual(stats["triggered"], 1)
+        self.assertEqual(stats["notified"], 1)
         notifier.send_with_results.assert_called_once()
 
     def test_legacy_json_parse_failure_does_not_crash_or_block_persisted_rules(self) -> None:

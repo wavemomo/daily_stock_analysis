@@ -50,7 +50,7 @@ class PortfolioApiTestCase(unittest.TestCase):
                 [
                     "STOCK_LIST=600519",
                     "GEMINI_API_KEY=test",
-                    "ADMIN_AUTH_ENABLED=false",
+                    "ADMIN_AUTH_ENABLED=true",
                     f"DATABASE_PATH={self.db_path}",
                 ]
             )
@@ -64,6 +64,7 @@ class PortfolioApiTestCase(unittest.TestCase):
         DatabaseManager.reset_instance()
         app = create_app(static_dir=self.data_dir / "empty-static")
         self.client = TestClient(app)
+        self.client.cookies.set("dsa_session", auth.create_session())
         self.db = DatabaseManager.get_instance()
 
     def tearDown(self) -> None:
@@ -298,8 +299,8 @@ class PortfolioApiTestCase(unittest.TestCase):
             "/api/v1/portfolio/snapshot",
             params={"account_id": account_id, "as_of": "2026-01-03"},
         )
-        self.assertEqual(snapshot_resp.status_code, 400)
-        self.assertEqual(snapshot_resp.json()["error"], "validation_error")
+        self.assertEqual(snapshot_resp.status_code, 404)
+        self.assertEqual(snapshot_resp.json()["error"], "not_found")
 
     def test_event_lists_hide_archived_account_rows_by_default(self) -> None:
         create_resp = self.client.post(

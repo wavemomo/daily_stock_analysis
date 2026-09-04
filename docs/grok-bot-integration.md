@@ -79,7 +79,7 @@ Grok Bot Skill 正文见 [`docs/examples/grok_bot/SKILL.md`](examples/grok_bot/S
 
 ## 认证
 
-默认 DSA API 无需认证。若 `ADMIN_AUTH_ENABLED=true`，当前只支持登录后的 Cookie，**不支持 Bearer Token**。Grok Bot 若只能带 `Authorization: Bearer`，先保持 API 不鉴权并限制监听网段，或在反代层做独立鉴权；不要把 `XAI_API_KEY` 当成 DSA API 的鉴权密钥。
+普通 `/api/v1/*` 业务 API 现在始终要求认证。Grok Bot 集成应启用 `ADMIN_AUTH_ENABLED=true`，完成管理员登录并维持会话 Cookie；微信小程序 Bearer 仅签发给微信用户且受 RBAC 限制，不能使用 `XAI_API_KEY` 作为 DSA API 鉴权密钥。若 Bot 只能携带自定义 Bearer 而不能维持 Cookie，则不能直接调用这些业务 API，需要由受控网关完成会话集成。
 
 ## 明确不做的事
 

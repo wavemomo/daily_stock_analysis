@@ -6,8 +6,9 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from api.deps import get_request_resource_owner
 from api.v1.schemas.alerts import (
     AlertDeleteResponse,
     AlertNotificationListResponse,
@@ -53,16 +54,22 @@ def _internal_error(message: str, exc: Exception) -> HTTPException:
     )
 
 
+def _request_user_id(request: Request) -> Optional[int]:
+    owner = get_request_resource_owner(request)
+    return int(owner) if owner is not None else None
+
+
 @router.post(
     "/rules",
     response_model=AlertRuleItem,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Create alert rule",
 )
-def create_rule(request: AlertRuleCreateRequest) -> AlertRuleItem:
+def create_rule(request: Request, payload: AlertRuleCreateRequest) -> AlertRuleItem:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        return AlertRuleItem(**service.create_rule(request.model_dump()))
+        return AlertRuleItem(**service.create_rule(payload.model_dump(), user_id=user_id))
     except UnsupportedAlertTypeError as exc:
         raise _bad_request(exc, error=exc.error_code)
     except AlertServiceError as exc:
@@ -78,6 +85,7 @@ def create_rule(request: AlertRuleCreateRequest) -> AlertRuleItem:
     summary="List alert rules",
 )
 def list_rules(
+    request: Request,
     enabled: Optional[bool] = Query(None, description="Optional enabled filter"),
     alert_type: Optional[str] = Query(None, description="Optional alert type filter"),
     target_scope: Optional[str] = Query(None, description="Optional target scope filter"),
@@ -86,10 +94,12 @@ def list_rules(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> AlertRuleListResponse:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
         return AlertRuleListResponse(
             **service.list_rules(
+                user_id=user_id,
                 enabled=enabled,
                 alert_type=alert_type,
                 target_scope=target_scope,
@@ -109,10 +119,11 @@ def list_rules(
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Get alert rule",
 )
-def get_rule(rule_id: int) -> AlertRuleItem:
+def get_rule(request: Request, rule_id: int) -> AlertRuleItem:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        return AlertRuleItem(**service.get_rule(rule_id))
+        return AlertRuleItem(**service.get_rule(rule_id, user_id=user_id))
     except AlertNotFoundError as exc:
         raise _not_found(exc)
     except Exception as exc:
@@ -125,11 +136,12 @@ def get_rule(rule_id: int) -> AlertRuleItem:
     responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Update alert rule",
 )
-def update_rule(rule_id: int, request: AlertRuleUpdateRequest) -> AlertRuleItem:
+def update_rule(request: Request, rule_id: int, payload: AlertRuleUpdateRequest) -> AlertRuleItem:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        payload = request.model_dump(exclude_unset=True)
-        return AlertRuleItem(**service.update_rule(rule_id, payload))
+        fields = payload.model_dump(exclude_unset=True)
+        return AlertRuleItem(**service.update_rule(rule_id, fields, user_id=user_id))
     except AlertNotFoundError as exc:
         raise _not_found(exc)
     except UnsupportedAlertTypeError as exc:
@@ -146,10 +158,11 @@ def update_rule(rule_id: int, request: AlertRuleUpdateRequest) -> AlertRuleItem:
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Delete alert rule",
 )
-def delete_rule(rule_id: int) -> AlertDeleteResponse:
+def delete_rule(request: Request, rule_id: int) -> AlertDeleteResponse:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        if not service.delete_rule(rule_id):
+        if not service.delete_rule(rule_id, user_id=user_id):
             raise AlertNotFoundError(f"Alert rule not found: {rule_id}")
         return AlertDeleteResponse(deleted=1)
     except AlertNotFoundError as exc:
@@ -164,10 +177,11 @@ def delete_rule(rule_id: int) -> AlertDeleteResponse:
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Enable alert rule",
 )
-def enable_rule(rule_id: int) -> AlertRuleItem:
+def enable_rule(request: Request, rule_id: int) -> AlertRuleItem:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        return AlertRuleItem(**service.enable_rule(rule_id, True))
+        return AlertRuleItem(**service.enable_rule(rule_id, True, user_id=user_id))
     except AlertNotFoundError as exc:
         raise _not_found(exc)
     except Exception as exc:
@@ -180,10 +194,11 @@ def enable_rule(rule_id: int) -> AlertRuleItem:
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Disable alert rule",
 )
-def disable_rule(rule_id: int) -> AlertRuleItem:
+def disable_rule(request: Request, rule_id: int) -> AlertRuleItem:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        return AlertRuleItem(**service.enable_rule(rule_id, False))
+        return AlertRuleItem(**service.enable_rule(rule_id, False, user_id=user_id))
     except AlertNotFoundError as exc:
         raise _not_found(exc)
     except Exception as exc:
@@ -196,10 +211,11 @@ def disable_rule(rule_id: int) -> AlertRuleItem:
     responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     summary="Dry-run alert rule",
 )
-def test_rule(rule_id: int) -> AlertRuleTestResponse:
+def test_rule(request: Request, rule_id: int) -> AlertRuleTestResponse:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
-        return AlertRuleTestResponse(**service.test_rule(rule_id))
+        return AlertRuleTestResponse(**service.test_rule(rule_id, user_id=user_id))
     except AlertNotFoundError as exc:
         raise _not_found(exc)
     except Exception as exc:
@@ -213,16 +229,19 @@ def test_rule(rule_id: int) -> AlertRuleTestResponse:
     summary="List alert trigger history",
 )
 def list_triggers(
+    request: Request,
     rule_id: Optional[int] = Query(None, description="Optional rule id filter"),
     target: Optional[str] = Query(None, description="Optional target filter"),
     status: Optional[str] = Query(None, description="Optional status filter"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> AlertTriggerListResponse:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
         return AlertTriggerListResponse(
             **service.list_triggers(
+                user_id=user_id,
                 rule_id=rule_id,
                 target=target,
                 status=status,
@@ -241,16 +260,19 @@ def list_triggers(
     summary="List alert notification attempts",
 )
 def list_notifications(
+    request: Request,
     trigger_id: Optional[int] = Query(None, description="Optional trigger id filter"),
     channel: Optional[str] = Query(None, description="Optional channel filter"),
     success: Optional[bool] = Query(None, description="Optional success filter"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> AlertNotificationListResponse:
+    user_id = _request_user_id(request)
     service = AlertService()
     try:
         return AlertNotificationListResponse(
             **service.list_notifications(
+                user_id=user_id,
                 trigger_id=trigger_id,
                 channel=channel,
                 success=success,

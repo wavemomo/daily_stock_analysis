@@ -29,20 +29,25 @@ class FakePortfolioService:
     def __init__(self, *, snapshot=None, accounts=None):
         self.snapshot = snapshot or {}
         self.accounts = accounts or []
+        self.snapshot_calls = []
+        self.list_calls = []
 
-    def get_portfolio_snapshot(self, **_kwargs):
+    def get_portfolio_snapshot(self, **kwargs):
+        self.snapshot_calls.append(kwargs)
         return self.snapshot
 
-    def list_accounts(self, include_inactive=False):
+    def list_accounts(self, include_inactive=False, owner_id=None):
+        self.list_calls.append({"include_inactive": include_inactive, "owner_id": owner_id})
         return self.accounts
 
 
-def _risk_rule(alert_type: str, *, target="1", parameters=None) -> PortfolioRiskAlert:
+def _risk_rule(alert_type: str, *, target="1", parameters=None, owner_id=None) -> PortfolioRiskAlert:
     return PortfolioRiskAlert(
         target_scope="portfolio_account",
         target=target,
         alert_type=alert_type,
         parameters=parameters or {},
+        owner_id=owner_id,
         metadata={"persisted_rule_id": 7, "effective_target": f"account:{target}"},
     )
 
@@ -117,15 +122,20 @@ class PortfolioAlertsTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["as_of"], "2026-05-20")
         self.assertEqual(diagnostics["top_affected_symbols"], ["AAPL", "MSFT"])
 
-    def test_concentration_uses_top_weight_pct(self) -> None:
+    def test_concentration_uses_top_weight_pct_and_owner_scope(self) -> None:
+        risk_service = FakeRiskService(_risk_report())
         result = evaluate_portfolio_risk_alert(
-            _risk_rule("portfolio_concentration"),
-            risk_service=FakeRiskService(_risk_report()),
+            _risk_rule("portfolio_concentration", owner_id="42"),
+            risk_service=risk_service,
         )
 
         self.assertTrue(result["triggered"])
         self.assertEqual(result["observed_value"], 42.5)
         self.assertEqual(result["threshold"], 35.0)
+        self.assertEqual(
+            risk_service.calls,
+            [{"account_id": 1, "cost_method": "fifo", "owner_id": "42"}],
+        )
 
     def test_drawdown_uses_risk_report_alert_and_max_drawdown(self) -> None:
         result = evaluate_portfolio_risk_alert(
@@ -155,13 +165,18 @@ class PortfolioAlertsTestCase(unittest.TestCase):
                 }
             ],
         }
+        portfolio_service = FakePortfolioService(snapshot=snapshot)
         result = evaluate_portfolio_risk_alert(
-            _risk_rule("portfolio_price_stale", target="3"),
-            portfolio_service=FakePortfolioService(snapshot=snapshot),
+            _risk_rule("portfolio_price_stale", target="3", owner_id="42"),
+            portfolio_service=portfolio_service,
         )
 
         self.assertTrue(result["triggered"])
         self.assertEqual(result["observed_value"], 2.0)
+        self.assertEqual(
+            portfolio_service.snapshot_calls,
+            [{"account_id": 3, "cost_method": "fifo", "owner_id": "42"}],
+        )
         diagnostics = json.loads(result["diagnostics"])
         self.assertEqual(diagnostics["account_id"], 3)
         self.assertTrue(diagnostics["price_stale"])
@@ -176,15 +191,21 @@ class PortfolioAlertsTestCase(unittest.TestCase):
             ]
         }
 
+        portfolio_service = FakePortfolioService(snapshot=snapshot)
         targets, overflow = expand_symbol_targets(
             target_scope="portfolio_holdings",
             target="all",
             config=None,
-            portfolio_service=FakePortfolioService(snapshot=snapshot),
+            portfolio_service=portfolio_service,
+            owner_id="42",
         )
 
         self.assertEqual([item.symbol for item in targets], ["AAPL", "HK00700"])
         self.assertEqual(overflow, 0)
+        self.assertEqual(
+            portfolio_service.snapshot_calls,
+            [{"account_id": None, "cost_method": "fifo", "owner_id": "42"}],
+        )
 
     def test_portfolio_holdings_expansion_preserves_exchange_identity_and_dedupes_equivalent_formats(self) -> None:
         snapshot = {

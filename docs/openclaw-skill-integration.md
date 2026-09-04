@@ -180,4 +180,4 @@ curl -X POST {DSA_BASE_URL}/api/v1/agent/chat \
 
 ## 认证说明
 
-默认情况下 DSA API 无需认证。若在 `.env` 中启用了 `ADMIN_AUTH_ENABLED=true`，则需在 Skill 调用时携带登录后获得的 Cookie，具体方式取决于 openclaw 的 HTTP 工具能力（当前 API 仅支持 Cookie 认证，不支持 Bearer Token）。
+普通 `/api/v1/*` 业务 API 现在始终要求认证。OpenClaw 应启用 `ADMIN_AUTH_ENABLED=true`，先调用管理员登录接口并在后续请求携带会话 Cookie；微信小程序 Bearer 仅签发给微信用户且受 RBAC 限制，不能用 `XAI_API_KEY` 或其他第三方密钥替代。若 OpenClaw 的 HTTP 工具无法维持 Cookie，会无法直接调用这些业务 API，需要在受控网关中完成管理员会话集成。

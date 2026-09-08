@@ -4,8 +4,29 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from src.services.agent_chat_session_service import AgentChatSessionService
 from src.storage import DatabaseManager
+
+
+@pytest.fixture(autouse=True)
+def _isolated_database_manager():
+    """Give every test a fresh in-memory database.
+
+    ``DatabaseManager`` is a singleton whose ``__init__`` short-circuits once
+    ``_initialized`` is set, so ``DatabaseManager(db_url="sqlite:///:memory:")``
+    silently reuses whatever instance a previous test left behind. Without an
+    explicit reset these tests pass in isolation but inherit another suite's
+    persisted conversation state under a full-suite run (e.g.
+    ``get_conversation_session_selected_skill_ids('legacy-session')`` no longer
+    returns ``None``). Resetting around each test restores isolation.
+    """
+    DatabaseManager.reset_instance()
+    try:
+        yield
+    finally:
+        DatabaseManager.reset_instance()
 
 
 def test_skill_selection_distinguishes_inherit_clear_and_explicit() -> None:

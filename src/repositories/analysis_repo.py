@@ -1,130 +1,170 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-分析历史数据访问层
-===================================
+"""Owner-bound persistence facade for analysis histories and snapshots."""
 
-职责：
-1. 封装分析历史数据的数据库操作
-2. 提供 CRUD 接口
-"""
+from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from src.storage import DatabaseManager, AnalysisHistory
+from src.analysis_ownership import AnalysisOwner
+from src.storage import AnalysisHistory, DatabaseManager
 
 logger = logging.getLogger(__name__)
 
 
 class AnalysisRepository:
+    """Expose analysis persistence through an optional trusted owner boundary.
+
+    An unbound repository is retained solely for established CLI/direct-call
+    compatibility. User-facing application paths bind a validated
+    :class:`AnalysisOwner` at composition time, so callers cannot accidentally
+    mix a read owner with a different write owner.
     """
-    分析历史数据访问层
-    
-    封装 AnalysisHistory 表的数据库操作
-    """
-    
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
-        """
-        初始化数据访问层
-        
-        Args:
-            db_manager: 数据库管理器（可选，默认使用单例）
-        """
+
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> None:
         self.db = db_manager or DatabaseManager.get_instance()
-    
+        self.owner = owner
+
+    def _owner_kwargs(self) -> Dict[str, Any]:
+        return dict(self.owner.storage_kwargs) if self.owner is not None else {}
+
     def get_by_query_id(self, query_id: str) -> Optional[AnalysisHistory]:
-        """
-        根据 query_id 获取分析记录
-        
-        Args:
-            query_id: 查询 ID
-            
-        Returns:
-            AnalysisHistory 对象，不存在返回 None
-        """
         try:
-            records = self.db.get_analysis_history(query_id=query_id, limit=1)
+            records = self.db.get_analysis_history(
+                query_id=query_id,
+                limit=1,
+                **self._owner_kwargs(),
+            )
             return records[0] if records else None
-        except Exception as e:
-            logger.error(f"查询分析记录失败: {e}")
+        except Exception as exc:
+            logger.error("查询分析记录失败: %s", exc)
             return None
-    
+
+    def get_latest_by_query_id(
+        self,
+        query_id: str,
+        *,
+        code: Optional[str] = None,
+        report_type: Optional[str] = None,
+    ) -> Optional[AnalysisHistory]:
+        try:
+            return self.db.get_latest_analysis_by_query_id(
+                query_id,
+                code=code,
+                report_type=report_type,
+                **self._owner_kwargs(),
+            )
+        except Exception as exc:
+            logger.error("查询最新分析记录失败: %s", exc)
+            return None
+
+    def get_by_id(self, record_id: int) -> Optional[AnalysisHistory]:
+        try:
+            return self.db.get_analysis_history_by_id(
+                record_id,
+                **self._owner_kwargs(),
+            )
+        except Exception as exc:
+            logger.error("按 ID 查询分析记录失败: %s", exc)
+            return None
+
     def get_list(
         self,
         code: Optional[str] = None,
         days: int = 30,
-        limit: int = 50
+        limit: int = 50,
     ) -> List[AnalysisHistory]:
-        """
-        获取分析记录列表
-        
-        Args:
-            code: 股票代码筛选
-            days: 时间范围（天）
-            limit: 返回数量限制
-            
-        Returns:
-            AnalysisHistory 对象列表
-        """
         try:
             return self.db.get_analysis_history(
                 code=code,
                 days=days,
-                limit=limit
+                limit=limit,
+                **self._owner_kwargs(),
             )
-        except Exception as e:
-            logger.error(f"获取分析列表失败: {e}")
+        except Exception as exc:
+            logger.error("获取分析列表失败: %s", exc)
             return []
-    
+
     def save(
         self,
         result: Any,
         query_id: str,
         report_type: str,
         news_content: Optional[str] = None,
-        context_snapshot: Optional[Dict[str, Any]] = None
+        context_snapshot: Optional[Dict[str, Any]] = None,
+        *,
+        save_snapshot: bool = True,
     ) -> int:
-        """
-        保存分析结果
-        
-        Args:
-            result: 分析结果对象
-            query_id: 查询 ID
-            report_type: 报告类型
-            news_content: 新闻内容
-            context_snapshot: 上下文快照
-            
-        Returns:
-            新保存的 AnalysisHistory.id；保存失败返回 0。
-        """
         try:
             return self.db.save_analysis_history(
                 result=result,
                 query_id=query_id,
                 report_type=report_type,
                 news_content=news_content,
-                context_snapshot=context_snapshot
+                context_snapshot=context_snapshot,
+                save_snapshot=save_snapshot,
+                **self._owner_kwargs(),
             )
-        except Exception as e:
-            logger.error(f"保存分析结果失败: {e}")
+        except Exception as exc:
+            logger.error("保存分析结果失败: %s", exc)
             return 0
-    
+
+    def update_diagnostics(
+        self,
+        *,
+        query_id: str,
+        code: Optional[str] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        notification_runs: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        return self.db.update_analysis_history_diagnostics(
+            query_id=query_id,
+            code=code,
+            diagnostics=diagnostics,
+            notification_runs=notification_runs,
+            **self._owner_kwargs(),
+        )
+
+    def delete_records(self, record_ids: List[int]) -> int:
+        return self.db.delete_analysis_history_records(
+            record_ids,
+            **self._owner_kwargs(),
+        )
+
+    def save_fundamental_snapshot(
+        self,
+        *,
+        query_id: str,
+        code: str,
+        payload: Dict[str, Any],
+        source_chain: Optional[Any] = None,
+        coverage: Optional[Any] = None,
+    ) -> int:
+        return self.db.save_fundamental_snapshot(
+            query_id=query_id,
+            code=code,
+            payload=payload,
+            source_chain=source_chain,
+            coverage=coverage,
+            **self._owner_kwargs(),
+        )
+
+    def get_latest_fundamental_snapshot(
+        self,
+        *,
+        query_id: str,
+        code: str,
+    ) -> Optional[Dict[str, Any]]:
+        return self.db.get_latest_fundamental_snapshot(
+            query_id=query_id,
+            code=code,
+            **self._owner_kwargs(),
+        )
+
     def count_by_code(self, code: str, days: int = 30) -> int:
-        """
-        统计指定股票的分析记录数
-        
-        Args:
-            code: 股票代码
-            days: 时间范围（天）
-            
-        Returns:
-            记录数量
-        """
-        try:
-            records = self.db.get_analysis_history(code=code, days=days, limit=1000)
-            return len(records)
-        except Exception as e:
-            logger.error(f"统计分析记录失败: {e}")
-            return 0
+        return len(self.get_list(code=code, days=days, limit=1000))

@@ -1,77 +1,114 @@
 # 微信小程序接入
 
-`upupup/` 小程序通过 `/api/v1/miniapp/*` 使用独立的微信用户身份，不复用 Web 管理后台的密码 Cookie。
+`upupup/` 小程序与 Web 共享同一个 canonical business user、RBAC、个人资源 owner scope 和服务端功能额度。小程序通过微信 `wx.login`/`code2session` 建立 Bearer session，并仅访问 `/api/v1/miniapp/*`；Web 仅通过微信开放平台网站应用扫码 OAuth 建立 HttpOnly `dsa_user_session` Cookie。两类会话不可互换：小程序路径严格不接收 Web Cookie；通用 `/api/v1/*` 由路由 RBAC policy 接受其中一种合法 principal，若同时携带有效 Web Cookie 与 Bearer token，返回 `400 authentication_conflict`。
+
+管理能力由权限码判定，例如 `rbac.manage`。`admin` 只是 RBAC 角色：它不是独立登录域，也不绕过个人资源的 owner scope。
 
 ## 后端配置
 
-在后端 `.env` 中配置：
+在后端部署环境中配置：
 
 ```dotenv
-WECHAT_MINIAPP_APP_ID=wx...
-WECHAT_MINIAPP_APP_SECRET=...
+WECHAT_OPEN_WEB_APP_ID=
+WECHAT_OPEN_WEB_APP_SECRET=
+WECHAT_OPEN_WEB_REDIRECT_URI=https://example.com/api/v1/web-auth/wechat/callback
+WECHAT_OPEN_WEB_STATE_TTL_SECONDS=300
+WEB_USER_SESSION_TTL_SECONDS=604800
+WECHAT_MINIAPP_APP_ID=
+WECHAT_MINIAPP_APP_SECRET=
 WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS=8
 WECHAT_MINIAPP_SESSION_TTL_HOURS=720
-RBAC_BOOTSTRAP_ADMIN_OPENIDS=openid-a,openid-b
+CORS_ORIGINS=https://example.com
 ```
 
-`APP_SECRET` 只能保存在后端，不能写入小程序源码。小程序调用 `wx.login` 获取一次性 code，后端使用微信 `jscode2session` 换取 `openid`/`unionid`，随后在 SQLite 中创建或更新用户，并签发随机 Bearer 会话。数据库只保存会话令牌的 SHA-256 摘要，不保存原始令牌，也不持久化微信 `session_key`。`openid` 是服务端身份和 owner 绑定依据；昵称、头像仅是可选展示资料，不参与身份识别、RBAC 或资源归属。
+`WECHAT_OPEN_WEB_REDIRECT_URI` 必须是已在微信开放平台登记的公开 HTTPS 回调地址；`CORS_ORIGINS` 只控制浏览器 API Origin，不能替代 OAuth 回调配置。微信 AppSecret 只能保存在后端部署环境，不能进入小程序源码、Web 构建、日志或错误响应。只有在单层且完全可信的反向代理拓扑中才设置 `TRUST_X_FORWARDED_FOR=true`。
 
-微信隐私规则不允许在 `onLaunch`/`onLoad` 中静默读取昵称和头像。首次身份登录仍会自动完成；若用户资料为空且该设备上的当前用户尚未完成或跳过资料引导，登录页会在身份验证后显示微信官方头像昵称填写能力：`button open-type="chooseAvatar"` 选择头像、`input type="nickname"` 填写或使用微信昵称，也可跳过。完成或跳过状态按用户 ID 保存在当前设备，之后可在“我的 → 更新微信资料”重新填写。头像临时文件通过认证上传端点保存到 SQLite 数据文件同目录的 `miniapp_avatars/`；API 只接受不超过 2MB、最大 4096×4096 且总像素不超过 1600 万的单帧 JPEG、PNG 或 WebP，服务端完整解码并重新编码后才公开读取。
+小程序调用 `wx.login` 获取一次性 code，后端使用微信 `code2session` 解析身份后创建或复用 canonical user，并签发随机 Bearer session。数据库只保存会话令牌 hash，不保存原始 token，也不持久化微信 `session_key`。
 
-小程序的后端服务地址在 `upupup/utils/config.js` 的 `BACKEND_BASE_URL` 中配置，URL 可直接包含端口，例如 `http://127.0.0.1:8000`；页面不提供运行时修改入口。后端监听端口优先使用 `python3 main.py --serve-only --port <端口>` 的 CLI 参数，未传时读取 `.env` 的 `WEBUI_PORT`（默认 `8000`）；监听地址同理由 `--host` 或 `WEBUI_HOST` 控制。真机联调需让后端监听 `0.0.0.0`，并把 `BACKEND_BASE_URL` 改为电脑局域网 IP；真机、体验版和正式版必须使用 HTTPS，并在微信公众平台配置 request 合法域名。
+身份记录按 `(provider, issuer, subject)` 区分：provider 为 `wechat_miniapp` 或 `wechat_open_web`，issuer 为对应 AppID，subject 为 OpenID。服务端再将身份解析到 canonical user，并以该 user ID 执行 owner-scope 校验。OpenID、UnionID、code、access token、refresh token、AppSecret 与原始 Bearer token 不得回传给客户端或写入日志；昵称和头像只用于展示，不参与身份、RBAC 或资源归属判断。
 
-## API
+微信隐私规则不允许在 `onLaunch`/`onLoad` 中静默读取昵称和头像。首次身份登录仍会自动完成；若用户资料为空，登录后可使用微信官方头像昵称填写能力补充资料，也可跳过，之后可在“我的 → 更新微信资料”重新填写。头像临时文件通过认证上传端点保存到 SQLite 数据文件同目录的 `miniapp_avatars/`；API 只接受不超过 2MB、最大 4096×4096 且总像素不超过 1600 万的单帧 JPEG、PNG 或 WebP，服务端完整解码并重新编码后才公开读取。
 
-- `POST /api/v1/miniapp/auth/login`：提交 `{ "code": "wx.login code" }`，返回 Bearer token 和用户摘要。
-- `GET /api/v1/miniapp/auth/me`：返回当前用户摘要，包括可选的 `nickname`、`avatar_url` 和 RBAC 权限。
-- `PATCH /api/v1/miniapp/auth/me`：当前用户更新自己的可选昵称；固定使用 Bearer principal 的用户 ID，不接受 openid、角色、权限或 owner 字段，要求 `account.self`。
-- `POST /api/v1/miniapp/auth/me/avatar`：认证上传当前用户通过 `chooseAvatar` 选择的头像；输入限制为不超过 2MB、最大 4096×4096 且总像素不超过 1600 万的单帧 JPEG、PNG 或 WebP，完整解码并重新编码后保存，要求 `account.self`。
-- `GET|HEAD /api/v1/miniapp/auth/public/avatars/{opaque_filename}`：仅按一个合法、不可预测的文件名读取头像，供小程序 `<image>` 使用；该地址公开但不列出文件、不接受写方法，也不使用可枚举的用户 ID。
+## Web 微信 OAuth
+
+Web 不使用密码登录或小程序确认网页登录。浏览器通过以下流程登录：
+
+1. 请求 `GET /api/v1/web-auth/wechat/start`。
+2. 服务端创建短期 state/binding transaction，写入临时浏览器 binding Cookie，并 302 到微信开放平台扫码授权地址。
+3. 微信回调 `GET /api/v1/web-auth/wechat/callback?code=...&state=...`。
+4. 服务端验证 state、浏览器 binding、有效期和单次消费状态，交换 code 后创建或复用 canonical user。
+5. 服务端建立 `dsa_user_session`，清理临时 binding，并固定 `302 /`。
+
+`start` 不接受 `return_path`。回调失败、state/binding 缺失、过期、篡改、重放或已消费时不得建立会话，也不得泄露微信 provider 响应。所有 OAuth 响应应使用 `Cache-Control: no-store`。
+
+认证后的 Web API：
+
+| 路由 | 认证/约束 | 作用 |
+| --- | --- | --- |
+| `GET /api/v1/web-auth/me` | Web Cookie | 返回 `{user:{id,nickname,avatar_url,roles,permissions}, csrf_token}` |
+| `POST /api/v1/web-auth/logout` | Web Cookie + exact Origin + `X-CSRF-Token` | 撤销当前 Web session |
+| `POST /api/v1/web-auth/identity-bind/start` | Web Cookie | 创建受控身份绑定 challenge |
+| `POST /api/v1/web-auth/identity-bind/consume` | Web Cookie | 消费已批准的 challenge，或返回冲突/状态结果 |
+
+Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同时携带会话对应的 `X-CSRF-Token` 和与默认本地开发地址或 `CORS_ORIGINS` 精确匹配的 `Origin`。`*` 不是可信 Origin。Cookie 属性以实际运行时实现为准；不要把未经实现验证的 `Strict`、path-scoped 等属性写成契约。
+
+## 小程序 API 与认证边界
+
+- `POST /api/v1/miniapp/auth/login`：提交 `{ "code": "wx.login code" }`，返回 Bearer token、expiry、用户摘要、roles 与 permissions。
+- `GET /api/v1/miniapp/auth/me`：返回当前用户摘要，包括可选的 `nickname`、`avatar_url`、roles 和 permissions。
+- `PATCH /api/v1/miniapp/auth/me`：当前用户更新自己的可选昵称；固定使用 Bearer principal 的用户 ID，不接受 OpenID、角色、权限或 owner 字段。
+- `POST /api/v1/miniapp/auth/me/avatar`：认证上传当前用户通过 `chooseAvatar` 选择的头像。
+- `GET|HEAD /api/v1/miniapp/auth/public/avatars/{opaque_filename}`：按合法、不可预测的文件名读取公开头像；不列出文件、不接受写方法，也不使用可枚举的用户 ID。
 - `POST /api/v1/miniapp/auth/logout`：撤销当前会话。
+- `POST /api/v1/miniapp/auth/identity-bind/approve`：以当前小程序 Bearer principal 批准 Web 创建的绑定 challenge。
+- `GET /api/v1/miniapp/watchlist`：列出当前用户的个人自选股（owner-scope，返回 `items` 与 `stock_codes`）。
+- `POST /api/v1/miniapp/watchlist/add`：将 `{ stock_code, stock_name? }` 加入当前用户自选；代码非法返回 `400`，HK 等价变体按归一 key 去重，单用户上限 200。
+- `POST /api/v1/miniapp/watchlist/remove`：从当前用户自选移除 `{ stock_code }`，返回移除后的最新列表。
 - `GET /api/v1/miniapp/daily-reflections`：分页列出当前用户心得。
+- `GET /api/v1/miniapp/daily-reflections/stats`：连续打卡与月度回顾统计（owner-scope）。可选 `reference_date`（客户端本地今天）与 `month`（YYYY-MM），返回 `total`、`current_streak`、`longest_streak`、`today_done`、`month`、`month_count`、`month_days`。连续天数以客户端日历为准；今日未记但昨日已记时按昨日起算，避免跨时区误断。
 - `GET /api/v1/miniapp/daily-reflections/by-date/{YYYY-MM-DD}`：读取指定日期心得，不存在时返回 `null`。
 - `PUT /api/v1/miniapp/daily-reflections`：按日期新增或覆盖当前用户心得。
 - `GET /api/v1/miniapp/daily-reflections/{id}`：读取当前用户的一条心得。
 - `DELETE /api/v1/miniapp/daily-reflections/{id}`：删除当前用户的一条心得。
 
-除登录端点、health 以及合法不透明文件名的公开头像 `GET|HEAD` 外，请求必须携带 `Authorization: Bearer <token>`；管理员 Web Cookie 仅在 `ADMIN_AUTH_ENABLED=true` 且会话有效时作为超级管理员。未登录固定返回 `401`，已登录但缺权限固定返回 `403`。普通 `/api/v1/*` 路由若未登记权限策略会 fail closed 返回 `403`。`ADMIN_AUTH_ENABLED=false` 只表示不启用 Web 密码管理员入口，不会关闭小程序 Bearer/RBAC，也不会让业务 API 匿名放行。
+除登录端点、health 与合法不透明头像文件的公开 `GET|HEAD` 外，`/api/v1/miniapp/*` 必须携带微信登录得到的 `Authorization: Bearer <token>`，且严格不接受 Web Cookie。未认证返回 `401`，已认证但不满足路由权限返回 `403`；未登记权限策略的通用业务路由 fail closed。小程序客户端不得指定目标 user ID，也不得以 provider key、OpenID 或自定义 Bearer 替代会话。
 
-Web 管理后台的 Auth Settings/初始密码设置与小程序微信登录相互独立。首次设置入口只接受 direct ASGI client 为 loopback 的请求，不采信 `X-Forwarded-For` 来取得本地资格。远程部署应在服务主机本地完成、通过 SSH 隧道直连服务的 loopback 地址，或使用项目已有的 `python -m src.auth reset_password` CLI 设置/重置密码；不要通过伪造转发头开放首次设置。
+小程序设置页只调用受限的 `/api/v1/miniapp/system/*` surface，提供经掩码的配置读取、schema/状态查询、校验与受版本保护的非 raw 更新。高风险系统、密钥、导入导出、调度、外部渠道测试和模型发现必须由各自独立、明确的权限策略保护；它们不因 Cookie、角色名或登录通道获得隐式放行。页面可按权限显示只读或可编辑状态，但后端仍执行最终权限校验。
 
-登录和 `/me` 的用户摘要包含 `roles` 与 `permissions`。系统内置角色如下：
+## RBAC 与功能额度
 
-- `member`：新用户默认角色。可维护本人会话、心得、持仓、告警和 Agent 会话；可读取股票、决策信号及情报；可执行 Agent 对话。包含 `alerts.manage`，但不包含 `alerts.notify`：用户规则仍会被评估并记录触发结果，但不会向外部通知渠道发送。不能执行共享分析/选股/回测任务，不能维护共享决策信号或情报，不能查看用量/数据能力，不能发送 Agent 内容到外部通知渠道，也不能管理系统或 RBAC。
-- `operator`：受信任的运营分析员。拥有除 `system.manage`、`rbac.manage` 外的全部权限，包含 `alerts.notify`，可执行共享计算、维护共享资源，并拥有 `agent.share`。
-- `admin`：全部权限，包含 `alerts.notify`、`system.manage` 与 `rbac.manage`。
+登录和 `/me` 的用户摘要包含 `roles` 与 `permissions`。内置角色语义如下：
 
-小程序按钮和编辑控件按登录或 `/me` 返回的 `permissions` 显隐或只读；这只是交互层提示，后端仍对每个请求执行最终权限校验。`alerts.notify` 只控制告警外发能力，不能替代 `alerts.manage` 来创建、修改、启停、删除或测试规则。
+- `member`：新用户默认角色；只能维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析能力；高成本能力受服务端每日功能额度限制。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
+- `operator`：受信任的运营分析员；拥有除 `system.manage`、`rbac.manage` 外的全部权限，包含 `alerts.notify` 与 `agent.share`。
+- `admin`：拥有全部权限，包含 `alerts.notify`、`system.manage` 与 `rbac.manage`；仍不绕过个人资源 owner scope。
 
-`POST /api/v1/agent/chat/send` 单独要求 `agent.share`，避免普通成员触发外部通知副作用。具体权限码与路由映射的唯一真源为 `src/services/rbac_service.py`；角色可组合，最终权限取并集。
+`/api/v1/rbac/*` 与 `/api/v1/miniapp/rbac/*` 都要求 `rbac.manage`。初始管理员只能通过受控的一次性 seed/角色授予流程赋予已存在 canonical user，并记录审计事件；不使用 OpenID 环境变量自动升权或回授。日常权限管理入口是小程序“我的 → 权限管理”：角色和成员管理会拒绝空/未知角色、删除仍被分配的自定义角色、停用当前操作者、移除当前操作者的 `rbac.manage`，以及停用或降权最后一位拥有该权限的活跃用户。
 
-`RBAC_BOOTSTRAP_ADMIN_OPENIDS` 仅用于首位或紧急恢复管理员的幂等授予；从环境变量删除 OpenID 不会自动撤销数据库角色，反之，若数据库已回收 `admin` 但 OpenID 仍在该变量中，用户下次认证仍会被自动回授并记录不包含 OpenID 的审计事件。日常授权入口为小程序“我的 → 权限管理”（`pages/rbac/index`）：菜单按权限过滤、路由策略要求 `rbac.manage`，并由后端 `require_permission('rbac.manage')` 作最终校验。管理员可通过 `GET /api/v1/miniapp/rbac/catalog` 查询角色和权限目录，`GET /api/v1/miniapp/rbac/users` 分页查询不含 OpenID、UnionID、token hash、Bearer token 或 `session_key` 的用户目录，`PUT /api/v1/miniapp/rbac/users/{user_id}/roles` 替换完整角色集合，`PATCH /api/v1/miniapp/rbac/users/{user_id}/active` 启停账号，`POST|PUT|DELETE /api/v1/miniapp/rbac/roles` 管理自定义角色，以及 `GET /api/v1/miniapp/rbac/audit` 查询审计记录。所有管理接口均要求 `rbac.manage`；服务端拒绝空或未知角色、删除仍被分配的自定义角色、停用当前操作者、移除当前操作者的 `rbac.manage`，以及停用或降权最后一位拥有该权限的活跃用户。`member`、`operator`、`admin` 是由服务端权限目录维护的系统角色，页面只读；自定义角色及其有效权限码、用户角色关系、账号启停状态和审计记录均保存于数据库。
+RBAC 决定用户能否调用功能；entitlement 决定已获授权用户当天可用次数。服务端只在无副作用业务准入校验通过后原子预留额度；客户端按钮、剩余次数或本地状态不能作为成本控制边界。实际额度严格按以下顺序解析：**`user_override` > `whitelist_feature` > `whitelist_all` > `plan` > `global_policy`**。无限额度仅来自功能级或全功能白名单；角色、`admin`、Cookie 或登录通道都不是额度豁免来源。
+
+| 功能码 | 默认每日次数 |
+| --- | ---: |
+| `stock_analysis` | 5 |
+| `market_review` | 2 |
+| `agent_chat` | 20 |
+| `agent_research` | 2 |
+| `screening` | 3 |
+| `backtest` | 3 |
+| `decision_signal_reassess` | 5 |
+| `decision_signal_outcomes` | 3 |
+| `image_stock_extract` | 10 |
+
+全局策略的 `0` 表示禁用，不表示无限制。单用户覆盖允许 `0..10000`；套餐、覆盖与白名单都可选使用 UTC 日期窗口，窗口结束后自动失效。`GET /api/v1/feature-quotas/me` 返回 `daily_limit`、`used_count`、`remaining`、`disabled`、`unlimited`、`reset_at`、`limit_source`、`plan_code` 与 `effective_until`；`limit_source` 仅为 `user_override`、`whitelist_feature`、`whitelist_all`、`plan` 或 `global_policy`。拒绝预留时响应为 `429 feature_quota_exceeded`：`reason="feature_disabled"` 表示规则显式禁用，`reason="daily_limit_exceeded"` 表示当日额度已用尽，客户端必须给出不同的可解释提示。
+
+配额按 UTC 自然日结算；`period_start` 与 `reset_at` 以 UTC 表示，`reset_at` 为下一 UTC 日的 `00:00:00Z`。异步任务只在 executor 接受前失败时补偿尚未被接受的预留；运行失败、取消或外部数据/LLM 失败不会自动退款。
 
 ## 个人资源与行级隔离
 
-RBAC 控制“能否使用某项能力”，行级所有权控制“能访问哪一条数据”，两者必须同时满足。当前个人资源包括：
+RBAC 控制“能否使用能力”，owner scope 控制“能访问哪一条数据”，两者必须同时满足。每日心得、持仓、告警、Agent Chat、分析任务和分析历史都按可信 `principal.user_id` 过滤。请求体、模型工具参数或客户端传入的用户字段不能扩大资源可见范围。
 
-- 每日心得：以 `(user_id, reflection_date)` 保证每日唯一，详情、删除和列表均按当前用户过滤。
-- 持仓：账户使用服务端从 Bearer principal 得到的 `owner_id`；请求体中的 `owner_id` 不可信且不会决定归属。账户、交易、现金、公司行动、快照、风险报告、CSV 导入和组合告警目标均沿同一 owner 过滤。
-- 告警：规则使用服务端可信 `user_id`；规则 CRUD、测试、触发历史和通知历史均按 owner 过滤。组合持仓展开和风险计算继续使用规则 owner，不会回落到全局账户。缺少 `alerts.notify` 时 worker 仍评估用户规则并记录触发结果，但跳过外部通知派发。管理员新建全局规则时必须明确写入 `owner_scope=global`，不能依赖空 owner 推断全局归属。
-- Agent Chat：小程序会话 ID 固定使用 `miniapp:{user_id}:` 前缀；列表、详情、删除和流取消均校验 owner。miniapp 传入的任意 `user_id` 筛选值会被忽略；管理员可在 `GET /api/v1/agent/chat/sessions?user_id=<legacy-prefix>` 中筛选旧会话。
+个人资源只在 `owner_user_id == principal.user_id` 时可见和可改；跨用户请求 fail closed，通常返回 `404`，避免泄露资源是否存在。`rbac.manage`、`admin` 角色和 Web Cookie 都不自动扩大个人资源范围。仅受信内部维护调用可在明确设计的独立 scope 下执行跨用户维护；任何缺失或未绑定 scope 都必须 fail closed。
 
-跨用户资源统一表现为 `404`，避免泄露资源是否存在。历史告警中同时满足 `user_id IS NULL` 且 `owner_scope IS NULL` 的 legacy 规则不进入 worker；历史持仓账户中 `owner_id IS NULL` 的记录不会自动归给任何小程序用户，只有有效管理员 Cookie 的全局后台范围可见。管理员新建的全局告警必须显式使用 `owner_scope=global`。分析历史、回测、决策信号等未列入上述个人资源的既有业务数据仍按共享域处理，角色权限不等于多租户数据隔离。
+## 数据与迁移
 
-## 数据表
-
-首次启动后端时，SQLAlchemy `create_all` 会在 `DATABASE_PATH` 指定的 SQLite 文件中创建：
-
-- `miniapp_users`
-- `miniapp_sessions`
-- `daily_reflections`
-- `rbac_roles`
-- `rbac_permissions`
-- `rbac_role_permissions`
-- `miniapp_user_roles`
-- `rbac_audit_events`：记录用户角色、账号状态和自定义角色权限的非敏感管理审计事件
-
-旧 SQLite 库启动时会幂等为 `alert_rules` 补充 nullable `user_id` 与索引；已有行保留 `NULL`。持仓继续复用 `portfolio_accounts.owner_id`，不会自动回填历史账户。迁移不修改既有分析数据或管理员认证数据。
+首次启动后端会在 `DATABASE_PATH` 指定的 SQLite 文件中创建用户、session、RBAC、审计、心得和功能额度相关表。既有 SQLite 启动迁移保持幂等：不会自动提升用户角色、自动合并 canonical user、迁移或暴露身份凭据，也不会把历史资源自动归属给某个用户。

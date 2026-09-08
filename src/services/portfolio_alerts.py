@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.portfolio_ownership import PortfolioScope, UNSET_PORTFOLIO_SCOPE
 from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import PortfolioService
 
@@ -56,7 +57,7 @@ class PortfolioRiskAlert:
     target: str
     alert_type: str
     parameters: Dict[str, Any]
-    owner_id: Optional[str] = None
+    portfolio_scope: PortfolioScope
     metadata: Dict[str, Any] = field(default_factory=dict)
     description: str = ""
     stock_code: str = ""
@@ -117,7 +118,7 @@ def ensure_active_portfolio_account(
     target: str,
     *,
     portfolio_service: Optional[PortfolioService] = None,
-    owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
 ) -> None:
     """Validate that an explicit portfolio account target exists and is active."""
 
@@ -125,7 +126,7 @@ def ensure_active_portfolio_account(
         return
     account_id = _positive_int_target(target)
     service = portfolio_service or PortfolioService()
-    accounts = service.list_accounts(include_inactive=False, owner_id=owner_id)
+    accounts = service.list_accounts(include_inactive=False, portfolio_scope=portfolio_scope)
     active_ids = {int(item.get("id")) for item in accounts if item.get("id") is not None}
     if account_id not in active_ids:
         raise ValueError(f"portfolio account is not active or does not exist: {account_id}")
@@ -137,7 +138,7 @@ def expand_symbol_targets(
     target: str,
     config: Any,
     portfolio_service: Optional[PortfolioService] = None,
-    owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
 ) -> tuple[List[ExpandedSymbolTarget], int]:
     """Expand watchlist or portfolio holdings into concrete, de-duplicated symbols.
 
@@ -152,7 +153,7 @@ def expand_symbol_targets(
         symbols = _portfolio_holding_symbols(
             target=target,
             portfolio_service=portfolio_service,
-            owner_id=owner_id,
+            portfolio_scope=portfolio_scope,
         )
         display_prefix = "持仓"
     else:
@@ -201,7 +202,7 @@ def make_portfolio_risk_payload(
     *,
     parent_key: str,
     data: Dict[str, Any],
-    owner_id: Optional[str] = None,
+    portfolio_scope: PortfolioScope,
 ) -> RuntimeAlertPayload:
     effective_target = portfolio_effective_target(data["target"])
     display_target = "全部账户" if data["target"] == "all" else f"账户 {data['target']}"
@@ -210,7 +211,7 @@ def make_portfolio_risk_payload(
         target=data["target"],
         alert_type=data["alert_type"],
         parameters=dict(data.get("parameters") or {}),
-        owner_id=owner_id,
+        portfolio_scope=portfolio_scope,
         metadata={
             "persisted_rule_id": data["id"],
             "effective_target": effective_target,
@@ -257,14 +258,14 @@ def evaluate_portfolio_risk_alert(
         snapshot = service.get_portfolio_snapshot(
             account_id=account_id,
             cost_method="fifo",
-            owner_id=rule.owner_id,
+            portfolio_scope=rule.portfolio_scope,
         )
         return _evaluate_price_stale(rule, snapshot)
 
     report = risk.get_risk_report(
         account_id=account_id,
         cost_method="fifo",
-        owner_id=rule.owner_id,
+        portfolio_scope=rule.portfolio_scope,
     )
     if rule.alert_type == "portfolio_stop_loss":
         return _evaluate_stop_loss(rule, report)
@@ -369,14 +370,14 @@ def _portfolio_holding_symbols(
     *,
     target: str,
     portfolio_service: Optional[PortfolioService],
-    owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
 ) -> List[str]:
     service = portfolio_service or PortfolioService()
     account_id = None if target == "all" else _positive_int_target(target)
     snapshot = service.get_portfolio_snapshot(
         account_id=account_id,
         cost_method="fifo",
-        owner_id=owner_id,
+        portfolio_scope=portfolio_scope,
     )
     symbols: List[str] = []
     for account in snapshot.get("accounts", []) or []:

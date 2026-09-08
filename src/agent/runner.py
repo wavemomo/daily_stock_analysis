@@ -43,6 +43,7 @@ from src.agent.tools.execution import (
     serialize_tool_result,
 )
 from src.agent.stock_scope import StockScope
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE, scope_from_legacy_owner
 from src.llm.usage import should_persist_usage_telemetry
 from src.utils.data_processing import normalize_report_signal_attribution
 from src.storage import persist_llm_usage as _persist_usage
@@ -335,6 +336,8 @@ def run_agent_loop(
     tool_call_timeout_seconds: Optional[float] = None,
     stock_scope: Optional[StockScope] = None,
     emit_stage_events: bool = True,
+    resource_owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
 ) -> RunLoopResult:
     """Execute the ReAct LLM ↔ tool loop.
 
@@ -363,6 +366,7 @@ def run_agent_loop(
         A :class:`RunLoopResult` with the final content, stats, and the
         (mutated) messages list.
     """
+    portfolio_scope = scope_from_legacy_owner(portfolio_scope)
     labels = thinking_labels or _THINKING_TOOL_LABELS
     tool_decls = tool_registry.to_openai_tools()
 
@@ -529,6 +533,8 @@ def run_agent_loop(
                 tool_call_timeout_seconds=tool_call_timeout_seconds,
                 tool_wait_timeout_seconds=remaining_timeout,
                 stock_scope=stock_scope,
+                resource_owner_id=resource_owner_id,
+                portfolio_scope=portfolio_scope,
             )
 
             # Append tool results preserving original call order
@@ -716,6 +722,8 @@ def _execute_tools(
     tool_call_timeout_seconds: Optional[float] = None,
     tool_wait_timeout_seconds: Optional[float] = None,
     stock_scope: Optional[StockScope] = None,
+    resource_owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
 ) -> List[Dict[str, Any]]:
     """Execute one or more tool calls, returning ordered result dicts.
 
@@ -732,11 +740,15 @@ def _execute_tools(
     :func:`_resolve_per_tool_timeout`.
     """
 
+    portfolio_scope = scope_from_legacy_owner(portfolio_scope)
+
     def _exec_single(tc_item):
         return execute_runner_tool_call(
             tool_call=tc_item,
             tool_registry=tool_registry,
             stock_scope=stock_scope,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
             non_retriable_tool_results=non_retriable_tool_results,
         )
 

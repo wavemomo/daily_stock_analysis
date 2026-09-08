@@ -27,10 +27,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union, Dict, Any
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Query, Body, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from api.deps import get_config_dep
+from api.deps import get_config_dep, get_request_analysis_owner_context
 from api.v1.errors import api_error
 from api.v1.schemas.analysis import (
     AnalyzeRequest,
@@ -68,6 +68,7 @@ from src.core.market_review_lock import (
 from src.core.market_review_runtime import (
     build_market_review_runtime as _runtime_build_market_review_runtime,
 )
+from src.analysis_ownership import AnalysisOwner
 from src.analysis_context_pack_overview import (
     extract_analysis_context_pack_overview,
     sanitize_context_snapshot_for_api,
@@ -87,6 +88,7 @@ from src.services.task_queue import (
     TaskStatus as TaskStatusEnum,
 )
 from src.services.analysis_service import asset_type_from_canonical_code
+from src.services.feature_quota_service import FeatureQuotaService
 from src.services.run_diagnostics import build_run_diagnostic_summary
 from src.services.run_flow import build_task_run_flow_snapshot
 from src.services.empty_news import empty_news_disclosure_from_stored
@@ -104,6 +106,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+def _request_analysis_owner(request: Request) -> AnalysisOwner:
+    """Return the only owner context allowed at an HTTP analysis boundary."""
+    return get_request_analysis_owner_context(request)
 _SUPPORTED_FREE_TEXT_RE = re.compile(r"^[A-Za-z0-9.*\-+\u3400-\u9fff\s]+$")
 
 
@@ -165,6 +171,7 @@ def _with_request_report_language(config: Config, report_language: Optional[str]
 def _run_market_review_background(
     send_notification: bool,
     effective_region: str,
+    owner: AnalysisOwner,
     lock_token: Optional[_MarketReviewExecutionLock] = None,
     config: Optional[Config] = None,
     query_id: Optional[str] = None,
@@ -184,6 +191,7 @@ def _run_market_review_background(
             "override_region": effective_region,
             "return_structured": True,
             "trigger_source": "api",
+            "owner": owner,
         }
         if query_id:
             review_kwargs["query_id"] = query_id
@@ -344,6 +352,7 @@ def _resolve_analysis_input(raw_value: str):
 )
 def trigger_analysis(
         request: AnalyzeRequest,
+        http_request: Request,
         config: Config = Depends(get_config_dep)
 ) -> Union[AnalysisResultResponse, JSONResponse]:
     """
@@ -370,6 +379,7 @@ def trigger_analysis(
         HTTPException: 500 - 分析失败
     """
     # 校验请求参数
+    owner = _request_analysis_owner(http_request)
     stock_codes = []
     if request.stock_code:
         stock_codes.append(request.stock_code)
@@ -444,10 +454,23 @@ def trigger_analysis(
             code, target = rejected_entries[0]
             reason = target.unsupported_reason or f"不支持的目标: {code}"
             raise api_error(400, "validation_error", reason)
-        return _handle_sync_analysis(stock_codes[0], request, analysis_target=unique_targets[0] if unique_targets else None)
+        FeatureQuotaService().reserve_for_request(http_request, 'stock_analysis')
+        return _handle_sync_analysis(
+            stock_codes[0],
+            request,
+            analysis_target=unique_targets[0] if unique_targets else None,
+            owner=owner,
+        )
 
     # Async mode submits one task per stock.
-    return _handle_async_analysis_batch(stock_codes, request, analysis_targets=unique_targets, rejected_entries=rejected_entries)
+    return _handle_async_analysis_batch(
+        stock_codes,
+        request,
+        analysis_targets=unique_targets,
+        rejected_entries=rejected_entries,
+        owner=owner,
+        http_request=http_request,
+    )
 
 
 def _handle_async_analysis_batch(
@@ -455,6 +478,9 @@ def _handle_async_analysis_batch(
     request: AnalyzeRequest,
     analysis_targets: Optional[list] = None,
     rejected_entries: Optional[list] = None,
+    *,
+    owner: AnalysisOwner,
+    http_request: Request,
 ) -> JSONResponse:
     """
     Handle asynchronous analysis requests, including batch submission.
@@ -496,6 +522,7 @@ def _handle_async_analysis_batch(
         analysis_phase=analysis_phase,
         force_refresh=request.force_refresh,
         notify=notify,
+        owner=owner,
     )
     if report_language:
         submit_kwargs["report_language"] = report_language
@@ -505,6 +532,31 @@ def _handle_async_analysis_batch(
     # 的既有 kwargs 契约不变。
     if analysis_targets is not None and any(t is not None for t in analysis_targets):
         submit_kwargs["analysis_targets"] = analysis_targets
+    quota_service = FeatureQuotaService()
+    reservation_period_start = None
+
+    def reserve_accepted_codes(accepted_codes):
+        nonlocal reservation_period_start
+        reservation_period_start = quota_service.current_period_start()
+        return quota_service.reserve_many_for_request(
+            http_request,
+            'stock_analysis',
+            amount=len(accepted_codes),
+            period_start=reservation_period_start,
+        )
+
+    def release_unsubmitted_codes(unsubmitted_codes):
+        if reservation_period_start is None:
+            raise RuntimeError('异步分析配额补偿缺少预留账期')
+        return quota_service.release_many_for_request(
+            http_request,
+            'stock_analysis',
+            amount=len(unsubmitted_codes),
+            period_start=reservation_period_start,
+        )
+
+    submit_kwargs["before_submit"] = reserve_accepted_codes
+    submit_kwargs["on_submit_failure"] = release_unsubmitted_codes
 
     accepted_tasks, duplicate_errors = task_queue.submit_tasks_batch(**submit_kwargs)
 
@@ -586,6 +638,8 @@ def _handle_sync_analysis(
     stock_code: str,
     request: AnalyzeRequest,
     analysis_target: Optional[Any] = None,
+    *,
+    owner: AnalysisOwner,
 ) -> AnalysisResultResponse:
     """
     处理同步分析请求
@@ -599,7 +653,7 @@ def _handle_sync_analysis(
     
     try:
         service = AnalysisService()
-        result = service.analyze_stock(
+        analyze_kwargs = dict(
             stock_code=stock_code,
             report_type=request.report_type,
             force_refresh=request.force_refresh,
@@ -609,7 +663,9 @@ def _handle_sync_analysis(
             analysis_phase=request.analysis_phase,
             report_language=getattr(request, "report_language", None),
             analysis_target=analysis_target,
+            owner=owner,
         )
+        result = service.analyze_stock(**analyze_kwargs)
 
         if result is None:
             error_message = service.last_error or f"分析股票 {stock_code} 失败"
@@ -617,9 +673,13 @@ def _handle_sync_analysis(
 
         # 构建报告结构
         report_data = result.get("report", {})
-        context_snapshot, fundamental_snapshot, raw_result_snapshot = _load_sync_fundamental_sources(
+        source_kwargs = dict(
             query_id=query_id,
             stock_code=result.get("stock_code", stock_code),
+            owner=owner,
+        )
+        context_snapshot, fundamental_snapshot, raw_result_snapshot = _load_sync_fundamental_sources(
+            **source_kwargs,
         )
         report = _build_analysis_report(
             report_data,
@@ -665,10 +725,12 @@ def _handle_sync_analysis(
     description="提交一个后台大盘复盘任务，复用 CLI 的大盘复盘运行时装配并保存报告。该人工触发入口不按交易日检查跳过；接口内部仅提供进程内/单机防重，如多实例（多 Worker/多容器）部署，需结合外部幂等机制避免重复触发。",
 )
 def trigger_market_review(
+    http_request: Request,
     request: Optional[MarketReviewRequest] = Body(None),
     config: Config = Depends(get_config_dep),
 ) -> MarketReviewAccepted:
     """Trigger market review from Web/API without blocking the request."""
+    owner = _request_analysis_owner(http_request)
     request = request or MarketReviewRequest()
 
     runtime_config = _with_request_report_language(config, request.report_language)
@@ -680,7 +742,17 @@ def trigger_market_review(
     if lock_token is None:
         raise api_error(409, "duplicate_market_review", "大盘复盘正在执行中，请稍后再试")
 
+    quota_service = FeatureQuotaService()
+    quota_reserved = False
+    reservation_period_start = None
     try:
+        reservation_period_start = quota_service.current_period_start()
+        quota_service.reserve_for_request(
+            http_request,
+            'market_review',
+            period_start=reservation_period_start,
+        )
+        quota_reserved = True
         task_id = uuid.uuid4().hex
         logger.info(
             "[MarketReview] component=market_review action=submit trigger_source=api "
@@ -689,21 +761,40 @@ def trigger_market_review(
             effective_region,
             request.send_notification,
         )
-        task = get_task_queue().submit_background_task(
-            lambda: _run_market_review_background(
-                request.send_notification,
-                effective_region=effective_region,
-                lock_token=lock_token,
-                config=runtime_config,
-                query_id=task_id,
-            ),
+        background_kwargs = dict(
+            effective_region=effective_region,
+            lock_token=lock_token,
+            config=runtime_config,
+            query_id=task_id,
+            owner=owner,
+        )
+        submit_kwargs = dict(
             stock_code="market_review",
             stock_name="大盘复盘",
             message="大盘复盘任务已提交",
             task_id=task_id,
             region=effective_region,
+            owner=owner,
+        )
+        task = get_task_queue().submit_background_task(
+            lambda: _run_market_review_background(
+                request.send_notification,
+                **background_kwargs,
+            ),
+            **submit_kwargs,
         )
     except Exception:
+        if quota_reserved:
+            try:
+                quota_service.release_for_request(
+                    http_request,
+                    'market_review',
+                    period_start=reservation_period_start,
+                )
+            except Exception:
+                logger.exception(
+                    "[MarketReview] component=market_review action=quota_compensation_failed"
+                )
         _release_market_review_lock(lock_token)
         raise
 
@@ -731,6 +822,7 @@ def trigger_market_review(
     description="获取当前所有分析任务，可按状态筛选"
 )
 def get_task_list(
+    http_request: Request,
     status: Optional[str] = Query(
         None,
         description="筛选状态：pending, processing, completed, failed, cancel_requested, cancelled（支持逗号分隔多个）"
@@ -748,9 +840,13 @@ def get_task_list(
         TaskListResponse: 任务列表响应
     """
     task_queue = get_task_queue()
+    owner = _request_analysis_owner(http_request)
     
     # 获取所有任务
-    all_tasks = task_queue.list_all_tasks(limit=limit)
+    all_tasks = task_queue.list_all_tasks(
+        limit=limit,
+        owner=owner,
+    )
     
     # 状态筛选
     if status:
@@ -758,7 +854,7 @@ def get_task_list(
         all_tasks = [t for t in all_tasks if t.status.value in status_list]
     
     # 统计信息
-    stats = task_queue.get_task_stats()
+    stats = task_queue.get_task_stats(owner=owner)
     
     # 转换为 Schema
     task_infos = [
@@ -805,7 +901,7 @@ def get_task_list(
     summary="任务状态 SSE 流",
     description="通过 Server-Sent Events 实时推送任务状态变化"
 )
-async def task_stream():
+async def task_stream(http_request: Request):
     """
     SSE 任务状态流
     
@@ -821,6 +917,8 @@ async def task_stream():
     Returns:
         StreamingResponse: SSE 事件流
     """
+    owner = _request_analysis_owner(http_request)
+
     async def event_generator():
         task_queue = get_task_queue()
         event_queue: asyncio.Queue = asyncio.Queue()
@@ -829,12 +927,12 @@ async def task_stream():
         yield _format_sse_event("connected", {"message": "Connected to task stream"})
         
         # 发送当前进行中的任务
-        pending_tasks = task_queue.list_pending_tasks()
+        pending_tasks = task_queue.list_pending_tasks(owner=owner)
         for task in pending_tasks:
             yield _format_sse_event("task_created", task.to_dict())
         
         # 订阅任务事件
-        task_queue.subscribe(event_queue)
+        task_queue.subscribe(event_queue, owner=owner)
         
         try:
             while True:
@@ -884,12 +982,16 @@ def _load_history_run_flow_by_query_id(
     code: Optional[str] = None,
     report_type: Optional[str] = None,
     fail_open: bool = False,
+    owner: AnalysisOwner,
 ) -> Optional[RunFlowSnapshot]:
     try:
         from src.storage import DatabaseManager
         from src.services.history_service import HistoryService
 
-        service = HistoryService(DatabaseManager.get_instance())
+        service = HistoryService(
+            DatabaseManager.get_instance(),
+            owner=owner,
+        )
         return service.resolve_and_get_run_flow(
             query_id,
             code=code,
@@ -917,7 +1019,10 @@ def _load_history_run_flow_by_query_id(
     summary="获取分析任务运行流",
     description="根据 task_id 查询任务数据流/信息流快照；活跃任务缺少诊断时返回骨架流。",
 )
-def get_task_run_flow(task_id: str) -> RunFlowSnapshot:
+def get_task_run_flow(
+    task_id: str,
+    http_request: Request,
+) -> RunFlowSnapshot:
     """
     查询分析任务运行流。
 
@@ -925,7 +1030,8 @@ def get_task_run_flow(task_id: str) -> RunFlowSnapshot:
     to hydrate from persisted history diagnostics using the same task_id/query_id.
     """
     task_queue = get_task_queue()
-    task = task_queue.get_task(task_id)
+    owner = _request_analysis_owner(http_request)
+    task = task_queue.get_task(task_id, owner=owner)
 
     if task:
         if task.status == TaskStatusEnum.COMPLETED:
@@ -940,13 +1046,17 @@ def get_task_run_flow(task_id: str) -> RunFlowSnapshot:
                 code=task_stock_code,
                 report_type=task_report_type,
                 fail_open=True,
+                owner=owner,
             )
             if history_snapshot is not None:
                 return history_snapshot
         return build_task_run_flow_snapshot(task)
 
     try:
-        history_snapshot = _load_history_run_flow_by_query_id(task_id)
+        history_snapshot = _load_history_run_flow_by_query_id(
+            task_id,
+            owner=owner,
+        )
         if history_snapshot is not None:
             return history_snapshot
     except Exception as e:
@@ -1064,7 +1174,11 @@ def _ensure_report_action_fields(report_data: Dict[str, Any]) -> Dict[str, Any]:
     return enriched_report
 
 
-def _build_task_analysis_result(task: Any) -> AnalysisResultResponse:
+def _build_task_analysis_result(
+    task: Any,
+    *,
+    owner: AnalysisOwner,
+) -> AnalysisResultResponse:
     """
     Normalize an in-memory completed task result to the public API contract.
 
@@ -1100,9 +1214,13 @@ def _build_task_analysis_result(task: Any) -> AnalysisResultResponse:
     report_enriched = False
 
     if isinstance(report_data, dict) and stock_code and query_id:
-        context_snapshot, fundamental_snapshot, raw_result_snapshot = _load_sync_fundamental_sources(
+        source_kwargs = dict(
             query_id=query_id,
             stock_code=stock_code,
+            owner=owner,
+        )
+        context_snapshot, fundamental_snapshot, raw_result_snapshot = _load_sync_fundamental_sources(
+            **source_kwargs,
         )
         report_task_details = report_data.get("details")
         report_task_raw_result = (
@@ -1167,7 +1285,10 @@ def _build_task_analysis_result(task: Any) -> AnalysisResultResponse:
     summary="查询分析任务状态",
     description="根据 task_id 查询单个任务的状态"
 )
-def get_analysis_status(task_id: str) -> TaskStatus:
+def get_analysis_status(
+    task_id: str,
+    http_request: Request,
+) -> TaskStatus:
     """
     查询分析任务状态
     
@@ -1183,8 +1304,10 @@ def get_analysis_status(task_id: str) -> TaskStatus:
         HTTPException: 404 - 任务不存在
     """
     # 1. 先从任务队列查询
+    owner = _request_analysis_owner(http_request)
+    owner_kwargs = dict(owner.storage_kwargs)
     task_queue = get_task_queue()
-    task = task_queue.get_task(task_id)
+    task = task_queue.get_task(task_id, owner=owner)
     
     if task:
         result: Optional[AnalysisResultResponse] = None
@@ -1201,7 +1324,7 @@ def get_analysis_status(task_id: str) -> TaskStatus:
                     market_review_payload = payload
             else:
                 try:
-                    result = _build_task_analysis_result(task)
+                    result = _build_task_analysis_result(task, owner=owner)
                 except Exception:
                     logger.warning(
                         "解析任务结果失败，回退为空返回: task_id=%s",
@@ -1229,7 +1352,11 @@ def get_analysis_status(task_id: str) -> TaskStatus:
     try:
         from src.storage import DatabaseManager
         db = DatabaseManager.get_instance()
-        records = db.get_analysis_history(query_id=task_id, limit=1)
+        records = db.get_analysis_history(
+            query_id=task_id,
+            limit=1,
+            **owner_kwargs,
+        )
 
         if records:
             record = records[0]
@@ -1295,6 +1422,7 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             fallback_fundamental = db.get_latest_fundamental_snapshot(
                 query_id=task_id,
                 code=record.code,
+                **owner_kwargs,
             )
             extracted_fundamental = extract_fundamental_detail_fields(
                 context_snapshot=context_snapshot,
@@ -1423,6 +1551,8 @@ def get_analysis_status(task_id: str) -> TaskStatus:
 def _load_sync_fundamental_sources(
     query_id: str,
     stock_code: str,
+    *,
+    owner: AnalysisOwner,
 ) -> tuple[Optional[Any], Optional[Dict[str, Any]], Optional[Any]]:
     """
     Load report enrichment payloads for sync analyze response.
@@ -1431,7 +1561,13 @@ def _load_sync_fundamental_sources(
         from src.storage import DatabaseManager
 
         db = DatabaseManager.get_instance()
-        records = db.get_analysis_history(query_id=query_id, code=stock_code, limit=1)
+        owner_kwargs = dict(owner.storage_kwargs)
+        records = db.get_analysis_history(
+            query_id=query_id,
+            code=stock_code,
+            limit=1,
+            **owner_kwargs,
+        )
         context_snapshot = None
         raw_result_snapshot = None
         if records:
@@ -1442,6 +1578,7 @@ def _load_sync_fundamental_sources(
         fallback_fundamental = db.get_latest_fundamental_snapshot(
             query_id=query_id,
             code=stock_code,
+            **owner_kwargs,
         )
         return context_snapshot, fallback_fundamental, raw_result_snapshot
     except Exception as e:

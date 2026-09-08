@@ -8,11 +8,25 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.agent.tools.data_tools import _handle_get_portfolio_snapshot
+from src.agent.tool_surface import ToolSurface
+from src.agent.tools.data_tools import (
+    _handle_get_portfolio_snapshot,
+    get_portfolio_snapshot_tool,
+)
+from src.agent.tools.execution import (
+    ToolAccessContext,
+    bind_tool_execution_context,
+    reset_tool_execution_context,
+)
+from src.agent.tools.registry import ToolRegistry
+from src.portfolio_ownership import LEGACY_GLOBAL_PORTFOLIO_SCOPE, PortfolioScope
 
 
 class _FakePortfolioService:
-    def get_portfolio_snapshot(self, **_kwargs):
+    calls = []
+
+    def get_portfolio_snapshot(self, **kwargs):
+        type(self).calls.append(kwargs)
         return {
             "as_of": "2026-03-15",
             "cost_method": "fifo",
@@ -62,10 +76,13 @@ class _FakePortfolioService:
 
 
 class _FakeRiskService:
+    calls = []
+
     def __init__(self, **_kwargs):
         pass
 
-    def get_risk_report(self, **_kwargs):
+    def get_risk_report(self, **kwargs):
+        type(self).calls.append(kwargs)
         return {
             "as_of": "2026-03-15",
             "currency": "CNY",
@@ -95,10 +112,32 @@ class _FakeRiskService:
 
 
 class TestGetPortfolioSnapshotTool(unittest.TestCase):
+    def setUp(self) -> None:
+        _FakePortfolioService.calls = []
+        _FakeRiskService.calls = []
+
+    def _execute_with_scope(self, portfolio_scope, **kwargs):
+        token = bind_tool_execution_context(
+            ToolAccessContext(portfolio_scope=portfolio_scope)
+        )
+        try:
+            return _handle_get_portfolio_snapshot(**kwargs)
+        finally:
+            reset_tool_execution_context(token)
+
+    def test_direct_handler_without_context_fails_closed(self) -> None:
+        self.assertEqual(
+            _handle_get_portfolio_snapshot(account_id=1),
+            {
+                "status": "not_authorized",
+                "error": "portfolio access scope is required",
+            },
+        )
+
     @patch("src.services.portfolio_service.PortfolioService", _FakePortfolioService)
     @patch("src.services.portfolio_risk_service.PortfolioRiskService", _FakeRiskService)
-    def test_default_returns_compact_snapshot_and_risk(self) -> None:
-        result = _handle_get_portfolio_snapshot(account_id=1)
+    def test_trusted_context_returns_compact_snapshot_and_risk(self) -> None:
+        result = self._execute_with_scope(LEGACY_GLOBAL_PORTFOLIO_SCOPE, account_id=1)
         self.assertEqual(result["status"], "ok")
         self.assertIn("snapshot", result)
         self.assertIn("risk", result)
@@ -109,11 +148,57 @@ class TestGetPortfolioSnapshotTool(unittest.TestCase):
         self.assertNotIn("positions", account)
         self.assertEqual(account["position_count"], 2)
         self.assertEqual(account["top_positions"][0]["symbol"], "600519")
+        self.assertEqual(
+            _FakePortfolioService.calls[0]["portfolio_scope"],
+            LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+        )
+        self.assertEqual(
+            _FakeRiskService.calls[0]["portfolio_scope"],
+            LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+        )
+
+    @patch("src.services.portfolio_service.PortfolioService", _FakePortfolioService)
+    @patch("src.services.portfolio_risk_service.PortfolioRiskService", _FakeRiskService)
+    def test_tool_surface_uses_trusted_scope_and_rejects_spoofed_argument(self) -> None:
+        registry = ToolRegistry()
+        registry.register(get_portfolio_snapshot_tool)
+        surface = ToolSurface(registry)
+
+        result = surface.execute_tool(
+            "get_portfolio_snapshot",
+            {"account_id": 1},
+            ToolAccessContext(
+                resource_owner_id="42",
+                portfolio_scope=PortfolioScope.user("42"),
+            ),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            _FakePortfolioService.calls[0]["portfolio_scope"],
+            PortfolioScope.user("42"),
+        )
+        self.assertEqual(
+            _FakeRiskService.calls[0]["portfolio_scope"],
+            PortfolioScope.user("42"),
+        )
+
+        spoofed = surface.execute_tool(
+            "get_portfolio_snapshot",
+            {"account_id": 1, "owner_id": "attacker"},
+            ToolAccessContext(
+                resource_owner_id="42",
+                portfolio_scope=PortfolioScope.user("42"),
+            ),
+        )
+        self.assertFalse(spoofed["ok"])
+        self.assertEqual(spoofed["error"]["code"], "invalid_arguments")
 
     @patch("src.services.portfolio_service.PortfolioService", _FakePortfolioService)
     @patch("src.services.portfolio_risk_service.PortfolioRiskService", _FakeRiskService)
     def test_include_positions_and_disable_risk(self) -> None:
-        result = _handle_get_portfolio_snapshot(
+        result = self._execute_with_scope(
+            PortfolioScope.user("77"),
             account_id=1,
             include_positions=True,
             include_risk=False,
@@ -124,7 +209,10 @@ class TestGetPortfolioSnapshotTool(unittest.TestCase):
         self.assertIn("positions", account)
         self.assertNotIn("risk", result)
 
-        invalid = _handle_get_portfolio_snapshot(as_of="2026/03/15")
+        invalid = self._execute_with_scope(
+            PortfolioScope.user("77"),
+            as_of="2026/03/15",
+        )
         self.assertIn("error", invalid)
         self.assertIn("YYYY-MM-DD", invalid["error"])
 

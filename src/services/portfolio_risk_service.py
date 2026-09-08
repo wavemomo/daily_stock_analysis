@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import Config, get_config
+from src.portfolio_ownership import PortfolioScope, UNSET_PORTFOLIO_SCOPE
 from src.repositories.portfolio_repo import PortfolioRepository
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.decision_signal_summary import summarize_decision_signal
@@ -43,7 +44,7 @@ class PortfolioRiskService:
         as_of: Optional[date] = None,
         cost_method: str = "fifo",
         include_realtime: bool = True,
-        owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> Dict[str, Any]:
         as_of_date = as_of or date.today()
         snapshot = self.portfolio_service.get_portfolio_snapshot(
@@ -51,7 +52,7 @@ class PortfolioRiskService:
             as_of=as_of_date,
             cost_method=cost_method,
             include_realtime=include_realtime,
-            owner_id=owner_id,
+            portfolio_scope=portfolio_scope,
         )
 
         thresholds = {
@@ -78,7 +79,7 @@ class PortfolioRiskService:
             cost_method=cost_method,
             lookback_days=thresholds["lookback_days"],
             include_realtime=include_realtime,
-            owner_id=owner_id,
+            portfolio_scope=portfolio_scope,
         )
         drawdown = self._build_drawdown(
             account_id=account_id,
@@ -86,7 +87,7 @@ class PortfolioRiskService:
             cost_method=cost_method,
             threshold_pct=thresholds["drawdown_alert_pct"],
             lookback_days=thresholds["lookback_days"],
-            owner_id=owner_id,
+            portfolio_scope=portfolio_scope,
         )
         stop_loss = self._build_stop_loss(snapshot, thresholds)
         decision_signal_risk = self._build_decision_signal_risk(snapshot)
@@ -212,7 +213,7 @@ class PortfolioRiskService:
         cost_method: str,
         lookback_days: int,
         include_realtime: bool,
-        owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> None:
         if lookback_days <= 0:
             return
@@ -221,7 +222,7 @@ class PortfolioRiskService:
             account_id=account_id,
             as_of_date=as_of_date,
             lookback_days=lookback_days,
-            owner_id=owner_id,
+            portfolio_scope=portfolio_scope,
         )
         if start_date > as_of_date:
             return
@@ -231,7 +232,7 @@ class PortfolioRiskService:
             cost_method=cost_method,
             account_id=account_id,
             lookback_days=lookback_days,
-            owner_id=owner_id,
+            owner_id=portfolio_scope,
         )
         if account_id is not None:
             existing_dates = {row.snapshot_date for row in existing_rows if int(row.account_id) == int(account_id)}
@@ -243,7 +244,7 @@ class PortfolioRiskService:
                         as_of=current_date,
                         cost_method=cost_method,
                         include_realtime=include_realtime,
-                        owner_id=owner_id,
+                        portfolio_scope=portfolio_scope,
                     )
                     existing_dates.add(current_date)
                 current_date += timedelta(days=1)
@@ -253,7 +254,7 @@ class PortfolioRiskService:
             int(account.id)
             for account in self.repo.list_accounts(
                 include_inactive=False,
-                owner_id=owner_id,
+                owner_id=portfolio_scope,
             )
         ]
         if not account_ids:
@@ -267,7 +268,7 @@ class PortfolioRiskService:
                     as_of=current_date,
                     cost_method=cost_method,
                     include_realtime=include_realtime,
-                    owner_id=owner_id,
+                    portfolio_scope=portfolio_scope,
                 )
                 for aid in account_ids:
                     existing_pairs.add((aid, current_date))
@@ -279,26 +280,26 @@ class PortfolioRiskService:
         account_id: Optional[int],
         as_of_date: date,
         lookback_days: int,
-        owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> date:
         window_start = as_of_date - timedelta(days=lookback_days)
         if account_id is not None:
             first_activity = self.repo.get_first_activity_date(
                 account_id=account_id,
                 as_of=as_of_date,
-                owner_id=owner_id,
+                owner_id=portfolio_scope,
             )
             return max(window_start, first_activity or as_of_date)
 
         first_activity_candidates: List[date] = []
         for account in self.repo.list_accounts(
             include_inactive=False,
-            owner_id=owner_id,
+            owner_id=portfolio_scope,
         ):
             first_activity = self.repo.get_first_activity_date(
                 account_id=int(account.id),
                 as_of=as_of_date,
-                owner_id=owner_id,
+                owner_id=portfolio_scope,
             )
             if first_activity is not None:
                 first_activity_candidates.append(first_activity)
@@ -498,14 +499,14 @@ class PortfolioRiskService:
         cost_method: str,
         threshold_pct: float,
         lookback_days: int,
-        owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> Dict[str, Any]:
         rows = self.repo.list_daily_snapshots_for_risk(
             as_of=as_of_date,
             cost_method=cost_method,
             account_id=account_id,
             lookback_days=lookback_days,
-            owner_id=owner_id,
+            owner_id=portfolio_scope,
         )
         if not rows:
             return {

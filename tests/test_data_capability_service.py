@@ -13,6 +13,12 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from src.services.data_capability_service import DataCapabilityService
+from src.services.rbac_service import PERMISSIONS
+
+_TEST_PRINCIPAL = SimpleNamespace(
+    user=SimpleNamespace(id=101),
+    permissions=tuple(PERMISSIONS),
+)
 
 
 class _Fetcher:
@@ -998,8 +1004,14 @@ def test_data_capability_api_paths_return_valid_contract() -> None:
         def get_overview(self):
             return overview_payload
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        client = TestClient(create_app(static_dir=Path(temp_dir)))
+    with tempfile.TemporaryDirectory() as temp_dir, patch(
+        "src.services.wechat_miniapp_auth_service.WechatMiniappAuthService.authenticate_token",
+        return_value=_TEST_PRINCIPAL,
+    ):
+        client = TestClient(
+            create_app(static_dir=Path(temp_dir)),
+            headers={"Authorization": "Bearer data-capability-token"},
+        )
         with patch("api.v1.endpoints.data.DataCapabilityService", _Service):
             overview_response = client.get("/api/v1/data/overview")
             capabilities_response = client.get("/api/v1/data/capabilities")

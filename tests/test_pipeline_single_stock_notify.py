@@ -201,7 +201,7 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
         pipeline.fetch_and_save_stock_data = MagicMock(return_value=(True, None))
         pipeline.analyze_stock = MagicMock(return_value=_make_result("600519"))
         pipeline.notifier = _TrackingNotifier()
-        pipeline.db = MagicMock()
+        pipeline.repo = MagicMock()
         pipeline.save_context_snapshot = True
 
         pipeline.process_single_stock(
@@ -212,8 +212,8 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
             analysis_query_id="query-1",
         )
 
-        pipeline.db.update_analysis_history_diagnostics.assert_called_once()
-        kwargs = pipeline.db.update_analysis_history_diagnostics.call_args.kwargs
+        pipeline.repo.update_diagnostics.assert_called_once()
+        kwargs = pipeline.repo.update_diagnostics.call_args.kwargs
         self.assertEqual(kwargs["query_id"], "query-1")
         self.assertEqual(kwargs["code"], "600519")
         self.assertEqual(kwargs["diagnostics"]["query_id"], "query-1")
@@ -222,7 +222,7 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
     def test_send_notifications_patches_saved_diagnostics_when_push_is_skipped(self):
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
         pipeline.save_context_snapshot = True
-        pipeline.db = MagicMock()
+        pipeline.repo = MagicMock()
         pipeline.config = SimpleNamespace(stock_email_groups=[])
         pipeline.notifier = MagicMock()
         pipeline.notifier.generate_aggregate_report.return_value = "report"
@@ -232,8 +232,8 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
 
         pipeline._send_notifications(results, ReportType.SIMPLE, skip_push=True)
 
-        self.assertEqual(pipeline.db.update_analysis_history_diagnostics.call_count, 2)
-        calls = pipeline.db.update_analysis_history_diagnostics.call_args_list
+        self.assertEqual(pipeline.repo.update_diagnostics.call_count, 2)
+        calls = pipeline.repo.update_diagnostics.call_args_list
         self.assertEqual(calls[0].kwargs["query_id"], "query-0")
         self.assertEqual(calls[0].kwargs["code"], "000001")
         self.assertEqual(calls[0].kwargs["notification_runs"][0]["status"], "skipped")

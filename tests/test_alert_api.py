@@ -22,28 +22,20 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-import src.auth as auth
 from api.app import create_app
 from src.config import Config
+from src.portfolio_ownership import PortfolioScope
 from src.repositories.alert_repo import AlertRepository
+from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.alert_service import AlertService
 from src.services.portfolio_service import PortfolioService
 from src.storage import AlertCooldownRecord, AlertNotificationRecord, AlertTriggerRecord, Base, DatabaseManager
-
-
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
 
 
 class AlertApiTestCase(unittest.TestCase):
     """Alert API contract tests for P1 rule and history endpoints."""
 
     def setUp(self) -> None:
-        _reset_auth_globals()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp_dir.name)
         self.env_path = self.data_dir / ".env"
@@ -53,7 +45,6 @@ class AlertApiTestCase(unittest.TestCase):
                 [
                     "STOCK_LIST=600519",
                     "GEMINI_API_KEY=test",
-                    "ADMIN_AUTH_ENABLED=false",
                     'AGENT_EVENT_ALERT_RULES_JSON=[{"stock_code":"000001","alert_type":"price_cross","direction":"above","price":10}]',
                     f"DATABASE_PATH={self.db_path}",
                 ]
@@ -66,17 +57,34 @@ class AlertApiTestCase(unittest.TestCase):
         os.environ["DATABASE_PATH"] = str(self.db_path)
         Config.reset_instance()
         DatabaseManager.reset_instance()
+        self.db = DatabaseManager.get_instance()
+        user = MiniappUserRepository(self.db).upsert_user(
+            openid="alert-api-test-user", issuer="alert-api-test"
+        )
+        self.principal = SimpleNamespace(
+            user=user,
+            roles=("alert-tester",),
+            permissions=("alerts.read", "alerts.manage", "alerts.notify"),
+        )
+        self.auth_patch = patch(
+            "api.middlewares.auth.WechatMiniappAuthService.authenticate_token",
+            return_value=self.principal,
+        )
+        self.auth_patch.start()
         app = create_app(static_dir=self.data_dir / "empty-static")
-        self.client = TestClient(app)
+        self.client = TestClient(
+            app,
+            headers={"Authorization": "Bearer alert-api-test-token"},
+        )
         self.db = DatabaseManager.get_instance()
 
     def tearDown(self) -> None:
+        self.auth_patch.stop()
         DatabaseManager.reset_instance()
         Config.reset_instance()
         os.environ.pop("ENV_FILE", None)
         os.environ.pop("DATABASE_PATH", None)
         self.temp_dir.cleanup()
-        _reset_auth_globals()
 
     def _create_rule(self, payload: dict | None = None) -> dict:
         body = {
@@ -332,6 +340,7 @@ class AlertApiTestCase(unittest.TestCase):
             broker="Demo",
             market="us",
             base_currency="USD",
+            portfolio_scope=PortfolioScope.user(str(self.principal.user.id)),
         )
         valid_cases = [
             {

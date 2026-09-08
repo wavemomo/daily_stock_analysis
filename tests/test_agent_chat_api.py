@@ -9,13 +9,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from api.app import create_app
 from api.v1.endpoints import agent as agent_endpoint
+from src.portfolio_ownership import PortfolioScope
 from src.config import Config
+from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.agent_chat_session_service import AgentChatSessionService
-from src.storage import DatabaseManager
+from src.storage import DatabaseManager, MiniappUserRecord
 
 
 def setup_function() -> None:
@@ -75,9 +79,86 @@ def _sse_events(text: str) -> list[dict]:
     ]
 
 
+_AGENT_TOKEN = "agent-test-token"
+_AGENT_OWNER_ID = 101
+_AGENT_PERMISSIONS = ("agent.read", "agent.execute", "agent.manage")
+
+
+def _agent_principal() -> SimpleNamespace:
+    user = MiniappUserRepository(DatabaseManager.get_instance()).get_user_by_id(
+        _AGENT_OWNER_ID
+    )
+    assert user is not None
+    return SimpleNamespace(
+        user=user,
+        roles=("member",),
+        permissions=_AGENT_PERMISSIONS,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _authenticate_miniapp_bearer_requests(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "agent_chat_api.db"
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "STOCK_LIST=600519",
+                "GEMINI_API_KEY=test",
+                f"DATABASE_PATH={db_path}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENV_FILE", str(env_path))
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+    db = DatabaseManager.get_instance()
+    with db.get_session() as session:
+        session.add(MiniappUserRecord(id=_AGENT_OWNER_ID, openid="agent-chat-api-user"))
+        session.commit()
+    principal = _agent_principal()
+    with patch(
+        "api.middlewares.auth.WechatMiniappAuthService.authenticate_token",
+        side_effect=lambda token: principal if token == _AGENT_TOKEN else None,
+    ):
+        yield
+    DatabaseManager.reset_instance()
+    Config.reset_instance()
+
+
+def _authenticated_test_client(static_dir: Path) -> TestClient:
+    return TestClient(
+        create_app(static_dir=static_dir),
+        headers={"Authorization": f"Bearer {_AGENT_TOKEN}"},
+    )
+
+
+def _miniapp_request() -> Request:
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/agent/chat/stream",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+    )
+    request.state.auth_kind = "miniapp"
+    request.state.miniapp_principal = _agent_principal()
+    return request
+
+
 async def _collect_stream_events(request: "agent_endpoint.ChatRequest") -> list[dict]:
     response = await agent_endpoint.agent_chat_stream(
         request,
+        _miniapp_request(),
         session_service=AgentChatSessionService(),
     )
     return [
@@ -90,9 +171,25 @@ async def _immediate_to_thread(func, /, *args, **kwargs):
     return func(*args, **kwargs)
 
 
+def test_agent_stream_and_cancellation_require_authenticated_request(tmp_path: Path) -> None:
+    with patch("api.v1.endpoints.agent._build_executor") as build_executor:
+        client = TestClient(create_app(static_dir=tmp_path / "static"))
+        stream_response = client.post(
+            "/api/v1/agent/chat/stream",
+            json={"message": "unauthenticated"},
+        )
+        cancel_response = client.post(
+            "/api/v1/agent/chat/stream/missing-request/cancel",
+        )
+
+    assert stream_response.status_code == 401
+    assert cancel_response.status_code == 401
+    build_executor.assert_not_called()
+
+
 def test_chat_session_messages_api_does_not_expose_provider_trace(tmp_path: Path) -> None:
     db = DatabaseManager(db_url=f"sqlite:///{tmp_path / 'trace.db'}")
-    session_id = "api-trace-hidden"
+    session_id = "miniapp:101:api-trace-hidden"
     user_id = db.save_conversation_user_turn(
         session_id,
         "visible question",
@@ -122,8 +219,7 @@ def test_chat_session_messages_api_does_not_expose_provider_trace(tmp_path: Path
         estimated_tokens=10,
     )
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False):
-        response = TestClient(create_app(static_dir=tmp_path / "static")).get(
+    response = _authenticated_test_client(tmp_path / "static").get(
             f"/api/v1/agent/chat/sessions/{session_id}"
         )
 
@@ -143,14 +239,13 @@ def test_agent_chat_forwards_stock_context_to_executor(tmp_path: Path) -> None:
     executor = MagicMock()
     executor.chat.return_value = _result()
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
             json={
                 "message": "如果不考虑 TTM 呢",
-                "session_id": "s1",
+                "session_id": "miniapp:101:s1",
                 "context": {"stock_code": "600519", "stock_name": "匿名标的"},
             },
         )
@@ -168,14 +263,13 @@ def test_agent_chat_preserves_explicit_report_language(tmp_path: Path) -> None:
     executor = MagicMock()
     executor.chat.return_value = _result()
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
             json={
                 "message": "분석해 주세요",
-                "session_id": "explicit-language",
+                "session_id": "miniapp:101:explicit-language",
                 "context": {"report_language": "ko"},
             },
         )
@@ -191,14 +285,13 @@ def test_agent_chat_treats_null_or_blank_report_language_as_missing(
     executor = MagicMock()
     executor.chat.return_value = _result()
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
             json={
                 "message": "analyze",
-                "session_id": "default-language",
+                "session_id": "miniapp:101:default-language",
                 "context": {"report_language": provided_language},
             },
         )
@@ -213,15 +306,14 @@ def test_agent_chat_stream_treats_null_or_blank_report_language_as_missing(
 ) -> None:
     executor = _executor(_result(backend="litellm"))
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
+    with patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
          patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
         events = asyncio.run(
             _collect_stream_events(
                 agent_endpoint.ChatRequest(
                     message="analyze",
-                    session_id="stream-default-language",
+                    session_id="miniapp:101:stream-default-language",
                     context={"report_language": provided_language},
                 )
             )
@@ -274,19 +366,18 @@ def test_requested_skill_normalization_reuses_agent_factory_catalog_rules() -> N
 
 def test_agent_chat_inherits_saved_skills_without_rewriting_session_state(tmp_path: Path) -> None:
     db = DatabaseManager(db_url=f"sqlite:///{tmp_path / 'inherit.db'}")
-    db.save_conversation_user_turn("saved-session", "first", ["technical"])
+    db.save_conversation_user_turn("miniapp:101:saved-session", "first", ["technical"])
     config = _litellm_config()
     executor = MagicMock()
     executor.chat.return_value = _result()
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=config), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=config), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor) as build_executor:
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
             json={
                 "message": "follow up",
-                "session_id": "saved-session",
+                "session_id": "miniapp:101:saved-session",
                 "context": {
                     "stock_code": "600519",
                     "skills": ["old_skill"],
@@ -306,22 +397,21 @@ def test_agent_chat_inherits_saved_skills_without_rewriting_session_state(tmp_pa
 
 def test_agent_chat_all_invalid_skills_inherit_without_clearing_state(tmp_path: Path) -> None:
     db = DatabaseManager(db_url=f"sqlite:///{tmp_path / 'all-invalid.db'}")
-    db.save_conversation_user_turn("saved-session", "first", ["technical"])
+    db.save_conversation_user_turn("miniapp:101:saved-session", "first", ["technical"])
     config = _litellm_config()
     executor = MagicMock()
     executor.chat.return_value = _result()
     skill_manager = MagicMock()
     skill_manager.list_skills.return_value = [SimpleNamespace(name="technical")]
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=config), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=config), \
          patch("src.agent.factory.get_skill_manager", return_value=skill_manager), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor) as build_executor:
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
             json={
                 "message": "follow up",
-                "session_id": "saved-session",
+                "session_id": "miniapp:101:saved-session",
                 "skills": ["old_technical"],
             },
         )
@@ -330,19 +420,18 @@ def test_agent_chat_all_invalid_skills_inherit_without_clearing_state(tmp_path: 
     build_executor.assert_called_once_with(config, ["technical"])
     assert executor.chat.call_args.kwargs["context"]["skills"] == ["technical"]
     assert executor.chat.call_args.kwargs["selected_skill_ids"] is None
-    assert db.get_conversation_session_selected_skill_ids("saved-session") == [
+    assert db.get_conversation_session_selected_skill_ids("miniapp:101:saved-session") == [
         "technical"
     ]
 
 
 def test_chat_session_messages_returns_null_when_state_is_missing(tmp_path: Path) -> None:
     db = DatabaseManager(db_url=f"sqlite:///{tmp_path / 'default-state.db'}")
-    db.save_conversation_message("legacy-session", "user", "legacy question")
+    db.save_conversation_message("miniapp:101:legacy-session", "user", "legacy question")
 
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config()):
-        response = TestClient(create_app(static_dir=tmp_path / "static")).get(
-            "/api/v1/agent/chat/sessions/legacy-session"
+    with patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config()):
+        response = _authenticated_test_client(tmp_path / "static").get(
+            "/api/v1/agent/chat/sessions/miniapp:101:legacy-session"
         )
 
     assert response.status_code == 200
@@ -352,10 +441,9 @@ def test_chat_session_messages_returns_null_when_state_is_missing(tmp_path: Path
 
 
 def test_codex_agent_chat_rejects_non_streaming_entrypoint(tmp_path: Path) -> None:
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=_codex_config()), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=_codex_config()), \
          patch("api.v1.endpoints.agent._build_executor") as build_executor:
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
             json={"message": "分析 600519"},
         )
@@ -434,19 +522,22 @@ def test_stream_prepares_and_persists_before_accepted_then_starts_backend() -> N
             response = await agent_endpoint.agent_chat_stream(
                 agent_endpoint.ChatRequest(
                     message="分析 AAPL",
-                    session_id="accepted-session",
+                    session_id="miniapp:101:accepted-session",
                     request_id="accepted-request",
                     context={"stock_code": "AAPL"},
                 ),
+                _miniapp_request(),
                 session_service=AgentChatSessionService(),
             )
             iterator = response.body_iterator
             first = json.loads((await anext(iterator)).removeprefix("data: ").strip())
             executor.prepare_turn.assert_called_once_with(
                 message="分析 AAPL",
-                session_id="accepted-session",
+                session_id="miniapp:101:accepted-session",
                 context={"stock_code": "AAPL", "report_language": "zh"},
                 selected_skill_ids=None,
+                resource_owner_id="101",
+                portfolio_scope=PortfolioScope.user("101"),
             )
             executor.execute_turn.assert_not_called()
             await iterator.aclose()
@@ -457,7 +548,7 @@ def test_stream_prepares_and_persists_before_accepted_then_starts_backend() -> N
         "type": "accepted",
         "backend": "codex_app_server",
         "request_id": "accepted-request",
-        "session_id": "accepted-session",
+        "session_id": "miniapp:101:accepted-session",
     }
     executor.execute_turn.assert_not_called()
 
@@ -477,7 +568,7 @@ def test_stream_forwards_normalized_skill_selection_to_prepare_turn() -> None:
             _collect_stream_events(
                 agent_endpoint.ChatRequest(
                     message="check risk",
-                    session_id="risk-session",
+                    session_id="miniapp:101:risk-session",
                     skills=[" risk ", "risk"],
                 )
             )
@@ -487,15 +578,17 @@ def test_stream_forwards_normalized_skill_selection_to_prepare_turn() -> None:
     build_executor.assert_called_once_with(config, ["risk"])
     executor.prepare_turn.assert_called_once_with(
         message="check risk",
-        session_id="risk-session",
+        session_id="miniapp:101:risk-session",
         context={"skills": ["risk"], "report_language": "zh"},
         selected_skill_ids=["risk"],
+        resource_owner_id="101",
+        portfolio_scope=PortfolioScope.user("101"),
     )
 
 
 def test_stream_all_invalid_skills_inherit_without_clearing_state() -> None:
     db = DatabaseManager(db_url="sqlite:///:memory:")
-    db.save_conversation_user_turn("saved-session", "first", ["technical"])
+    db.save_conversation_user_turn("miniapp:101:saved-session", "first", ["technical"])
     session_service = AgentChatSessionService(db)
     executor = _executor(_result(backend="litellm"))
     config = _litellm_config()
@@ -510,9 +603,10 @@ def test_stream_all_invalid_skills_inherit_without_clearing_state() -> None:
             response = await agent_endpoint.agent_chat_stream(
                 agent_endpoint.ChatRequest(
                     message="follow up",
-                    session_id="saved-session",
+                    session_id="miniapp:101:saved-session",
                     skills=["old_technical"],
                 ),
+                _miniapp_request(),
                 session_service=session_service,
             )
             events = [
@@ -528,11 +622,13 @@ def test_stream_all_invalid_skills_inherit_without_clearing_state() -> None:
     assert [event["type"] for event in events] == ["accepted", "done"]
     executor.prepare_turn.assert_called_once_with(
         message="follow up",
-        session_id="saved-session",
+        session_id="miniapp:101:saved-session",
         context={"skills": ["technical"], "report_language": "zh"},
         selected_skill_ids=None,
+        resource_owner_id="101",
+        portfolio_scope=PortfolioScope.user("101"),
     )
-    assert db.get_conversation_session_selected_skill_ids("saved-session") == [
+    assert db.get_conversation_session_selected_skill_ids("miniapp:101:saved-session") == [
         "technical"
     ]
 
@@ -549,9 +645,10 @@ def test_codex_stream_skill_resolution_failure_does_not_register_request() -> No
                 agent_endpoint.agent_chat_stream(
                     agent_endpoint.ChatRequest(
                         message="question",
-                        session_id="failed-session",
+                        session_id="miniapp:101:failed-session",
                         request_id=request_id,
                     ),
+                    _miniapp_request(),
                     session_service=session_service,
                 )
             )
@@ -573,7 +670,8 @@ def test_stream_preparation_failure_emits_no_accepted_and_never_starts_backend(f
              patch("api.v1.endpoints.agent.get_config", return_value=_codex_config()), \
              patch("api.v1.endpoints.agent._build_executor", return_value=executor):
             response = await agent_endpoint.agent_chat_stream(
-                agent_endpoint.ChatRequest(message="question", session_id="failed-session"),
+                agent_endpoint.ChatRequest(message="question", session_id="miniapp:101:failed-session"),
+                _miniapp_request(),
                 session_service=AgentChatSessionService(),
             )
             return [
@@ -587,6 +685,44 @@ def test_stream_preparation_failure_emits_no_accepted_and_never_starts_backend(f
     executor.execute_turn.assert_not_called()
 
 
+def test_stream_quota_rejection_before_accepted_preserves_reason_and_never_starts_backend() -> None:
+    executor = _executor()
+    quota_error = HTTPException(
+        status_code=429,
+        detail={
+            "error": "feature_quota_exceeded",
+            "reason": "feature_disabled",
+            "message": "Agent chat is disabled for this user",
+        },
+    )
+
+    async def exercise() -> list[dict]:
+        with patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
+             patch("api.v1.endpoints.agent.get_config", return_value=_codex_config()), \
+             patch("api.v1.endpoints.agent._build_executor", return_value=executor), \
+             patch("api.v1.endpoints.agent.FeatureQuotaService.reserve_for_request", side_effect=quota_error):
+            response = await agent_endpoint.agent_chat_stream(
+                agent_endpoint.ChatRequest(message="question", session_id="miniapp:101:quota-failed-session"),
+                _miniapp_request(),
+                session_service=AgentChatSessionService(),
+            )
+            return [
+                json.loads(chunk.removeprefix("data: ").strip())
+                async for chunk in response.body_iterator
+            ]
+
+    events = asyncio.run(exercise())
+    assert [event["type"] for event in events] == ["error"]
+    assert events[0]["message"] == "Agent chat is disabled for this user"
+    assert events[0]["error_code"] == "feature_quota_exceeded"
+    assert events[0]["reason"] == "feature_disabled"
+    assert events[0]["status_code"] == 429
+    assert events[0]["backend"] == "codex_app_server"
+    assert events[0]["request_id"]
+    executor.prepare_turn.assert_called_once()
+    executor.execute_turn.assert_not_called()
+
+
 def test_server_selects_actual_backend_for_stream() -> None:
     executor = _executor(_result(backend="codex_app_server"))
     with patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
@@ -594,7 +730,8 @@ def test_server_selects_actual_backend_for_stream() -> None:
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
         async def exercise() -> dict:
             response = await agent_endpoint.agent_chat_stream(
-                agent_endpoint.ChatRequest(message="分析 AAPL", session_id="actual-backend"),
+                agent_endpoint.ChatRequest(message="分析 AAPL", session_id="miniapp:101:actual-backend"),
+                _miniapp_request(),
                 session_service=AgentChatSessionService(),
             )
             iterator = response.body_iterator
@@ -616,7 +753,8 @@ def test_agent_chat_stream_cancels_backend_when_generator_closes() -> None:
              patch("api.v1.endpoints.agent.get_config", return_value=_codex_config()), \
              patch("api.v1.endpoints.agent._build_executor", return_value=executor):
             response = await agent_endpoint.agent_chat_stream(
-                agent_endpoint.ChatRequest(message="question", session_id="cancel-session"),
+                agent_endpoint.ChatRequest(message="question", session_id="miniapp:101:cancel-session"),
+                _miniapp_request(),
                 session_service=AgentChatSessionService(),
             )
             iterator = response.body_iterator
@@ -631,10 +769,19 @@ def test_agent_chat_stream_cancels_backend_when_generator_closes() -> None:
 
 def test_codex_stop_waits_for_cleanup_and_emits_one_terminal_event() -> None:
     cancel_event = threading.Event()
+    active_stream = agent_endpoint._ActiveCodexStream(
+        owner_id="101",
+        cancel_event=cancel_event,
+    )
     with agent_endpoint._ACTIVE_CODEX_STREAMS_LOCK:
-        agent_endpoint._ACTIVE_CODEX_STREAMS["cancel-request"] = cancel_event
+        agent_endpoint._ACTIVE_CODEX_STREAMS["cancel-request"] = active_stream
     try:
-        assert asyncio.run(agent_endpoint.cancel_agent_chat_stream("cancel-request")) == {
+        assert asyncio.run(
+            agent_endpoint.cancel_agent_chat_stream(
+                "cancel-request",
+                _miniapp_request(),
+            )
+        ) == {
             "accepted": True,
             "request_id": "cancel-request",
         }
@@ -646,21 +793,25 @@ def test_codex_stop_waits_for_cleanup_and_emits_one_terminal_event() -> None:
 
 def test_codex_stop_rejects_unknown_or_finished_request() -> None:
     with pytest.raises(Exception) as exc_info:
-        asyncio.run(agent_endpoint.cancel_agent_chat_stream("missing-request"))
+        asyncio.run(
+            agent_endpoint.cancel_agent_chat_stream(
+                "missing-request",
+                _miniapp_request(),
+            )
+        )
     assert getattr(exc_info.value, "status_code", None) == 404
 
 
 def test_litellm_stream_keeps_existing_execution_signature(tmp_path: Path) -> None:
     executor = _executor(_result(backend="litellm"))
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
+    with patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
          patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config(report_language="en")), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
         events = asyncio.run(
             _collect_stream_events(
                 agent_endpoint.ChatRequest(
                     message="question",
-                    session_id="litellm-session",
+                    session_id="miniapp:101:litellm-session",
                     context={"report_language": "ko"},
                 )
             )
@@ -675,12 +826,11 @@ def test_litellm_stream_keeps_existing_execution_signature(tmp_path: Path) -> No
 def test_litellm_non_streaming_error_keeps_legacy_detail(tmp_path: Path) -> None:
     executor = MagicMock()
     executor.chat.side_effect = RuntimeError("legacy failure")
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config()), \
+    with patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config()), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
-        response = TestClient(create_app(static_dir=tmp_path / "static")).post(
+        response = _authenticated_test_client(tmp_path / "static").post(
             "/api/v1/agent/chat",
-            json={"message": "question", "session_id": "litellm-error"},
+            json={"message": "question", "session_id": "miniapp:101:litellm-error"},
         )
     assert response.status_code == 500
     assert response.json()["message"] == "legacy failure"
@@ -689,15 +839,14 @@ def test_litellm_non_streaming_error_keeps_legacy_detail(tmp_path: Path) -> None
 def test_litellm_streaming_error_follows_accepted(tmp_path: Path) -> None:
     executor = _executor()
     executor.execute_turn.side_effect = RuntimeError("legacy failure")
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
+    with patch("api.v1.endpoints.agent.asyncio.to_thread", side_effect=_immediate_to_thread), \
          patch("api.v1.endpoints.agent.get_config", return_value=_litellm_config()), \
          patch("api.v1.endpoints.agent._build_executor", return_value=executor):
         events = asyncio.run(
             _collect_stream_events(
                 agent_endpoint.ChatRequest(
                     message="question",
-                    session_id="litellm-stream-error",
+                    session_id="miniapp:101:litellm-stream-error",
                 )
             )
         )

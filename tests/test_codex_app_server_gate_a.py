@@ -33,6 +33,7 @@ from src.agent.tool_surface import ToolSurface
 from src.agent.codex_tool_process import CodexToolProcessRunner
 from src.agent.tools.execution import ToolAccessContext
 from src.agent.tools.registry import ToolDefinition, ToolParameter, ToolPolicy, ToolRegistry
+from src.portfolio_ownership import UNSCOPED_PORTFOLIO_SCOPE
 
 
 _FAKE_APP_SERVER = r"""
@@ -463,7 +464,7 @@ def _transport(tmp_path: Path, mode: str, *, timeout: float = 3.0) -> CodexAppSe
     return CodexAppServerTransport(
         _fake_command(tmp_path, mode),
         tool_surface=_surface(),
-        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES),
+        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES, portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE),
         request_timeout=timeout,
         environment={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
     )
@@ -622,7 +623,7 @@ def test_parallel_dynamic_tool_requests_roundtrip_and_transport_limits(tmp_path:
     client = CodexAppServerTransport(
         _fake_command(tmp_path, "parallel"),
         tool_surface=_surface(timing),
-        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES),
+        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES, portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE),
         request_timeout=3,
         environment={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
         tool_runner=CodexToolProcessRunner(worker=_probe_process_worker),
@@ -674,6 +675,7 @@ def test_transport_cancel_reaps_blocking_tool_before_close_returns(tmp_path: Pat
         tool_context=ToolAccessContext(
             cancel_event=cancel_event,
             deadline=time.monotonic() + 30,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_result_bytes=MAX_TOOL_RESULT_BYTES,
         ),
         request_timeout=30,
@@ -953,7 +955,7 @@ def test_tool_request_queue_is_bounded_by_agent_max_steps(tmp_path: Path) -> Non
     client = CodexAppServerTransport(
         _fake_command(tmp_path, "tool-flood"),
         tool_surface=_surface(),
-        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES),
+        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES, portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE),
         request_timeout=3,
         environment={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
         tool_runner=CodexToolProcessRunner(worker=_probe_process_worker),
@@ -975,7 +977,7 @@ def test_tool_output_limit_is_a_terminal_turn_error(tmp_path: Path) -> None:
     client = CodexAppServerTransport(
         _fake_command(tmp_path, "blocking"),
         tool_surface=_surface(),
-        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES),
+        tool_context=ToolAccessContext(max_result_bytes=MAX_TOOL_RESULT_BYTES, portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE),
         request_timeout=3,
         environment={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
         tool_runner=CodexToolProcessRunner(worker=_output_too_large_process_worker),

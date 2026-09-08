@@ -14,7 +14,10 @@ from datetime import date
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.agent.tools.execution import check_tool_execution
+from src.agent.tools.execution import (
+    check_tool_execution,
+    get_active_tool_execution_context,
+)
 from src.agent.tools.registry import ToolParameter, ToolDefinition, ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -571,11 +574,21 @@ def _handle_get_portfolio_snapshot(
             return {"error": "as_of must be YYYY-MM-DD"}
 
     try:
+        from src.portfolio_ownership import PortfolioScopeRequiredError, scope_from_legacy_owner
         from src.services.portfolio_service import PortfolioService
         from src.services.portfolio_risk_service import PortfolioRiskService
     except Exception as exc:
         logger.warning("get_portfolio_snapshot unavailable: %s", exc)
         return {"status": "not_supported", "error": f"portfolio module unavailable: {exc}"}
+
+    active_context = get_active_tool_execution_context()
+    if active_context is None:
+        return {"status": "not_authorized", "error": "portfolio access scope is required"}
+
+    try:
+        portfolio_scope = scope_from_legacy_owner(active_context.portfolio_scope)
+    except PortfolioScopeRequiredError:
+        return {"status": "not_authorized", "error": "portfolio access scope is required"}
 
     try:
         portfolio_service = PortfolioService()
@@ -583,6 +596,7 @@ def _handle_get_portfolio_snapshot(
             account_id=account_id,
             as_of=as_of_date,
             cost_method=method,
+            portfolio_scope=portfolio_scope,
         )
         result = {
             "status": "ok",
@@ -595,6 +609,7 @@ def _handle_get_portfolio_snapshot(
                     account_id=account_id,
                     as_of=as_of_date,
                     cost_method=method,
+                    portfolio_scope=portfolio_scope,
                 )
                 result["risk"] = {"status": "ok", **_compact_portfolio_risk(risk)}
             except Exception as risk_exc:

@@ -28,12 +28,27 @@ _APPLIED_ENV_FILE_VALUES: dict[str, str] = {}
 
 
 def _load_env_file() -> None:
-    """Load .env from cwd or project root if present."""
-    candidates = [
-        *_env_file_candidates_from_env(),
-        Path.cwd() / ".env",
-        _PROJECT_ROOT / ".env",
-    ]
+    """Load .env, honouring the process-wide ``ENV_FILE`` selection.
+
+    ``src.config.setup_env`` treats ``ENV_FILE`` as the single source of truth
+    (falling back to the repository ``.env`` only when it is unset). This loader
+    must behave the same way: when ``ENV_FILE`` is pinned, the cwd / project-root
+    ``.env`` fallback is skipped so that deployments and tests that select a
+    specific env file never have the real repository ``.env`` silently layered
+    on top of it. ``SCREENING_ENV_FILE`` overrides still apply in both modes.
+    """
+    env_file = os.getenv("ENV_FILE")
+    if env_file:
+        candidates = [
+            *_env_file_candidates_from_env(),
+            Path(env_file),
+        ]
+    else:
+        candidates = [
+            *_env_file_candidates_from_env(),
+            Path.cwd() / ".env",
+            _PROJECT_ROOT / ".env",
+        ]
     seen: set[Path] = set()
     file_values: dict[str, str] = {}
     for path in candidates:

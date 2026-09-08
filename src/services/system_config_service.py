@@ -646,7 +646,11 @@ class SystemConfigService:
         mask_token: str = "******",
     ) -> Dict[str, Any]:
         """Return cheap generation backend status for unsaved settings draft."""
-        issues = self._collect_generation_backend_issues(items=items, mask_token=mask_token)
+        issues = self._collect_generation_backend_issues(
+            items=items,
+            mask_token=mask_token,
+            ignore_inactive_litellm_issues=True,
+        )
         errors = [issue for issue in issues if issue["severity"] == "error"]
         if errors:
             raise ConfigValidationError(issues=errors)
@@ -2408,6 +2412,36 @@ class SystemConfigService:
         )
 
     @classmethod
+    def _is_litellm_generation_config_key(cls, key: str) -> bool:
+        """Whether a generation-status key only matters when LiteLLM is active."""
+        normalized = str(key or "").strip().upper()
+        if normalized in {
+            "GENERATION_BACKEND",
+            "GENERATION_FALLBACK_BACKEND",
+            "GENERATION_BACKEND_TIMEOUT_SECONDS",
+            "GENERATION_BACKEND_MAX_OUTPUT_BYTES",
+            "GENERATION_BACKEND_MAX_CONCURRENCY",
+            "LOCAL_CLI_BACKEND_MAX_CONCURRENCY",
+            "OPENCODE_CLI_MODEL",
+        }:
+            return False
+        return cls._is_generation_backend_status_key(normalized)
+
+    @staticmethod
+    def _has_active_litellm_generation_backend(effective_map: Dict[str, str]) -> bool:
+        """Return whether the draft selects LiteLLM as a primary or fallback backend."""
+        primary_backend = normalize_backend_id(
+            effective_map.get("GENERATION_BACKEND"),
+            default=LITELLM_BACKEND_ID,
+        )
+        fallback_backend = (
+            LITELLM_BACKEND_ID
+            if "GENERATION_FALLBACK_BACKEND" not in effective_map
+            else (effective_map.get("GENERATION_FALLBACK_BACKEND") or "").strip().lower()
+        )
+        return primary_backend == LITELLM_BACKEND_ID or fallback_backend == LITELLM_BACKEND_ID
+
+    @classmethod
     def _filter_generation_backend_items(
         cls,
         items: Sequence[Dict[str, str]],
@@ -2444,8 +2478,9 @@ class SystemConfigService:
         *,
         items: Sequence[Dict[str, str]],
         mask_token: str,
+        ignore_inactive_litellm_issues: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Collect only config issues that affect generation backend status/smoke."""
+        """Collect config issues relevant to generation backend status or smoke tests."""
         issues = self._collect_issues(
             items=self._filter_generation_backend_items(items),
             mask_token=mask_token,
@@ -2455,10 +2490,19 @@ class SystemConfigService:
             mask_token=mask_token,
         )
         issues.extend(self._validate_generation_backend_litellm_runtime_source(effective_map))
-        return [
+        issues = [
             issue for issue in issues
             if self._is_generation_backend_status_key(str(issue.get("key", "")))
         ]
+        if (
+            ignore_inactive_litellm_issues
+            and not self._has_active_litellm_generation_backend(effective_map)
+        ):
+            issues = [
+                issue for issue in issues
+                if not self._is_litellm_generation_config_key(str(issue.get("key", "")))
+            ]
+        return issues
 
     @staticmethod
     def _validate_generation_backend_litellm_runtime_source(effective_map: Dict[str, str]) -> List[Dict[str, Any]]:

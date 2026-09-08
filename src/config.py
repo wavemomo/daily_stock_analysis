@@ -1310,6 +1310,31 @@ class Config:
         return (os.getenv('WECHAT_MINIAPP_APP_SECRET') or '').strip()
 
     @property
+    def wechat_open_web_app_id(self) -> str:
+        """微信开放平台网站应用 AppID；仅服务端 OAuth 客户端使用。"""
+        return (os.getenv('WECHAT_OPEN_WEB_APP_ID') or '').strip()
+
+    @property
+    def wechat_open_web_app_secret(self) -> str:
+        """微信开放平台网站应用 AppSecret；不得传入客户端或日志。"""
+        return (os.getenv('WECHAT_OPEN_WEB_APP_SECRET') or '').strip()
+
+    @property
+    def wechat_open_web_redirect_uri(self) -> str:
+        """已在微信开放平台登记的服务端 OAuth 回调完整 URI。"""
+        return (os.getenv('WECHAT_OPEN_WEB_REDIRECT_URI') or '').strip()
+
+    @property
+    def wechat_open_web_state_ttl_seconds(self) -> int:
+        return parse_env_int(
+            os.getenv('WECHAT_OPEN_WEB_STATE_TTL_SECONDS'),
+            300,
+            field_name='WECHAT_OPEN_WEB_STATE_TTL_SECONDS',
+            minimum=60,
+            maximum=900,
+        )
+
+    @property
     def wechat_miniapp_code2session_timeout_seconds(self) -> int:
         return parse_env_int(
             os.getenv('WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS'),
@@ -1330,12 +1355,14 @@ class Config:
         )
 
     @property
-    def rbac_bootstrap_admin_openids(self) -> frozenset[str]:
-        """仅用于幂等授予管理员角色；删除配置不会自动收权。"""
-        return frozenset(
-            item.strip()
-            for item in (os.getenv('RBAC_BOOTSTRAP_ADMIN_OPENIDS') or '').split(',')
-            if item.strip()
+    def web_user_session_ttl_seconds(self) -> int:
+        """普通 Web 用户独立数据库会话的有效期。"""
+        return parse_env_int(
+            os.getenv('WEB_USER_SESSION_TTL_SECONDS'),
+            604800,
+            field_name='WEB_USER_SESSION_TTL_SECONDS',
+            minimum=300,
+            maximum=2592000,
         )
 
     # === 配置校验模式 ===

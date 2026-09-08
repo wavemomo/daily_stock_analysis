@@ -7,6 +7,11 @@ import json
 import unittest
 from datetime import date
 
+from src.portfolio_ownership import (
+    LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+    UNSET_PORTFOLIO_SCOPE,
+    PortfolioScope,
+)
 from src.services.portfolio_alerts import (
     PortfolioRiskAlert,
     evaluate_portfolio_risk_alert,
@@ -36,18 +41,24 @@ class FakePortfolioService:
         self.snapshot_calls.append(kwargs)
         return self.snapshot
 
-    def list_accounts(self, include_inactive=False, owner_id=None):
-        self.list_calls.append({"include_inactive": include_inactive, "owner_id": owner_id})
+    def list_accounts(self, include_inactive=False, portfolio_scope=UNSET_PORTFOLIO_SCOPE):
+        self.list_calls.append({"include_inactive": include_inactive, "portfolio_scope": portfolio_scope})
         return self.accounts
 
 
-def _risk_rule(alert_type: str, *, target="1", parameters=None, owner_id=None) -> PortfolioRiskAlert:
+def _risk_rule(
+    alert_type: str,
+    *,
+    target="1",
+    parameters=None,
+    portfolio_scope: PortfolioScope = LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+) -> PortfolioRiskAlert:
     return PortfolioRiskAlert(
         target_scope="portfolio_account",
         target=target,
         alert_type=alert_type,
         parameters=parameters or {},
-        owner_id=owner_id,
+        portfolio_scope=portfolio_scope,
         metadata={"persisted_rule_id": 7, "effective_target": f"account:{target}"},
     )
 
@@ -123,9 +134,10 @@ class PortfolioAlertsTestCase(unittest.TestCase):
         self.assertEqual(diagnostics["top_affected_symbols"], ["AAPL", "MSFT"])
 
     def test_concentration_uses_top_weight_pct_and_owner_scope(self) -> None:
+        scope = PortfolioScope.user("42")
         risk_service = FakeRiskService(_risk_report())
         result = evaluate_portfolio_risk_alert(
-            _risk_rule("portfolio_concentration", owner_id="42"),
+            _risk_rule("portfolio_concentration", portfolio_scope=scope),
             risk_service=risk_service,
         )
 
@@ -134,7 +146,7 @@ class PortfolioAlertsTestCase(unittest.TestCase):
         self.assertEqual(result["threshold"], 35.0)
         self.assertEqual(
             risk_service.calls,
-            [{"account_id": 1, "cost_method": "fifo", "owner_id": "42"}],
+            [{"account_id": 1, "cost_method": "fifo", "portfolio_scope": scope}],
         )
 
     def test_drawdown_uses_risk_report_alert_and_max_drawdown(self) -> None:
@@ -165,9 +177,10 @@ class PortfolioAlertsTestCase(unittest.TestCase):
                 }
             ],
         }
+        scope = PortfolioScope.user("42")
         portfolio_service = FakePortfolioService(snapshot=snapshot)
         result = evaluate_portfolio_risk_alert(
-            _risk_rule("portfolio_price_stale", target="3", owner_id="42"),
+            _risk_rule("portfolio_price_stale", target="3", portfolio_scope=scope),
             portfolio_service=portfolio_service,
         )
 
@@ -175,7 +188,7 @@ class PortfolioAlertsTestCase(unittest.TestCase):
         self.assertEqual(result["observed_value"], 2.0)
         self.assertEqual(
             portfolio_service.snapshot_calls,
-            [{"account_id": 3, "cost_method": "fifo", "owner_id": "42"}],
+            [{"account_id": 3, "cost_method": "fifo", "portfolio_scope": scope}],
         )
         diagnostics = json.loads(result["diagnostics"])
         self.assertEqual(diagnostics["account_id"], 3)
@@ -191,20 +204,21 @@ class PortfolioAlertsTestCase(unittest.TestCase):
             ]
         }
 
+        scope = PortfolioScope.user("42")
         portfolio_service = FakePortfolioService(snapshot=snapshot)
         targets, overflow = expand_symbol_targets(
             target_scope="portfolio_holdings",
             target="all",
             config=None,
             portfolio_service=portfolio_service,
-            owner_id="42",
+            portfolio_scope=scope,
         )
 
         self.assertEqual([item.symbol for item in targets], ["AAPL", "HK00700"])
         self.assertEqual(overflow, 0)
         self.assertEqual(
             portfolio_service.snapshot_calls,
-            [{"account_id": None, "cost_method": "fifo", "owner_id": "42"}],
+            [{"account_id": None, "cost_method": "fifo", "portfolio_scope": scope}],
         )
 
     def test_portfolio_holdings_expansion_preserves_exchange_identity_and_dedupes_equivalent_formats(self) -> None:
@@ -224,15 +238,27 @@ class PortfolioAlertsTestCase(unittest.TestCase):
             ]
         }
 
+        portfolio_service = FakePortfolioService(snapshot=snapshot)
         targets, overflow = expand_symbol_targets(
             target_scope="portfolio_holdings",
             target="all",
             config=None,
-            portfolio_service=FakePortfolioService(snapshot=snapshot),
+            portfolio_service=portfolio_service,
+            portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE,
         )
 
         self.assertEqual([item.symbol for item in targets], ["SH000001", "SZ000001", "000001", "SH600519"])
         self.assertEqual(overflow, 0)
+        self.assertEqual(
+            portfolio_service.snapshot_calls,
+            [
+                {
+                    "account_id": None,
+                    "cost_method": "fifo",
+                    "portfolio_scope": LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+                }
+            ],
+        )
 
     def test_watchlist_expansion_refreshes_stock_list(self) -> None:
         class Config:

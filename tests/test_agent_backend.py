@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from src.agent.agent_backend import (
     AgentRunRequest,
     AgentRunResult,
@@ -32,6 +34,11 @@ from src.agent.tool_surface import ToolSurface
 from src.agent.tools.execution import ToolAccessContext
 from src.agent.tools.registry import ToolDefinition, ToolPolicy, ToolRegistry
 from src.llm.backend_registry import resolve_generation_backend_id
+from src.portfolio_ownership import (
+    PortfolioScopeRequiredError,
+    UNSCOPED_PORTFOLIO_SCOPE,
+    UNSET_PORTFOLIO_SCOPE,
+)
 
 
 class _FinalAnswerAdapter:
@@ -54,6 +61,8 @@ def _request(**overrides):
         "max_wall_clock_seconds": 30,
         "progress_callback": None,
         "cancel_event": None,
+        "resource_owner_id": None,
+        "portfolio_scope": UNSCOPED_PORTFOLIO_SCOPE,
     }
     values.update(overrides)
     return AgentRunRequest(**values)
@@ -86,6 +95,7 @@ def test_agent_run_request_does_not_carry_tool_dependencies() -> None:
     names = {item.name for item in fields(AgentRunRequest)}
     assert "tool_registry" not in names
     assert "tool_surface" not in names
+    assert "resource_owner_id" in names
 
 
 def test_agent_run_result_contains_only_consumed_terminal_state() -> None:
@@ -197,6 +207,7 @@ def test_litellm_backend_matches_existing_runner_result() -> None:
         max_steps=3,
         progress_callback=direct_events.append,
         max_wall_clock_seconds=30,
+        portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
     )
     wrapped = LiteLLMAgentBackend(registry, _FinalAnswerAdapter()).run(
         _request(progress_callback=wrapped_events.append)
@@ -215,6 +226,36 @@ def test_litellm_backend_matches_existing_runner_result() -> None:
     )
     assert wrapped_events == direct_events
     assert wrapped.backend == "litellm"
+
+
+def test_litellm_backend_forwards_trusted_owner_to_runner() -> None:
+    loop_result = SimpleNamespace(
+        success=True,
+        content="answer",
+        tool_calls_log=[],
+        model="deepseek/chat",
+        provider="deepseek",
+        error=None,
+        messages=[],
+        total_steps=1,
+        total_tokens=0,
+    )
+    backend = LiteLLMAgentBackend(ToolRegistry(), _FinalAnswerAdapter())
+
+    with patch("src.agent.agent_backend.run_agent_loop", return_value=loop_result) as run_loop:
+        result = backend.run(_request(resource_owner_id="42"))
+
+    assert result.success is True
+    assert run_loop.call_args.kwargs["resource_owner_id"] == "42"
+    assert run_loop.call_args.kwargs["portfolio_scope"] == UNSCOPED_PORTFOLIO_SCOPE
+
+
+def test_agent_run_request_requires_explicit_portfolio_scope() -> None:
+    with pytest.raises(
+        PortfolioScopeRequiredError,
+        match="portfolio access scope is required",
+    ):
+        _request(portfolio_scope=UNSET_PORTFOLIO_SCOPE)
 
 
 class _FakeTransport:
@@ -271,15 +312,14 @@ def test_codex_backend_uses_tool_surface_and_ephemeral_transport(monkeypatch) ->
     )
     surface = _codex_surface()
     backend = CodexAgentBackend(surface, SimpleNamespace(agent_orchestrator_timeout_s=30), _FakeTransport)
-    result = backend.run(_request())
-
-    assert result.success is True
-    assert result.final_answer == "codex answer"
+    result = backend.run(_request(resource_owner_id="42"))
     assert result.backend == "codex_app_server"
     assert result.model == "Codex"
     assert result.total_steps == 1
     assert result.tool_calls_log[0]["tool"] == "echo"
     assert _FakeTransport.last.kwargs["tool_surface"] is surface
+    assert _FakeTransport.last.kwargs["tool_context"].resource_owner_id == "42"
+    assert _FakeTransport.last.kwargs["tool_context"].portfolio_scope == UNSCOPED_PORTFOLIO_SCOPE
     assert _FakeTransport.last.kwargs["max_tool_calls"] == 3
     assert _FakeTransport.last.injected == (
         "thread-1",
@@ -290,6 +330,8 @@ def test_codex_backend_uses_tool_surface_and_ephemeral_transport(monkeypatch) ->
     assert "provide or select an exact stock code" in _FakeTransport.last.thread_kwargs[
         "developer_instructions"
     ]
+    assert result.success is True
+    assert result.final_answer == "codex answer"
 
 
 def test_production_codex_preparation_matches_the_three_phase6_tools(monkeypatch) -> None:
@@ -325,6 +367,7 @@ def test_production_codex_preparation_matches_the_three_phase6_tools(monkeypatch
             "分析 AAPL",
             "session-1",
             context={"stock_code": "AAPL", "stock_name": "Apple"},
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
         )
 
     assert result.success is True
@@ -375,6 +418,7 @@ def test_litellm_preparation_keeps_the_existing_chat_workflow() -> None:
             message="分析 AAPL",
             session_id="session-1",
             context={"stock_code": "AAPL"},
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
         )
 
     assert "get_realtime_quote" in turn.prepared.system_prompt

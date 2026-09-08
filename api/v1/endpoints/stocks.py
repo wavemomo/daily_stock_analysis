@@ -17,7 +17,7 @@ import re
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, Depends
 
-from api.deps import get_system_config_service
+from api.deps import get_request_analysis_owner_context, get_system_config_service
 
 from api.v1.schemas.stocks import (
     ExtractFromImageResponse,
@@ -29,6 +29,7 @@ from api.v1.schemas.stocks import (
 )
 from api.v1.schemas.history import WatchlistRequest, WatchlistResponse
 from api.v1.schemas.common import ErrorResponse
+from src.services.feature_quota_service import FeatureQuotaService
 from src.services.image_stock_extractor import (
     ALLOWED_MIME,
     MAX_SIZE_BYTES,
@@ -41,6 +42,7 @@ from src.services.import_parser import (
 )
 from src.services.stock_service import StockService
 from src.services.stock_profile_service import InvalidStockProfileCode, StockProfileService
+from src.services.history_service import HistoryService
 from src.services.run_diagnostics import sanitize_diagnostic_text
 from src.services.stock_list_parser import split_stock_list
 from src.services.system_config_service import SystemConfigService
@@ -136,6 +138,7 @@ def _watchlist_match_key(code: str) -> str:
     description="上传截图/图片，通过 Vision LLM 提取股票代码。支持 JPEG、PNG、WebP、GIF，最大 5MB。",
 )
 def extract_from_image(
+    http_request: Request,
     file: Optional[UploadFile] = File(None, description="图片文件（表单字段名 file）"),
     include_raw: bool = Query(False, description="是否在结果中包含原始 LLM 响应"),
 ) -> ExtractFromImageResponse:
@@ -180,6 +183,7 @@ def extract_from_image(
             detail={"error": "read_failed", "message": "读取上传文件失败"},
         )
 
+    FeatureQuotaService().reserve_for_request(http_request, 'image_stock_extract')
     try:
         items, raw_text = extract_stock_codes_from_image(data, content_type)
         extract_items = [
@@ -423,13 +427,17 @@ def remove_from_watchlist(
 )
 def get_stock_profile(
     stock_code: str,
+    http_request: Request,
     history_days: int = Query(60, ge=1, le=365, description="日线历史天数"),
 ) -> StockProfileResponse:
     """Return partial profile data without failing on one optional block."""
     _validate_and_normalize_stock_code(stock_code)
     try:
+        owner = get_request_analysis_owner_context(http_request)
         return StockProfileResponse(
-            **StockProfileService().get_profile(stock_code, history_days=history_days)
+            **StockProfileService(
+                history_service=HistoryService(owner=owner),
+            ).get_profile(stock_code, history_days=history_days)
         )
     except InvalidStockProfileCode:
         raise HTTPException(

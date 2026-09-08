@@ -12,12 +12,23 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import QueuePool
 
-from src.agent.codex_tool_process import MAX_TOOL_RESULT_BYTES, CodexToolProcessRunner
+from src.agent.codex_tool_process import (
+    MAX_TOOL_RESULT_BYTES,
+    CodexToolProcessRunner,
+    _context_from_payload,
+    _context_payload,
+)
 from src.agent.stock_scope import StockScope
 from src.agent.tools.execution import ToolAccessContext
+from src.portfolio_ownership import (
+    LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+    PortfolioScope,
+    UNSCOPED_PORTFOLIO_SCOPE,
+)
 
 
 def _ok_result(tool_name: str, payload: dict) -> dict:
@@ -30,6 +41,35 @@ def _ok_result(tool_name: str, payload: dict) -> dict:
         "audit": {},
         "diagnostics": {},
     }
+
+
+@pytest.mark.parametrize(
+    "portfolio_scope",
+    [
+        PortfolioScope.user("42"),
+        LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+        UNSCOPED_PORTFOLIO_SCOPE,
+    ],
+)
+def test_tool_process_context_roundtrips_typed_portfolio_scope(portfolio_scope) -> None:
+    context = ToolAccessContext(portfolio_scope=portfolio_scope)
+
+    restored = _context_from_payload(_context_payload(context))
+
+    assert restored.portfolio_scope == portfolio_scope
+
+
+def test_tool_process_context_rejects_missing_portfolio_scope() -> None:
+    with pytest.raises(ValueError, match="portfolio scope is required in tool process context"):
+        _context_from_payload({"stock_scope": None})
+
+
+def _internal_tool_context(**kwargs) -> ToolAccessContext:
+    """Mark process-test calls as trusted internal, never implicit tenant access."""
+    return ToolAccessContext(
+        portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
+        **kwargs,
+    )
 
 
 def _escaped_result_worker(tool_name: str, arguments: dict, _context: ToolAccessContext) -> dict:
@@ -174,7 +214,7 @@ def test_three_production_tools_execute_through_spawned_worker(
             result = runner.execute(
                 tool_name,
                 arguments,
-                ToolAccessContext(
+                _internal_tool_context(
                     stock_scope=stock_scope,
                     backend="codex_app_server",
                     session_id="process-contract",
@@ -203,7 +243,7 @@ def test_running_sqlite_query_is_cancelled_and_reaped_three_times(tmp_path: Path
                 runner,
                 "blocking_query",
                 {"marker": str(marker)},
-                ToolAccessContext(
+                _internal_tool_context(
                     cancel_event=cancel_event,
                     deadline=time.monotonic() + 30,
                 ),
@@ -243,7 +283,7 @@ def test_sqlite_lock_wait_is_cancelled_without_leaving_database_locked(tmp_path:
             runner,
             "blocking_lock",
             {"marker": str(marker), "db_path": str(db_path)},
-            ToolAccessContext(cancel_event=cancel_event, deadline=time.monotonic() + 30),
+            _internal_tool_context(cancel_event=cancel_event, deadline=time.monotonic() + 30),
         )
         _wait_for_marker(marker)
         cancel_event.set()
@@ -273,7 +313,7 @@ def test_pool_wait_honors_deadline_and_releases_worker(tmp_path: Path) -> None:
         result = runner.execute(
             "blocking_pool",
             {"marker": str(marker), "db_path": str(db_path)},
-            ToolAccessContext(deadline=started + 1.5),
+            _internal_tool_context(deadline=started + 1.5),
         )
     finally:
         runner.close()
@@ -293,7 +333,7 @@ def test_child_crash_is_reported_and_reaped(tmp_path: Path) -> None:
         result = runner.execute(
             "crash",
             {"marker": str(marker)},
-            ToolAccessContext(deadline=time.monotonic() + 5),
+            _internal_tool_context(deadline=time.monotonic() + 5),
         )
     finally:
         runner.close()
@@ -313,7 +353,7 @@ def test_pre_cancelled_call_never_spawns_worker() -> None:
         result = runner.execute(
             "not_started",
             {"marker": "unused"},
-            ToolAccessContext(cancel_event=cancel_event, deadline=time.monotonic() + 5),
+            _internal_tool_context(cancel_event=cancel_event, deadline=time.monotonic() + 5),
         )
     finally:
         runner.close()
@@ -328,7 +368,7 @@ def test_ipc_limit_is_measured_on_raw_result_bytes_not_json_escaping() -> None:
         result = runner.execute(
             "escaped_result",
             {"size": MAX_TOOL_RESULT_BYTES},
-            ToolAccessContext(deadline=time.monotonic() + 5),
+            _internal_tool_context(deadline=time.monotonic() + 5),
         )
     finally:
         runner.close()
@@ -343,7 +383,7 @@ def test_ipc_reports_output_too_large_for_raw_result_over_limit() -> None:
         result = runner.execute(
             "oversized_result",
             {"size": MAX_TOOL_RESULT_BYTES + 1},
-            ToolAccessContext(deadline=time.monotonic() + 5),
+            _internal_tool_context(deadline=time.monotonic() + 5),
         )
     finally:
         runner.close()
@@ -358,7 +398,7 @@ def test_ipc_rejects_tool_surface_truncation_as_output_too_large() -> None:
         result = runner.execute(
             "truncated_result",
             {},
-            ToolAccessContext(deadline=time.monotonic() + 5),
+            _internal_tool_context(deadline=time.monotonic() + 5),
         )
     finally:
         runner.close()
@@ -374,7 +414,7 @@ def test_runner_close_reaps_active_worker_before_returning(tmp_path: Path) -> No
         runner,
         "blocking_close",
         {"marker": str(marker)},
-        ToolAccessContext(deadline=time.monotonic() + 30),
+        _internal_tool_context(deadline=time.monotonic() + 30),
     )
     _wait_for_marker(marker)
 
@@ -397,7 +437,7 @@ def test_completed_cleanup_is_idempotent_for_stale_owner_reference(tmp_path: Pat
         runner,
         "blocking_close_race",
         {"marker": str(marker)},
-        ToolAccessContext(cancel_event=cancel_event, deadline=time.monotonic() + 30),
+        _internal_tool_context(cancel_event=cancel_event, deadline=time.monotonic() + 30),
     )
     _wait_for_marker(marker)
     with runner._state_lock:
@@ -421,7 +461,7 @@ def test_term_escalates_to_kill_and_reaps_owned_process_group(tmp_path: Path) ->
         runner,
         "ignore_term",
         {"marker": str(marker)},
-        ToolAccessContext(cancel_event=cancel_event, deadline=time.monotonic() + 30),
+        _internal_tool_context(cancel_event=cancel_event, deadline=time.monotonic() + 30),
     )
     _wait_for_marker(marker)
 
@@ -446,7 +486,7 @@ def test_child_crash_reaps_descendant_process_group(tmp_path: Path) -> None:
         result = runner.execute(
             "crash_with_descendant",
             {"marker": str(marker)},
-            ToolAccessContext(deadline=time.monotonic() + 5),
+            _internal_tool_context(deadline=time.monotonic() + 5),
         )
         _wait_for_marker(marker)
         descendant_pid = int(marker.read_text(encoding="utf-8"))

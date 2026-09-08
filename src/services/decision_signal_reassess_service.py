@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any, Optional
 
@@ -45,6 +46,18 @@ class DecisionSignalReassessGuardrailBlockedError(Exception):
         super().__init__(blocked_reason)
 
 
+@dataclass(frozen=True)
+class _PreparedReassess:
+    """Validated reassessment data that can be persisted without new validation."""
+
+    record: AnalysisHistory
+    preview: dict[str, Any]
+    warnings: list[dict[str, object]]
+    blocked_reason: Optional[str]
+    persist_payload: Optional[dict[str, Any]]
+    market_phase_summary: Mapping[str, Any]
+
+
 class DecisionSignalReassessService:
     """Recompute a profile signal and optionally persist the authoritative result."""
 
@@ -56,13 +69,14 @@ class DecisionSignalReassessService:
         self.db = db or DatabaseManager.get_instance()
         self.signal_service = signal_service or DecisionSignalService(db_manager=self.db)
 
-    def reassess(
+    def prepare_reassess(
         self,
         *,
         source_report_id: int,
         decision_profile: str,
         persist: bool = False,
-    ) -> dict[str, Any]:
+    ) -> _PreparedReassess:
+        """Validate and normalize a reassessment before any quota reservation or write."""
         decision_profile_norm = normalize_decision_profile(decision_profile)
         if decision_profile_norm is None:
             raise ValueError("decision_profile is required")
@@ -113,37 +127,57 @@ class DecisionSignalReassessService:
             "watch_conditions": preview_candidate.watch_conditions,
             "metadata": metadata,
         }
-        if not persist:
-            return {
-                "preview": preview,
-                "item": None,
-                "created": False,
-                "persist_status": None,
-                "warnings": policy.warnings,
-                "blocked_reason": policy.blocked_reason,
-            }
-
-        if not policy.guardrail_result.passed:
-            raise DecisionSignalReassessGuardrailBlockedError(
-                blocked_reason=policy.blocked_reason or "actionable_signal_blocked_by_guardrail",
-                warnings=policy.warnings,
-            )
-
-        payload = _build_persist_payload(
-            record,
-            raw_result=raw_result,
-            decision_profile=decision_profile_norm,
-            candidate=preview_candidate,
-            metadata=metadata,
-        )
         market_phase_summary = _as_mapping(context_snapshot.get("market_phase_summary"))
         if not market_phase_summary:
             market_phase_summary = _as_mapping(raw_result.get("market_phase_summary"))
+
+        persist_payload: Optional[dict[str, Any]] = None
+        if persist:
+            if not policy.guardrail_result.passed:
+                raise DecisionSignalReassessGuardrailBlockedError(
+                    blocked_reason=policy.blocked_reason or "actionable_signal_blocked_by_guardrail",
+                    warnings=policy.warnings,
+                )
+            persist_payload = _build_persist_payload(
+                record,
+                raw_result=raw_result,
+                decision_profile=decision_profile_norm,
+                candidate=preview_candidate,
+                metadata=metadata,
+            )
+
+        return _PreparedReassess(
+            record=record,
+            preview=preview,
+            warnings=policy.warnings,
+            blocked_reason=policy.blocked_reason,
+            persist_payload=persist_payload,
+            market_phase_summary=market_phase_summary,
+        )
+
+    def complete_reassess(
+        self,
+        prepared: _PreparedReassess,
+        *,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        """Persist a prepared reassessment, or return its preview without side effects."""
+        if not persist:
+            return {
+                "preview": prepared.preview,
+                "item": None,
+                "created": False,
+                "persist_status": None,
+                "warnings": prepared.warnings,
+                "blocked_reason": prepared.blocked_reason,
+            }
+        if prepared.persist_payload is None:
+            raise ValueError("persist reassessment requires a prepared persistence payload")
         try:
             outcome = self.signal_service.create_history_bound_signal_with_outcome(
-                payload,
-                history_created_at=getattr(record, "created_at", None),
-                market_phase_summary=market_phase_summary,
+                prepared.persist_payload,
+                history_created_at=getattr(prepared.record, "created_at", None),
+                market_phase_summary=prepared.market_phase_summary,
             )
         except ValueError as exc:
             raise DecisionSignalUnsupportedReportSnapshotError(
@@ -154,9 +188,24 @@ class DecisionSignalReassessService:
             "item": outcome.item,
             "created": outcome.created,
             "persist_status": outcome.disposition,
-            "warnings": policy.warnings,
+            "warnings": prepared.warnings,
             "blocked_reason": None,
         }
+
+    def reassess(
+        self,
+        *,
+        source_report_id: int,
+        decision_profile: str,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        """Compatibility wrapper for callers that do not manage quota reservations."""
+        prepared = self.prepare_reassess(
+            source_report_id=source_report_id,
+            decision_profile=decision_profile,
+            persist=persist,
+        )
+        return self.complete_reassess(prepared, persist=persist)
 
 
 def _build_persist_payload(

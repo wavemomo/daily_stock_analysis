@@ -26,6 +26,9 @@ from typing import List, Dict, Any, Optional, Tuple, Callable
 import pandas as pd
 
 from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Config
+from src.analysis_ownership import AnalysisOwner
+from src.portfolio_ownership import LEGACY_GLOBAL_PORTFOLIO_SCOPE, PortfolioScope
+from src.repositories.analysis_repo import AnalysisRepository
 from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.base import is_bse_code, normalize_stock_code
@@ -248,6 +251,9 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
+        owner: Optional[AnalysisOwner] = None,
+        owner_scope: Optional[str] = "global",
+        owner_user_id: Optional[int] = None,
     ):
         """
         初始化调度器
@@ -275,9 +281,24 @@ class StockAnalysisPipeline:
             else bool(daily_market_context_enabled)
         )
         self.daily_market_context_allow_generate = daily_market_context_allow_generate
+        if owner is not None:
+            if not isinstance(owner, AnalysisOwner):
+                raise TypeError("owner must be an AnalysisOwner")
+            if owner_user_id is not None or (
+                owner_scope is not None and owner_scope != "global"
+            ):
+                legacy_owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+                if legacy_owner != owner:
+                    raise ValueError("owner conflicts with owner_scope/owner_user_id")
+            self.owner = owner
+        else:
+            resolved_owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+            assert resolved_owner is not None
+            self.owner = resolved_owner
         
         # 初始化各模块
         self.db = get_db()
+        self.repo = AnalysisRepository(self.db, owner=self.owner)
         self.fetcher_manager = DataFetcherManager()
         # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
         self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
@@ -350,6 +371,18 @@ class StockAnalysisPipeline:
                 exc_info=True,
             )
             self.social_sentiment_service = None
+
+    def _agent_portfolio_scope(self) -> PortfolioScope:
+        """Derive the trusted Portfolio scope for agent tool access from the owner.
+
+        User-owned analyses scope portfolio tools to that user; system/global
+        analyses map to the legacy NULL-owner scope. This mirrors the alert
+        service's ``_portfolio_scope_for_user`` so agent tools never receive an
+        unbound scope from the analysis path.
+        """
+        if self.owner.user_id is not None:
+            return PortfolioScope.user(str(self.owner.user_id))
+        return LEGACY_GLOBAL_PORTFOLIO_SCOPE
 
     def _emit_progress(self, progress: int, message: str) -> None:
         """Best-effort bridge from pipeline stages to task SSE progress."""
@@ -626,7 +659,7 @@ class StockAnalysisPipeline:
             # P0: write-only snapshot, fail-open, no read dependency on this table.
             if not is_index:
                 try:
-                    self.db.save_fundamental_snapshot(
+                    self.repo.save_fundamental_snapshot(
                         query_id=query_id,
                         code=code,
                         payload=fundamental_context,
@@ -954,13 +987,13 @@ class StockAnalysisPipeline:
                         market_phase_summary=market_phase_summary,
                     )
                     result.diagnostic_context_snapshot = context_snapshot
-                    saved_history_id = self.db.save_analysis_history(
+                    saved_history_id = self.repo.save(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
                         news_content=news_context,
                         context_snapshot=context_snapshot,
-                        save_snapshot=self.save_context_snapshot
+                        save_snapshot=self.save_context_snapshot,
                     )
                     valid_saved_history_id = (
                         isinstance(saved_history_id, int)
@@ -1609,7 +1642,11 @@ class StockAnalysisPipeline:
                     model=getattr(self.config, "agent_litellm_model", None),
                     call_type="agent_analysis",
                 )
-                agent_result = executor.run(message, context=initial_context)
+                agent_result = executor.run(
+                    message,
+                    context=initial_context,
+                    portfolio_scope=self._agent_portfolio_scope(),
+                )
             except Exception as exc:
                 record_llm_run(
                     success=False,
@@ -1876,7 +1913,7 @@ class StockAnalysisPipeline:
                     )
                     result.diagnostic_context_snapshot = agent_context_snapshot
                     agent_context_snapshot["stock_name"] = resolved_stock_name
-                    saved_history_id = self.db.save_analysis_history(
+                    saved_history_id = self.repo.save(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
@@ -2973,8 +3010,8 @@ class StockAnalysisPipeline:
         if not getattr(self, "save_context_snapshot", True):
             return
 
-        db = getattr(self, "db", None)
-        updater = getattr(db, "update_analysis_history_diagnostics", None)
+        repo = getattr(self, "repo", None)
+        updater = getattr(repo, "update_diagnostics", None)
         if not callable(updater):
             return
 

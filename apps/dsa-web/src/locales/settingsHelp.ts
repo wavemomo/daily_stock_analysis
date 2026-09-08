@@ -614,7 +614,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
     ],
     notes: [
       '修改 WEBUI_HOST 后需要重启当前进程、Docker 容器或服务管理器才会生效。',
-      '直连公网时建议同时启用 ADMIN_AUTH_ENABLED。',
+      '公网部署必须通过 HTTPS 反向代理，并完成微信开放平台 OAuth 回调域名配置。',
       '如果部署在反向代理后面，登录限流与真实 IP 识别还需要评估 TRUST_X_FORWARDED_FOR。',
     ],
   },
@@ -677,14 +677,6 @@ const settingsHelpZhCN: SettingsHelpMap = {
       '保存后不会立即触发构建，需要重启相关后端进程。',
       '在 Docker 或发布包中关闭前，请确认构建产物已经随镜像或安装包提供。',
     ],
-  },
-  'settings.system.ADMIN_AUTH_ENABLED': {
-    title: 'Web 登录保护',
-    summary: '启用 WebUI 管理员密码保护。',
-    usage: '请通过 WebUI 的认证设置入口启用或关闭；忘记密码可运行 python -m src.auth reset_password。',
-    valueNotes: ['直连公网、局域网共享或反向代理部署时建议启用。', '该字段在通用配置页仅作说明展示，避免绕过认证设置流程。'],
-    impact: ['影响 WebUI 登录、设置页访问和管理操作保护。'],
-    notes: ['启用前请确认部署环境可以持久化认证数据；手动改 .env 后需要重启进程或使用认证设置流程刷新状态。'],
   },
   'settings.system.TRUST_X_FORWARDED_FOR': {
     title: '信任 X-Forwarded-For',
@@ -1832,7 +1824,7 @@ const settingsHelpEnUS: SettingsHelpMap = {
     impact: ['Affects whether the WebUI can be reached locally, on the LAN, or from the public internet after restart.'],
     notes: [
       'Restart the process, Docker container, or service manager after changing WEBUI_HOST.',
-      'Enable ADMIN_AUTH_ENABLED when exposing the service publicly.',
+      'Public deployments must use an HTTPS reverse proxy and a configured WeChat Open Platform OAuth callback domain.',
       'Behind a reverse proxy, also evaluate TRUST_X_FORWARDED_FOR for login rate limiting and real IP detection.',
     ],
   },
@@ -1889,14 +1881,6 @@ const settingsHelpEnUS: SettingsHelpMap = {
       'Saving does not trigger a build immediately; restart the backend process.',
       'Before disabling it in Docker or packages, make sure the built assets are already included.',
     ],
-  },
-  'settings.system.ADMIN_AUTH_ENABLED': {
-    title: 'Web Login Protection',
-    summary: 'Enables admin password protection for WebUI.',
-    usage: 'Use the WebUI auth settings entry to enable or disable this. Reset with python -m src.auth reset_password if needed.',
-    valueNotes: ['Recommended for public, shared LAN, or reverse-proxy deployments.', 'This field is shown read-only in the generic config page to avoid bypassing the auth settings flow.'],
-    impact: ['Affects WebUI login, settings access, and admin operations.'],
-    notes: ['Make sure auth data is persisted in the deployment environment. Manual .env edits require a process restart or the auth settings flow to refresh state.'],
   },
   'settings.system.TRUST_X_FORWARDED_FOR': {
     title: 'Trust X-Forwarded-For',

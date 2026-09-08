@@ -1,145 +1,96 @@
 import type React from 'react';
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { createParsedApiError, getParsedApiError, type ParsedApiError } from '../api/error';
-import { authApi } from '../api/auth';
+import { getParsedApiError, type ParsedApiError } from '../api/error';
+import { webAuthApi, type WebUser } from '../api/webAuth';
+import { setCsrfToken } from '../api';
 import { useStockPoolStore } from '../stores';
 
+export type WebActor = 'anonymous' | 'web_user';
+
 type AuthContextValue = {
-  authEnabled: boolean;
+  actor: WebActor;
+  user: WebUser | null;
   loggedIn: boolean;
-  passwordSet: boolean;
-  passwordChangeable: boolean;
-  setupState: 'enabled' | 'password_retained' | 'no_password';
   isLoading: boolean;
   loadError: ParsedApiError | null;
-  login: (password: string, passwordConfirm?: string) => Promise<{ success: boolean; error?: ParsedApiError }>;
-  changePassword: (
-    currentPassword: string,
-    newPassword: string,
-    newPasswordConfirm: string
-  ) => Promise<{ success: boolean; error?: ParsedApiError }>;
+  hasPermission: (permission: string) => boolean;
+  hasAnyPermission: (permissions: string[]) => boolean;
   logout: () => Promise<void>;
   refreshStatus: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function extractLoginError(err: unknown): ParsedApiError {
-  const parsed = getParsedApiError(err);
-  if (parsed.status === 429) {
-    return createParsedApiError({
-      title: '登录尝试过于频繁',
-      message: '尝试次数过多，请稍后再试。',
-      rawMessage: parsed.rawMessage,
-      status: parsed.status,
-      category: parsed.category,
-    });
-  }
-  return parsed;
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [authEnabled, setAuthEnabled] = useState(false);
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [passwordSet, setPasswordSet] = useState(false);
-  const [passwordChangeable, setPasswordChangeable] = useState(false);
-  const [setupState, setSetupState] = useState<'enabled' | 'password_retained' | 'no_password'>('no_password');
+  const [actor, setActor] = useState<WebActor>('anonymous');
+  const [user, setUser] = useState<WebUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<ParsedApiError | null>(null);
+
+  const resetUserState = useCallback(() => {
+    setActor('anonymous');
+    setUser(null);
+    setCsrfToken();
+    useStockPoolStore.getState().resetDashboardState();
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     setIsLoading(true);
     setLoadError(null);
     try {
-      const status = await authApi.getStatus();
-      setAuthEnabled(status.authEnabled);
-      setLoggedIn(status.loggedIn);
-      setPasswordSet(status.passwordSet ?? false);
-      setPasswordChangeable(status.passwordChangeable ?? false);
-      setSetupState(status.setupState);
-      if (status.authEnabled && !status.loggedIn) {
-        useStockPoolStore.getState().resetDashboardState();
-      }
+      const session = await webAuthApi.me();
+      setActor('web_user');
+      setUser(session.user);
+      setCsrfToken(session.csrf_token);
     } catch (err) {
-      setLoadError(getParsedApiError(err));
-      setAuthEnabled(false);
-      setLoggedIn(false);
-      setPasswordSet(false);
-      setPasswordChangeable(false);
-      setSetupState('no_password');
-      useStockPoolStore.getState().resetDashboardState();
+      const parsed = getParsedApiError(err);
+      resetUserState();
+      if (parsed.status !== 401) {
+        setLoadError(parsed);
+      }
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [resetUserState]);
 
   useEffect(() => {
     void fetchStatus();
   }, [fetchStatus]);
 
-  const login = useCallback(
-    async (
-      password: string,
-      passwordConfirm?: string
-    ): Promise<{ success: boolean; error?: ParsedApiError }> => {
-      try {
-        await authApi.login(password, passwordConfirm);
-        await fetchStatus();
-        return { success: true };
-      } catch (err: unknown) {
-        return { success: false, error: extractLoginError(err) };
-      }
-    },
-    [fetchStatus]
+  const hasPermission = useCallback(
+    (permission: string) => user?.permissions?.includes(permission) ?? false,
+    [user],
   );
 
-  const changePassword = useCallback(
-    async (
-      currentPassword: string,
-      newPassword: string,
-      newPasswordConfirm: string
-    ): Promise<{ success: boolean; error?: ParsedApiError }> => {
-      try {
-        await authApi.changePassword(currentPassword, newPassword, newPasswordConfirm);
-        return { success: true };
-      } catch (err: unknown) {
-        return { success: false, error: getParsedApiError(err) };
-      }
-    },
-    []
+  const hasAnyPermission = useCallback(
+    (permissions: string[]) => permissions.some((permission) => user?.permissions?.includes(permission)),
+    [user],
   );
 
   const logout = useCallback(async () => {
     let logoutError: unknown = null;
     try {
-      await authApi.logout();
+      await webAuthApi.logout();
     } catch (err) {
       logoutError = err;
     } finally {
-      await fetchStatus();
+      resetUserState();
     }
-
-    if (logoutError && getParsedApiError(logoutError).status !== 401) {
-      throw logoutError;
-    }
-  }, [fetchStatus]);
+    if (logoutError && getParsedApiError(logoutError).status !== 401) throw logoutError;
+  }, [resetUserState]);
 
   return (
-    <AuthContext.Provider
-      value={{
-        authEnabled,
-        loggedIn,
-        passwordSet,
-        passwordChangeable,
-        setupState,
-        isLoading,
-        loadError,
-        login,
-        changePassword,
-        logout,
-        refreshStatus: fetchStatus,
-      }}
-    >
+    <AuthContext.Provider value={{
+      actor,
+      user,
+      loggedIn: actor === 'web_user',
+      isLoading,
+      loadError,
+      hasPermission,
+      hasAnyPermission,
+      logout,
+      refreshStatus: fetchStatus,
+    }}>
       {children}
     </AuthContext.Provider>
   );
@@ -148,8 +99,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 // eslint-disable-next-line react-refresh/only-export-components -- useAuth is a hook, co-located for context access
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error('useAuth must be used within AuthProvider');
-  }
+  if (!ctx) throw new Error('useAuth must be used within an AuthProvider');
   return ctx;
 }

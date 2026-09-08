@@ -8,6 +8,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [新功能] 渡劫每日心得强化习惯闭环：新增 owner-scoped 的 `GET /api/v1/miniapp/daily-reflections/stats`（当前连续、最长连续、累计、今日是否已记、指定月份打卡日），连续天数以客户端本地日历为准且今日未记但昨日已记时按昨日起算；小程序渡劫页新增连续打卡面板、今日打卡状态、月度回顾日历（可切换月份）与每日提醒（本地按用户存储开关+时间，今日未打卡时应用内提醒横幅）。
+- [测试] 增加连续打卡/最长连续/月度打卡日/owner 隔离的后端服务与端点回归，以及小程序渡劫习惯闭环（提醒偏好、月历前导空白与打卡日、未打卡提醒、切换）的回归覆盖。
+- [文档] 补充 `docs/miniapp.md` 渡劫统计端点契约与连续天数语义。
+- [新功能] 小程序新增按用户维度的个人自选股：owner-scoped 的 `/api/v1/miniapp/watchlist`（list/add/remove）、`watchlist.read`/`watchlist.manage` 权限（默认授予 member，系统角色 seed 自动补齐既有用户）与 `miniapp_watchlist` 表；HK 等价变体按归一 key 去重，单用户上限 200，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
+- [改进] 小程序“工作台”自选股改用个人自选 API：普通成员可在选中股票后一键“加自选”、从图片/文本识别结果批量加入并删除自选，权限由 `stocks.manage` 切换为 `watchlist.manage`。
+- [新功能] 小程序新增首次使用强制免责与知情同意闸门：未同意当前版本时任何业务页面先跳转“风险提示与用户须知”页，勾选同意后方可进入；设备级 + 版本号记录，协议内容变更递增版本即强制重新同意。
+- [测试] 增加个人自选股服务/端点 owner 隔离与 `watchlist.*` RBAC 路由映射后端回归，以及小程序知情同意闸门（工具状态、page-guard 拦截与豁免、页面注册）回归覆盖。
+- [文档] 补充 `docs/miniapp.md` 个人自选股 API 与 `watchlist.*` 权限说明，明确其与全局 `STOCK_LIST` 的边界。
+- [修复] 选股引擎 `src/services/screening/config.py` 的 env 加载改为尊重进程级 `ENV_FILE`：`ENV_FILE` 已指定时不再回退读取 cwd/仓库根 `.env`，与 `src.config.setup_env` 统一，修正部署 pin `ENV_FILE` 时选股读错文件的潜在不一致，并根治其向 `os.environ` 写入真实 `.env` 密钥导致的跨套件测试污染（system_config 校验因叠加真实 provider/LITELLM_MODEL 而失败）。
+- [测试] conftest 增加进程级 `ENV_FILE` 空文件 guard 与 autouse 守护夹具：测试删除 `ENV_FILE` 后自动补回稳定空文件，堵死 `setup_env` 回退读取真实仓库 `.env` 的路径；`test_agent_chat_session_service` 增加 DatabaseManager 单例重置夹具，避免复用其他套件遗留的会话状态。
+- [修复] agent 分析与多智能体链路强制 portfolio scope 后补齐透传：pipeline 按 owner 派生可信 PortfolioScope 传入 executor.run，orchestrator 的 run/chat/prepare_turn 接受并经 ctx.meta 下发，BaseAgent.run 读取 ctx.meta 传给 run_agent_loop，避免 agent 模式分析与 arch=multi 聊天因缺失 scope 而 fail-closed 报错。
+- [测试] 将组合告警与告警归属回归从 legacy owner_id 迁移到显式 PortfolioScope/LEGACY_GLOBAL_PORTFOLIO_SCOPE，并把告警端点身份用例对齐为可信 principal 缺失即 401 的 fail-closed 契约。
+- [测试] 迁移 agent executor/chat/stream/frozen-context/codex-gate 与 pipeline 历史保存、诊断回写、指数目标回归至显式可信 PortfolioScope（直接调用统一使用 UNSCOPED_PORTFOLIO_SCOPE）与 owner-scoped AnalysisRepository 夹具。
+- [测试] 迁移 intelligence、data-capability、history 分享图、历史新闻回退、agent-models、miniapp 系统配置等 API 回归以适配 fail-closed 鉴权与统一 RBAC 错误体（forbidden/Permission denied）。
+- [测试] 更新 CORS 告警用例为鉴权恒开语义、docker-compose 默认内存基线(3G)与 CI 分片耗时基线（移除已删除的鉴权测试文件）。
+- [测试] 将 Agent Chat 归属回归对齐统一身份：请求使用带整型 id 的 canonical principal，无 principal 一律 fail-closed(401)，移除已废弃的无 principal 管理员全局 scope 语义，保留 owner 隔离与越权拒绝覆盖。
+- [新功能] 统一 Web 微信开放平台 OAuth 与小程序 wx.login 身份为 canonical business user，并加载同一组角色、权限、owner scope 与功能额度。
+- [改进] RBAC 管理统一使用 rbac.manage；admin 角色不是独立认证域，且不绕过个人资源 owner scope。
+- [修复] 功能额度与 RBAC、Cookie 解耦；无限额度仅来自白名单，额度来源仅保留 user_override、whitelist_feature、whitelist_all、plan 和 global_policy。
+- [文档] 移除旧 ADMIN_*、web-link、OpenID bootstrap、/api/v1/auth/* 与 /api/v1/admin/rbac/* 契约，统一为微信 OAuth、Bearer、web-auth 与 rbac 路由说明。
+- [修复] Web 双有效 Cookie 冲突时，可信 Origin、无 Bearer 的精确 `POST /api/v1/auth/logout` 可受控撤销管理员和普通用户两类会话；其余请求继续 fail closed，前端错误页提供明确的清除入口。
+- [修复] Web 退出登录按当前身份调用对应撤销端点并等待结果：401 视为已退出后清理本地状态并跳转登录页，403 `csrf_failed` 保持当前页面并提示刷新后重试，其他失败仍可重试，避免异步失败被静默吞掉。
+- [修复] 小程序管理员系统设置改用 Bearer + RBAC 专用 `/api/v1/miniapp/system/*` 低风险接口，配置读取按 schema 二次掩码；raw `.env` 导入导出、立即调度和外部渠道测试仍仅允许 Web 管理员 Cookie。
+- [改进] 小程序“我的”页面将品牌标题、状态和中英文切换操作分区布局，避免窄屏下语言按钮挤压或孤立换行。
+- [测试] 增加小程序系统设置 Bearer 权限、敏感配置掩码和高风险路由隔离回归覆盖。
+- [新功能] Web 普通用户新增独立“功能额度”只读页面 `/feature-quotas`，展示服务端返回的全部功能额度、剩余次数、停用和不限次状态；管理员额度分配继续复用权限管理页。
+- [新功能] 小程序“我的”新增独立“功能额度”栏目，管理员可在“我的 → 权限管理 → 用户 → 额度分配”配置额度套餐、单项覆盖和白名单。
+- [改进] 小程序新增基于 `upupup.language` 的 `zh-CN`/`en-US` 中英文切换，所有注册页面通过共享订阅即时同步并在重新显示时回退同步；仅翻译确定性 UI 文案，保留服务端自由文本、报告、Agent 回复和既有 `report_language: 'zh'` 契约。决策信号页面对齐为“信号/结果/统计”视图；信号详情复用 `operation_advice` 展示“操作建议”。
+- [修复] 修复小程序认证刷新未返回 Promise、功能额度页面导入不存在 API、RBAC 页面 JavaScript/WXML 结构错误导致入口或页面无法稳定加载的问题。
+- [测试] 增加 Web 功能额度导航、小程序额度页面、跨页 i18n（含复盘动态徽标与不完整日期格式）和决策信号操作建议回归测试，并通过相关后端 RBAC API、Web lint/build 与小程序完整定向验证。
+- [修复] Web 退出登录按当前 actor 撤销对应会话；微信管理员继续通过服务端真实 `openid` 精确匹配 `RBAC_BOOTSTRAP_ADMIN_OPENIDS`，避免依赖昵称或前端伪造字段。
+- [修复] Web 授权轮询仅允许未登录的发起浏览器消费精确单段链接；已有管理员/普通 Web 会话或 Bearer 凭据会 fail closed，且额度加载失败会保留已知余额、明确提示并允许手动重试。
+- [修复] 普通 Web 授权轮询改为由 path-scoped HttpOnly binding Cookie 绑定的无参数 `POST`，不再向响应、URL 或轮询参数暴露 `browser_state`。
+- [修复] 两种有效浏览器会话并存时，所有受保护身份域与管理员状态查询均 fail closed 返回 `409 authentication_conflict`；无效对侧 Cookie 不影响有效会话。
+- [修复] 平台管理员额度豁免只依据 `dsa_session` 身份，拥有 RBAC `admin` 角色的普通 Web/小程序用户继续按用户额度计费；策略选股队列 admission 失败按原 UTC 账期补偿。
+- [测试] 增加绑定 Cookie 授权消费、双 Cookie 冲突、普通 admin 角色额度与选股队列补偿回归覆盖。
+- [新功能] 普通 Web 用户可通过已登录微信小程序的一次性确认授权进入与小程序同一账户的业务功能；管理员会话独立保留。
+- [改进] 上游小程序“工作台”“问股”“我的”展示服务端功能剩余次数，并识别 `feature_quota_exceeded` 的结构化 429 响应。
+- [修复] 管理员专属接口拒绝普通 Web 会话与小程序 Bearer 凭据；管理员和普通 Web Cookie 的写操作统一要求可信 Origin 与会话绑定 CSRF Token。
+- [测试] 增加普通 Web 授权轮询、管理员路径隔离、Cookie CSRF 与小程序扫码/粘贴确认登录的回归覆盖。
+- [文档] 同步普通 Web 登录、会话 TTL、授权链接和配额客户端接入契约的中英文说明。
+- [修复] 普通 Web 登录授权链接在过期时原子清理，并按可信客户端 IP 限流匿名创建，避免无效链接持续占用数据库。
+- [修复] 问股 SSE 在 accepted 前遭额度拒绝时保留 429 原因并展示准确提示；未知额度拒绝原因不再误报为当日额度耗尽。
+- [测试] 增加问股预接受额度拒绝、普通 Web 登录链接清理与限流回归覆盖。
+- [文档] 补充普通 Web 登录授权链接限流配置与 429 契约。
+- [修复] 套餐、单用户覆盖和白名单的未来排期会保留当前权益至切换日；无法无歧义恢复的有限重叠排期改为明确拒绝。
+- [修复] 回测、决策信号后验和重评估仅在无副作用业务准入通过后预留额度，避免无效代码、缺失信号或不支持的报告消耗每日次数。
+- [修复] 套餐创建接口保留显式 `is_active=false`，并将 entitlement 的 `limit_source` 契约统一为 `admin`、`user_override`、`whitelist_feature`、`whitelist_all`、`plan`、`global_policy`。
+- [测试] 增加排期切换、停用套餐及无效回测/决策信号请求不预留额度的 API 与服务回归覆盖。
+- [文档] 明确无副作用准入后的配额预留时机、429 原因与稳定额度来源枚举。
+- [新功能] 每日高成本功能配额支持套餐、单用户额度覆盖及功能/全功能白名单；实际额度按用户覆盖、功能白名单、全功能白名单、有效套餐、全局策略的优先级解析，支持 UTC 有效期和审计追踪。
+- [改进] `GET /api/v1/feature-quotas/me` 与 429 拒绝响应新增额度来源、套餐/有效期及可解释原因字段；Web 权限管理页可维护套餐和用户例外规则。
+- [测试] 增加套餐、单用户覆盖、白名单、有效窗口、审计与 entitlement 来源字段的服务、API 和 Web 管理回归覆盖。
+- [文档] 更新小程序配额接入契约和高成本功能产品审计，明确上游页面仍需独立接入剩余次数与 429 提示。
+- [修复] 每日高成本功能配额统一按 UTC 自然日结算，`reset_at` 真实表示下一 UTC 日零点，避免本地时区与返回标记漂移。
+- [修复] 异步分析 executor 提交失败时，队列只补偿尚未被 executor 接受的候选额度，并保留此前已接受任务的队列状态、去重与 SSE 生命周期；UTC 预留账期会传入补偿，市场复盘后台任务提交失败同样在原账期补偿，worker 已接受后的运行失败或取消仍不自动退款。
+- [新功能] 新增管理员可配置的普通用户每日高成本功能配额，覆盖个股/持仓分析、市场复盘、问股、深度研究、选股、回测、决策信号执行与图片识股；Cookie 管理员和 `admin` 角色默认无限额。
+- [新功能] Web 权限管理页新增“每日功能配额”标签，可查看、编辑策略并审计变更；策略写入继续受管理员 Cookie、Origin 与 CSRF 校验保护。
+- [改进] 默认 `member` 角色开放分析、市场复盘、选股与回测等已受配额治理的执行权限，同时保留共享资源维护和外部通知的权限边界。
+- [测试] 增加真实 SQLite 配额服务与 Web RBAC API 回归覆盖，验证原子批量预留、自然日重置、管理员豁免、429 契约、CSRF 与审计事件。
+- [文档] 更新小程序 RBAC 与配额接入说明，明确上游“工作台”“问股”“我的”页面须在独立小程序变更中接入剩余次数和 429 提示。
+- [修复] 持仓改为显式 typed Portfolio scope：用户、legacy global 与可信内部 unscoped 访问语义分离；遗漏或 `None` scope fail-closed，Agent/LiteLLM/Codex 工具链只能继承服务端认证上下文，不能由客户端或模型参数扩大可见范围。
+- [测试] 增加 Portfolio、告警、Agent Chat、LiteLLM/Codex 工具进程的多用户 scope 回归覆盖，验证跨用户隔离、legacy NULL-only 可见性、未绑定工具上下文拒绝及 scope 序列化传递。
+- [文档] 明确小程序持仓、分析任务与个人历史的用户隔离边界，以及 Web legacy/global 数据不进入个人历史的兼容语义。
+- [修复] 分析任务与分析历史按可信小程序用户隔离：任务状态、任务列表、SSE、历史列表、详情、删除及派生报告接口均不再暴露其他用户或 global/legacy 记录。
+- [测试] 新增两用户 SQLite HTTP 回归测试，覆盖跨用户历史读取/删除、任务状态/列表及 SSE 事件隔离。
+- [修复] 将分析任务、历史记录、基本面快照与复盘诊断收敛至可信 owner 边界，避免跨用户可见或更新。
+- [新功能] Web 管理后台新增权限管理入口，可通过独立 Cookie 会话安全维护小程序 RBAC。
+- [新功能] Web 管理后台改为使用部署环境配置的内置管理员账号和密码 Cookie 登录，与微信小程序 `code2session`、Bearer 和 RBAC 身份域隔离
 - [改进] 小程序登录页在状态区下明确显示将使用或已使用微信登录，并说明一次性凭证由服务端完成身份验证
 - [文档] 更新小程序 RBAC 使用指南与接入说明，涵盖管理员页面、Bootstrap 自动回授语义、完整管理 API、数据库审计和微信登录安全边界
 - [新功能] 小程序新增仅管理员可见的权限管理页面，支持安全用户目录、角色替换、账号启停、自定义角色及权限配置和审计浏览

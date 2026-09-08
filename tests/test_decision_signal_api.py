@@ -10,6 +10,7 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,10 +21,10 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-import src.auth as auth
 from api.app import create_app
 from src.analyzer import AnalysisResult
 from src.config import Config
+from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.decision_signal_extractor import extract_and_persist_from_analysis_result
 from src.services.decision_signal_service import DecisionSignalService
 from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, PortfolioAccount, PortfolioPosition, utc_naive_now
@@ -46,14 +47,6 @@ def _temporary_tz(tz_name: str):
             time.tzset()
 
 
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
-
-
 @pytest.fixture()
 def client_and_db(tmp_path):
     old_env_file = os.environ.get("ENV_FILE")
@@ -67,7 +60,6 @@ def client_and_db(tmp_path):
             [
                 "STOCK_LIST=600519",
                 "GEMINI_API_KEY=test",
-                "ADMIN_AUTH_ENABLED=false",
                 f"DATABASE_PATH={db_path}",
             ]
         )
@@ -76,18 +68,35 @@ def client_and_db(tmp_path):
     )
     os.environ["ENV_FILE"] = str(env_path)
     os.environ["DATABASE_PATH"] = str(db_path)
-    _reset_auth_globals()
     Config.reset_instance()
     DatabaseManager.reset_instance()
+    db = DatabaseManager.get_instance()
+    user = MiniappUserRepository(db).upsert_user(
+        openid="decision-signal-api-user", issuer="decision-signal-api-test"
+    )
+    principal = SimpleNamespace(
+        user=user,
+        roles=("admin",),
+        permissions=(
+            "decision_signals.read",
+            "decision_signals.execute",
+            "decision_signals.manage",
+        ),
+    )
+    miniapp_auth_patch = patch(
+        "api.middlewares.auth.WechatMiniappAuthService.authenticate_token",
+        return_value=principal,
+    )
+    miniapp_auth_patch.start()
     app = create_app(static_dir=Path(static_dir))
-    client = TestClient(app)
+    client = TestClient(app, headers={"Authorization": "Bearer decision-signal-test-token"})
     db = DatabaseManager.get_instance()
     try:
         yield client, db
     finally:
+        miniapp_auth_patch.stop()
         DatabaseManager.reset_instance()
         Config.reset_instance()
-        _reset_auth_globals()
         if old_env_file is None:
             os.environ.pop("ENV_FILE", None)
         else:
@@ -123,7 +132,7 @@ def _payload(**overrides):
     return payload
 
 
-def test_decision_signal_api_requires_session_when_admin_auth_enabled(tmp_path) -> None:
+def test_decision_signal_api_requires_bearer_token(tmp_path) -> None:
     old_env_file = os.environ.get("ENV_FILE")
     old_database_path = os.environ.get("DATABASE_PATH")
     env_path = tmp_path / ".env"
@@ -135,7 +144,6 @@ def test_decision_signal_api_requires_session_when_admin_auth_enabled(tmp_path) 
             [
                 "STOCK_LIST=600519",
                 "GEMINI_API_KEY=test",
-                "ADMIN_AUTH_ENABLED=true",
                 f"DATABASE_PATH={db_path}",
             ]
         )
@@ -144,7 +152,6 @@ def test_decision_signal_api_requires_session_when_admin_auth_enabled(tmp_path) 
     )
     os.environ["ENV_FILE"] = str(env_path)
     os.environ["DATABASE_PATH"] = str(db_path)
-    _reset_auth_globals()
     Config.reset_instance()
     DatabaseManager.reset_instance()
 
@@ -152,11 +159,10 @@ def test_decision_signal_api_requires_session_when_admin_auth_enabled(tmp_path) 
         client = TestClient(create_app(static_dir=Path(static_dir)))
         resp = client.get("/api/v1/decision-signals")
         assert resp.status_code == 401
-        assert resp.json()["error"] == "unauthorized"
+        assert resp.json() == {"error": "unauthorized", "message": "Login required"}
     finally:
         DatabaseManager.reset_instance()
         Config.reset_instance()
-        _reset_auth_globals()
         if old_env_file is None:
             os.environ.pop("ENV_FILE", None)
         else:
@@ -758,6 +764,7 @@ def test_holding_only_uses_cached_positions_and_stock_code_variants(client_and_d
             market="cn",
             base_currency="CNY",
             is_active=True,
+            owner_id="1",
         )
         session.add(account)
         session.flush()
@@ -806,11 +813,34 @@ def test_holding_only_uses_cached_positions_and_stock_code_variants(client_and_d
                 total_cost=900,
             )
         )
+        foreign_account = PortfolioAccount(
+            name="Other user's active account",
+            market="us",
+            base_currency="USD",
+            is_active=True,
+            owner_id="2",
+        )
+        session.add(foreign_account)
+        session.flush()
+        foreign_account_id = foreign_account.id
+        session.add(
+            PortfolioPosition(
+                account_id=foreign_account_id,
+                cost_method="fifo",
+                symbol="TSLA",
+                market="us",
+                currency="USD",
+                quantity=3,
+                avg_cost=200,
+                total_cost=600,
+            )
+        )
         inactive_account = PortfolioAccount(
             name="Inactive account",
             market="us",
             base_currency="USD",
             is_active=False,
+            owner_id="1",
         )
         session.add(inactive_account)
         session.flush()
@@ -861,6 +891,18 @@ def test_holding_only_uses_cached_positions_and_stock_code_variants(client_and_d
         ("cn", "600519"),
         ("us", "AAPL"),
     }
+    assert ("us", "TSLA") not in {
+        (item["market"], item["stock_code"])
+        for item in all_active_payload["items"]
+    }
+
+    foreign_holding_resp = client.get(
+        "/api/v1/decision-signals",
+        params={"holding_only": "true", "account_id": foreign_account_id},
+    )
+    assert foreign_holding_resp.status_code == 200, foreign_holding_resp.text
+    assert foreign_holding_resp.json()["total"] == 0
+    assert foreign_holding_resp.json()["items"] == []
 
     with patch(
         "src.services.portfolio_service.PortfolioService.get_portfolio_snapshot",
@@ -1551,6 +1593,41 @@ def test_reassess_error_mapping(client_and_db) -> None:
     )
     assert unsupported_market.status_code == 400
     assert unsupported_market.json()["error"] == "unsupported_report_snapshot"
+
+
+def test_reassess_invalid_source_snapshots_do_not_reserve_quota(client_and_db) -> None:
+    client, db = client_and_db
+    market_review_id = _save_reassess_history(
+        db,
+        report_type="market_review",
+        raw_result=_valid_reassess_raw(),
+        context_snapshot=_valid_reassess_context(),
+    )
+    insufficient_id = _save_reassess_history(
+        db,
+        operation_advice=None,
+        raw_result={"analysis_summary": "仅有摘要，不能推断动作"},
+        context_snapshot=_valid_reassess_context(),
+    )
+
+    with patch(
+        "api.v1.endpoints.decision_signals.FeatureQuotaService.reserve_for_request"
+    ) as reserve_for_request:
+        missing = client.post(
+            "/api/v1/decision-signals/reassess",
+            json={"source_report_id": 999999, "decision_profile": "balanced", "persist": False},
+        )
+        non_stock = client.post(
+            "/api/v1/decision-signals/reassess",
+            json={"source_report_id": market_review_id, "decision_profile": "balanced", "persist": False},
+        )
+        insufficient = client.post(
+            "/api/v1/decision-signals/reassess",
+            json={"source_report_id": insufficient_id, "decision_profile": "balanced", "persist": False},
+        )
+
+    assert [response.status_code for response in (missing, non_stock, insufficient)] == [404, 400, 400]
+    reserve_for_request.assert_not_called()
 
 
 def test_reassess_success_preview_is_read_only_and_uses_opaque_metadata(client_and_db, monkeypatch) -> None:

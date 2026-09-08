@@ -3,7 +3,7 @@
 
 import asyncio
 from concurrent.futures import Future
-from datetime import datetime
+from datetime import date, datetime
 import json
 import os
 import tempfile
@@ -45,6 +45,7 @@ except Exception:  # pragma: no cover - optional dependency environments
     get_analysis_status = None
     get_task_list = None
 
+from src.analysis_ownership import AnalysisOwner, GLOBAL_ANALYSIS_OWNER
 from src.enums import ReportType
 from src.config import Config
 from src.services.analysis_service import AnalysisService
@@ -163,6 +164,21 @@ def _market_phase_summary() -> dict:
 
 
 class AnalysisApiContractTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.owner = AnalysisOwner.user(1)
+        self.http_request = SimpleNamespace(
+            state=SimpleNamespace(
+                miniapp_principal=SimpleNamespace(
+                    user=SimpleNamespace(id=1),
+                ),
+            ),
+        )
+        self._feature_quota_patcher = patch(
+            "api.v1.endpoints.analysis.FeatureQuotaService"
+        )
+        self._feature_quota_patcher.start()
+        self.addCleanup(self._feature_quota_patcher.stop)
+
     def test_market_review_region_is_authoritative_across_active_task_lifecycle(self) -> None:
         if (
             trigger_market_review is None
@@ -216,7 +232,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     with patch.object(
                         analysis_endpoint_module,
                         "_try_acquire_market_review_lock",
-                        return_value=object(),
+                        return_value=SimpleNamespace(uses_flock=False, handle=MagicMock()),
                     ), patch.object(
                         analysis_endpoint_module,
                         "_build_market_review_runtime",
@@ -231,9 +247,20 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         analysis_endpoint_module,
                         "_release_market_review_lock",
                     ):
-                        accepted = trigger_market_review(request=request, config=config)
-                        pending = get_analysis_status(accepted.task_id)
-                        task_list = get_task_list(status=None, limit=20)
+                        accepted = trigger_market_review(
+                            http_request=self.http_request,
+                            request=request,
+                            config=config,
+                        )
+                        pending = get_analysis_status(
+                            accepted.task_id,
+                            http_request=self.http_request,
+                        )
+                        task_list = get_task_list(
+                            http_request=self.http_request,
+                            status=None,
+                            limit=20,
+                        )
                         queue.update_task_progress(
                             accepted.task_id,
                             progress=5,
@@ -242,7 +269,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
                         worker, args, kwargs = executor.calls[0]
                         worker(*args, **kwargs)
-                        completed = get_analysis_status(accepted.task_id)
+                        completed = get_analysis_status(
+                            accepted.task_id,
+                            http_request=self.http_request,
+                        )
 
                     self.assertEqual(accepted.region, expected_region)
                     self.assertEqual(pending.status, "pending")
@@ -284,7 +314,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             report_language="zh",
             market_review_region="cn",
         )
-        lock_token = object()
+        lock_token = SimpleNamespace(uses_flock=False, handle=MagicMock())
 
         with patch.object(
             analysis_endpoint_module,
@@ -292,6 +322,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             return_value=lock_token,
         ), patch("api.v1.endpoints.analysis.get_task_queue", return_value=task_queue):
             response = trigger_market_review(
+                http_request=self.http_request,
                 request=request,
                 config=config,
             )
@@ -308,6 +339,60 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         self.assertEqual(kwargs["message"], "大盘复盘任务已提交")
         self.assertEqual(kwargs["region"], "cn")
 
+    def test_trigger_market_review_releases_quota_in_reserved_utc_period_on_submit_failure(self) -> None:
+        if trigger_market_review is None or analysis_endpoint_module is None:
+            self.skipTest("analysis endpoint helpers unavailable in this environment")
+
+        period_start = date(2026, 9, 6)
+        quota_service = MagicMock()
+        quota_service.current_period_start.return_value = period_start
+        task_queue = MagicMock()
+        task_queue.submit_background_task.side_effect = RuntimeError("queue unavailable")
+        lock_token = SimpleNamespace(uses_flock=False, handle=MagicMock())
+        config = SimpleNamespace(
+            trading_day_check_enabled=False,
+            report_language="zh",
+            market_review_region="cn",
+        )
+
+        with patch.object(
+            analysis_endpoint_module,
+            "_try_acquire_market_review_lock",
+            return_value=lock_token,
+        ), patch.object(
+            analysis_endpoint_module,
+            "_release_market_review_lock",
+            return_value=None,
+        ) as release_lock, patch(
+            "api.v1.endpoints.analysis.FeatureQuotaService",
+            return_value=quota_service,
+        ), patch(
+            "api.v1.endpoints.analysis.get_task_queue",
+            return_value=task_queue,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue unavailable"):
+                trigger_market_review(
+                    http_request=self.http_request,
+                    request=analysis_endpoint_module.MarketReviewRequest(send_notification=False),
+                    config=config,
+                )
+
+        quota_service.reserve_for_request.assert_called_once_with(
+            self.http_request,
+            "market_review",
+            period_start=period_start,
+        )
+        quota_service.release_for_request.assert_called_once_with(
+            self.http_request,
+            "market_review",
+            period_start=period_start,
+        )
+        reserve_period = quota_service.reserve_for_request.call_args.kwargs["period_start"]
+        release_period = quota_service.release_for_request.call_args.kwargs["period_start"]
+        self.assertIs(reserve_period, period_start)
+        self.assertIs(release_period, period_start)
+        release_lock.assert_called_once_with(lock_token)
+
     def test_trigger_market_review_accepts_request_level_report_language(self) -> None:
         if trigger_market_review is None or analysis_endpoint_module is None:
             self.skipTest("analysis endpoint helpers unavailable in this environment")
@@ -317,7 +402,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             report_language="en",
         )
         config = SimpleNamespace(trading_day_check_enabled=False, report_language="zh", market_review_region="cn")
-        lock_token = object()
+        lock_token = SimpleNamespace(uses_flock=False, handle=MagicMock())
         task_payload: dict[str, object] = {}
 
         runtime_notifier = MagicMock()
@@ -348,7 +433,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             "_release_market_review_lock",
             return_value=None,
         ):
-            trigger_market_review(request=request, config=config)
+            trigger_market_review(
+                http_request=self.http_request,
+                request=request,
+                config=config,
+            )
             self.assertIn("background_task", task_payload)
             task_payload["background_task"]()
 
@@ -387,7 +476,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch.object(
             analysis_endpoint_module,
             "_try_acquire_market_review_lock",
-            return_value=object(),
+            return_value=SimpleNamespace(uses_flock=False, handle=MagicMock()),
         ), patch.object(
             analysis_endpoint_module,
             "_build_market_review_runtime",
@@ -400,7 +489,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             "_release_market_review_lock",
             return_value=None,
         ):
-            response = trigger_market_review(request=request, config=config)
+            response = trigger_market_review(
+                http_request=self.http_request,
+                request=request,
+                config=config,
+            )
             self.assertEqual(response.status, "accepted")
             self.assertIn("background_task", task_payload)
             task_payload["background_task"]()
@@ -431,7 +524,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch.object(
             analysis_endpoint_module,
             "_try_acquire_market_review_lock",
-            return_value=object(),
+            return_value=SimpleNamespace(uses_flock=False, handle=MagicMock()),
         ), patch.object(
             analysis_endpoint_module,
             "_build_market_review_runtime",
@@ -447,7 +540,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             "_release_market_review_lock",
             return_value=None,
         ):
-            response = trigger_market_review(request=request, config=config)
+            response = trigger_market_review(
+                http_request=self.http_request,
+                request=request,
+                config=config,
+            )
             task_payload["background_task"]()
 
         self.assertEqual(response.task_id, "market-task-region")
@@ -475,6 +572,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_endpoint_module._run_market_review_background(
                 send_notification=False,
                 effective_region="us",
+                owner=self.owner,
                 config=runtime_config,
             )
 
@@ -502,6 +600,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         ), patch("api.v1.endpoints.analysis.get_task_queue", return_value=task_queue):
             with self.assertRaises(Exception) as ctx:
                 trigger_market_review(
+                    http_request=self.http_request,
                     request=request,
                     config=config,
                 )
@@ -533,6 +632,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                 with patch("api.v1.endpoints.analysis.get_task_queue", return_value=task_queue):
                     with self.assertRaises(Exception) as ctx:
                         trigger_market_review(
+                            http_request=self.http_request,
                             request=analysis_endpoint_module.MarketReviewRequest(
                                 send_notification=True
                             ),
@@ -552,7 +652,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         task_queue.submit_background_task.return_value = SimpleNamespace(task_id="market-task-manual")
         request = analysis_endpoint_module.MarketReviewRequest(send_notification=True)
         config = SimpleNamespace(trading_day_check_enabled=True, market_review_region="cn")
-        lock_token = object()
+        lock_token = SimpleNamespace(uses_flock=False, handle=MagicMock())
 
         with patch(
             "src.core.trading_calendar.get_open_markets_today",
@@ -566,6 +666,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             return_value=lock_token,
         ) as acquire, patch("api.v1.endpoints.analysis.get_task_queue", return_value=task_queue):
             response = trigger_market_review(
+                http_request=self.http_request,
                 request=request,
                 config=config,
             )
@@ -609,6 +710,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                 send_notification=False,
                 effective_region="cn,us",
                 lock_token=None,
+                owner=self.owner,
                 config=config,
             )
 
@@ -621,6 +723,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             override_region="cn,us",
             return_structured=True,
             trigger_source="api",
+            owner=self.owner,
         )
 
     def test_market_review_runtime_initializes_analyzer_for_litellm_provider(self) -> None:
@@ -663,6 +766,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                 send_notification=False,
                 effective_region="cn",
                 lock_token=None,
+                owner=self.owner,
                 config=market_review_config,
             )
 
@@ -676,6 +780,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             override_region="cn",
             return_structured=True,
             trigger_source="api",
+            owner=self.owner,
         )
 
     def test_run_market_review_uses_request_scoped_config_language(self) -> None:
@@ -742,7 +847,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         )
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            status = get_analysis_status("market-task-1")
+            status = get_analysis_status("market-task-1", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(status.market_review_report, "市场复盘报告示例文本")
@@ -778,7 +883,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                 )
 
                 with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-                    status = get_analysis_status(f"task-{task_status.value}")
+                    status = get_analysis_status(
+                        f"task-{task_status.value}",
+                        http_request=self.http_request,
+                    )
 
                 self.assertEqual(status.status, task_status.value)
                 self.assertEqual(status.progress, 42)
@@ -814,7 +922,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         )
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            status = get_analysis_status("task-queue-1")
+            status = get_analysis_status("task-queue-1", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -876,7 +984,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         )
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            status = get_analysis_status("task-queue-action-conflict")
+            status = get_analysis_status("task-queue-action-conflict", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -928,7 +1036,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         )
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            status = get_analysis_status("task-queue-zero-score")
+            status = get_analysis_status("task-queue-zero-score", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -985,7 +1093,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                  "api.v1.endpoints.analysis._load_sync_fundamental_sources",
                  return_value=({}, None, None),
              ):
-            status = get_analysis_status("task-queue-zero-score-enriched")
+            status = get_analysis_status("task-queue-zero-score-enriched", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -1042,7 +1150,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                      },
                  ),
              ) as load_sources:
-            status = get_analysis_status("task-queue-market-structure-raw")
+            status = get_analysis_status("task-queue-market-structure-raw", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -1061,6 +1169,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         load_sources.assert_called_once_with(
             query_id="task-queue-market-structure-raw",
             stock_code="300024",
+            owner=self.owner,
         )
 
     def test_get_analysis_status_enriches_in_memory_market_structure_without_history_snapshot(self) -> None:
@@ -1124,7 +1233,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                  "api.v1.endpoints.analysis._load_sync_fundamental_sources",
                  return_value=(None, None, None),
              ):
-            status = get_analysis_status("task-in-memory-no-history")
+            status = get_analysis_status("task-in-memory-no-history", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -1167,7 +1276,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                  "api.v1.endpoints.analysis._load_sync_fundamental_sources",
                  return_value=({}, None, None),
              ):
-            status = get_analysis_status("task-queue-2")
+            status = get_analysis_status("task-queue-2", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertIsNotNone(status.result)
@@ -1194,6 +1303,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     send_notification=False,
                     effective_region="cn",
                     lock_token=None,
+                    owner=self.owner,
                     config=SimpleNamespace(),
                 )
 
@@ -1201,7 +1311,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         if analysis_endpoint_module is None:
             self.skipTest("analysis endpoint helpers unavailable in this environment")
 
-        lock_token = object()
+        lock_token = SimpleNamespace(uses_flock=False, handle=MagicMock())
         with patch.object(
             analysis_endpoint_module,
             "_build_market_review_runtime",
@@ -1215,6 +1325,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     send_notification=False,
                     effective_region="cn",
                     lock_token=lock_token,
+                    owner=self.owner,
                     config=SimpleNamespace(),
                 )
 
@@ -1245,14 +1356,16 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     send_notification=False,
                     effective_region="cn",
                     lock_token=object(),
+                    owner=self.owner,
                     config=SimpleNamespace(),
                 ),
                 stock_code="market_review",
                 stock_name="大盘复盘",
                 message="大盘复盘任务已提交",
+                owner=self.owner,
             )
 
-        task_info = queue.get_task(task.task_id)
+        task_info = queue.get_task(task.task_id, owner=self.owner)
         self.assertIsNotNone(task_info)
         self.assertEqual(task_info.status, TaskStatus.FAILED)
         self.assertEqual(task_info.error, "runtime init failed")
@@ -1297,7 +1410,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=mock_queue), \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
-            result = get_analysis_status("task-1")
+            result = get_analysis_status("task-1", http_request=self.http_request)
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.result.report["meta"]["current_price"], 1234.5)
@@ -1332,7 +1445,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=mock_queue), \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
-            result = get_analysis_status("market-task-1")
+            result = get_analysis_status("market-task-1", http_request=self.http_request)
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.market_review_report, "# 🎯 大盘复盘\n\n复盘正文")
@@ -1378,7 +1491,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=mock_queue), \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
-            result = get_analysis_status("task-2")
+            result = get_analysis_status("task-2", http_request=self.http_request)
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.result.report["meta"]["current_price"], 180.35)
@@ -1422,7 +1535,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=mock_queue), \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
-            result = get_analysis_status("task-3")
+            result = get_analysis_status("task-3", http_request=self.http_request)
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.result.report["meta"]["current_price"], 412.6)
@@ -1524,6 +1637,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         notify=True,
                         analysis_phase="auto",
                     ),
+                    owner=self.owner,
                 )
 
         self.assertEqual(ctx.exception.status_code, 500)
@@ -1576,6 +1690,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     skills=None,
                     analysis_phase="intraday",
                 ),
+                owner=self.owner,
             )
 
         self.assertEqual(
@@ -1635,6 +1750,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     skills=None,
                     analysis_phase="intraday",
                 ),
+                owner=self.owner,
             )
 
         self.assertEqual(
@@ -1698,6 +1814,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     skills=None,
                     analysis_phase="intraday",
                 ),
+                owner=self.owner,
             )
 
         self.assertIsNotNone(result)
@@ -2490,6 +2607,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             context_snapshot, fundamental_snapshot, raw_result_snapshot = _load_sync_fundamental_sources(
                 query_id="q_sync_001",
                 stock_code="600519",
+                owner=self.owner,
             )
 
         self.assertIsNone(context_snapshot)
@@ -2499,10 +2617,14 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             query_id="q_sync_001",
             code="600519",
             limit=1,
+            owner_scope="user",
+            owner_user_id=1,
         )
         mock_db.get_latest_fundamental_snapshot.assert_called_once_with(
             query_id="q_sync_001",
             code="600519",
+            owner_scope="user",
+            owner_user_id=1,
         )
 
     def test_get_analysis_status_reads_price_fields_from_context_snapshot_preserving_zero_change_pct(self) -> None:
@@ -2547,7 +2669,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch("api.v1.endpoints.analysis.get_task_queue") as queue_mock, \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
             queue_mock.return_value.get_task.return_value = None
-            status = get_analysis_status("task_123")
+            status = get_analysis_status("task_123", http_request=self.http_request)
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(status.result.report["meta"]["current_price"], 1234.5)
@@ -2606,7 +2728,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch("api.v1.endpoints.analysis.get_task_queue") as queue_mock, \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
             queue_mock.return_value.get_task.return_value = None
-            status = get_analysis_status("task_market_structure_raw_1")
+            status = get_analysis_status(
+                "task_market_structure_raw_1",
+                http_request=self.http_request,
+            )
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(
@@ -2666,7 +2791,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch("api.v1.endpoints.analysis.get_task_queue") as queue_mock, \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
             queue_mock.return_value.get_task.return_value = None
-            status = get_analysis_status("task_agent_snapshot_1")
+            status = get_analysis_status(
+                "task_agent_snapshot_1",
+                http_request=self.http_request,
+            )
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(status.result.report["meta"]["current_price"], 1888.0)
@@ -2728,6 +2856,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             task_id="task_agent_snapshot_in_memory_1",
             stock_code="600519",
             stock_name="贵州茅台",
+            owner=self.owner,
             status=TaskStatus.COMPLETED,
             progress=100,
             result={
@@ -2763,7 +2892,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch("api.v1.endpoints.analysis.get_task_queue") as queue_mock, \
              patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
             queue_mock.return_value.get_task.return_value = task
-            status = get_analysis_status("task_agent_snapshot_in_memory_1")
+            status = get_analysis_status(
+                "task_agent_snapshot_in_memory_1",
+                http_request=self.http_request,
+            )
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(status.result.report["meta"]["current_price"], 1888.0)
@@ -2800,6 +2932,8 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             query_id="task_agent_snapshot_in_memory_1",
             code="600519",
             limit=1,
+            owner_scope="user",
+            owner_user_id=1,
         )
 
     def test_get_analysis_status_in_memory_task_without_db_snapshot_preserves_service_phase_summary(self) -> None:
@@ -2811,6 +2945,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             task_id="task_no_snapshot_in_memory_1",
             stock_code="600519",
             stock_name="贵州茅台",
+            owner=self.owner,
             status=TaskStatus.COMPLETED,
             progress=100,
             analysis_phase="intraday",
@@ -2841,7 +2976,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                  return_value=(None, None, None),
              ) as load_sources:
             queue_mock.return_value.get_task.return_value = task
-            status = get_analysis_status("task_no_snapshot_in_memory_1")
+            status = get_analysis_status(
+                "task_no_snapshot_in_memory_1",
+                http_request=self.http_request,
+            )
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(status.analysis_phase, "intraday")
@@ -2853,6 +2991,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         load_sources.assert_called_once_with(
             query_id="task_no_snapshot_in_memory_1",
             stock_code="600519",
+            owner=self.owner,
         )
 
     def test_openapi_declares_single_and_batch_async_202_payloads(self) -> None:
@@ -2923,9 +3062,10 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with patch.object(
             analysis_endpoint_module,
             "_try_acquire_market_review_lock",
-            return_value=object(),
+            return_value=SimpleNamespace(uses_flock=False, handle=MagicMock()),
         ), patch("api.v1.endpoints.analysis.get_task_queue", return_value=task_queue):
             response = trigger_market_review(
+                http_request=self.http_request,
                 request=None,
                 config=config,
             )
@@ -2948,6 +3088,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     async_mode=False,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -2972,6 +3113,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         async_mode=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
 
@@ -2995,12 +3137,87 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         async_mode=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
 
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.detail["message"], "请输入有效的股票代码或股票名称")
         queue_mock.assert_not_called()
+
+    def test_trigger_analysis_async_failure_preserves_accepted_task_and_releases_reserved_utc_period(self) -> None:
+        if trigger_analysis is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        class FailingExecutor:
+            def __init__(self) -> None:
+                self.submit_count = 0
+                self.first_future = Future()
+
+            def submit(self, *_args, **_kwargs):
+                self.submit_count += 1
+                if self.submit_count == 2:
+                    raise RuntimeError("executor rejected")
+                self.first_future.set_running_or_notify_cancel()
+                return self.first_future
+
+        period_start = date(2026, 9, 6)
+        quota_service = MagicMock()
+        quota_service.current_period_start.return_value = period_start
+        original_queue_instance = AnalysisTaskQueue._instance
+        AnalysisTaskQueue._instance = None
+        queue = AnalysisTaskQueue(max_workers=1)
+        executor = FailingExecutor()
+        queue._executor = executor
+        http_request = self.http_request
+        request = SimpleNamespace(
+            stock_code=None,
+            stock_codes=["600519", "000001"],
+            stock_name=None,
+            original_query=None,
+            selection_source="manual",
+            report_type="detailed",
+            force_refresh=False,
+            async_mode=True,
+            notify=True,
+            analysis_phase="auto",
+        )
+
+        try:
+            with patch(
+                "api.v1.endpoints.analysis.FeatureQuotaService",
+                return_value=quota_service,
+            ), patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
+                with self.assertRaisesRegex(RuntimeError, "executor rejected"):
+                    trigger_analysis(
+                        request=request,
+                        http_request=http_request,
+                        config=SimpleNamespace(),
+                    )
+        finally:
+            AnalysisTaskQueue._instance = original_queue_instance
+
+        quota_service.reserve_many_for_request.assert_called_once_with(
+            http_request,
+            "stock_analysis",
+            amount=2,
+            period_start=period_start,
+        )
+        quota_service.release_many_for_request.assert_called_once_with(
+            http_request,
+            "stock_analysis",
+            amount=1,
+            period_start=period_start,
+        )
+        reserve_period = quota_service.reserve_many_for_request.call_args.kwargs["period_start"]
+        release_period = quota_service.release_many_for_request.call_args.kwargs["period_start"]
+        self.assertIs(reserve_period, period_start)
+        self.assertIs(release_period, period_start)
+        self.assertEqual([task.stock_code for task in queue._tasks.values()], ["600519"])
+        retained_task = next(iter(queue._tasks.values()))
+        self.assertEqual(queue._analyzing_stocks[retained_task.dedupe_key], retained_task.task_id)
+        self.assertIs(queue._futures[retained_task.task_id], executor.first_future)
+        self.assertTrue(executor.first_future.running())
 
     def test_trigger_analysis_accepts_us_suffix_code(self) -> None:
         if trigger_analysis is None:
@@ -3024,6 +3241,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3038,6 +3256,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_resolves_bare_code_from_stock_index_before_default_market(self) -> None:
@@ -3063,6 +3284,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3077,6 +3299,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_resolves_bare_4_digit_jp_code_before_name_resolution(self) -> None:
@@ -3102,6 +3327,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3117,6 +3343,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_async_index_submits_structured_target(self) -> None:
@@ -3146,6 +3375,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3185,6 +3415,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3214,6 +3445,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3251,6 +3483,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         notify=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
 
@@ -3281,6 +3514,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3313,6 +3547,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3351,6 +3586,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3385,6 +3621,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3413,6 +3650,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         notify=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
 
@@ -3438,6 +3676,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3471,6 +3710,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3511,6 +3751,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3539,6 +3780,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3566,6 +3808,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         notify=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
 
@@ -3593,7 +3836,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         })
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            response = trigger_analysis(request=request, config=SimpleNamespace())
+            response = trigger_analysis(
+                request=request,
+                http_request=self.http_request,
+                config=SimpleNamespace(),
+            )
 
         self.assertEqual(response.status_code, 202)
         queue.submit_tasks_batch.assert_called_once_with(
@@ -3606,6 +3853,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             force_refresh=False,
             notify=True,
             report_language="en",
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_async_passes_and_returns_analysis_phase(self) -> None:
@@ -3635,6 +3885,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="intraday",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3649,6 +3900,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="intraday",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_accepts_hk_suffix_code_from_autocomplete(self) -> None:
@@ -3672,6 +3926,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     async_mode=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3686,6 +3941,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_accepts_bse_suffix_code_from_autocomplete(self) -> None:
@@ -3710,6 +3968,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3724,6 +3983,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_rejects_non_bse_code_with_bj_exchange_hint(self) -> None:
@@ -3750,6 +4012,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                                 notify=True,
                                 analysis_phase="auto",
                             ),
+                            http_request=self.http_request,
                             config=SimpleNamespace(),
                         )
 
@@ -3779,6 +4042,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     async_mode=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3793,6 +4057,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_allows_stock_names_with_star_and_hyphen(self) -> None:
@@ -3817,6 +4084,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3830,6 +4098,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_accepts_resolvable_free_text_input(self) -> None:
@@ -3854,6 +4125,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3867,6 +4139,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_preserves_batch_metadata(self) -> None:
@@ -3890,6 +4165,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3903,6 +4179,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_trigger_analysis_rejects_cross_request_duplicate_for_equivalent_code_shapes(self) -> None:
@@ -3929,6 +4208,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         notify=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
                 second = trigger_analysis(
@@ -3944,6 +4224,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                         notify=True,
                         analysis_phase="auto",
                     ),
+                    http_request=self.http_request,
                     config=SimpleNamespace(),
                 )
 
@@ -3984,6 +4265,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
 
@@ -3997,6 +4279,9 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             analysis_phase="auto",
             force_refresh=False,
             notify=True,
+            owner=self.owner,
+            before_submit=ANY,
+            on_submit_failure=ANY,
         )
 
     def test_spa_fallback_returns_json_404_for_bare_api_path(self) -> None:
@@ -4072,7 +4357,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         async def run():
             with patch("api.v1.endpoints.analysis.get_task_queue", return_value=mock_task_queue), \
                  patch("asyncio.Queue", return_value=never_queue):
-                response = await task_stream()
+                response = await task_stream(http_request=self.http_request)
                 gen = response.body_iterator
 
                 async def consume():
@@ -4087,6 +4372,8 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         with self.assertRaises(asyncio.CancelledError):
             asyncio.run(run())
 
+        mock_task_queue.list_pending_tasks.assert_called_once_with(owner=self.owner)
+        mock_task_queue.subscribe.assert_called_once_with(never_queue, owner=self.owner)
         mock_task_queue.unsubscribe.assert_called_once_with(never_queue)
 
     def test_get_task_list_includes_analysis_phase_and_skills(self) -> None:
@@ -4123,7 +4410,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         }
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            response = get_task_list(status=None, limit=20)
+            response = get_task_list(
+                http_request=self.http_request,
+                status=None,
+                limit=20,
+            )
 
         self.assertEqual(response.tasks[0].analysis_phase, "postmarket")
         self.assertEqual(response.tasks[0].skills, ["growth_quality"])
@@ -4169,7 +4460,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                 }
 
                 with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-                    response = get_task_list(status=None, limit=20)
+                    response = get_task_list(
+                        http_request=self.http_request,
+                        status=None,
+                        limit=20,
+                    )
 
                 self.assertEqual(response.tasks[0].stock_code, stock_code)
                 self.assertEqual(response.tasks[0].asset_type, expected_asset_type)
@@ -4208,7 +4503,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         }
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            response = get_task_list(status=None, limit=20)
+            response = get_task_list(
+                http_request=self.http_request,
+                status=None,
+                limit=20,
+            )
 
         self.assertIsNone(response.tasks[0].asset_type)
 
@@ -4224,10 +4523,12 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             ["sh000016"],
             analysis_targets=[index_target],
             report_type="detailed",
+            owner=self.owner,
         )
         plain_tasks, _ = queue.submit_tasks_batch(
             ["000016"],
             report_type="detailed",
+            owner=self.owner,
         )
 
         # Index targets are carried on TaskInfo, so the SSE/task payload exposes
@@ -4276,6 +4577,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                             notify=True,
                             analysis_phase="auto",
                         ),
+                        http_request=self.http_request,
                         config=SimpleNamespace(),
                     )
 
@@ -4333,7 +4635,11 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             "failed": 0,
         }
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue):
-            response = get_task_list(status=None, limit=20)
+            response = get_task_list(
+                http_request=self.http_request,
+                status=None,
+                limit=20,
+            )
         # 走真实 JSON 序列化再读取，证明 GET /tasks 响应层面降级为 null，
         # 而非仅依赖 Pydantic 对象属性。
         payload = json.loads(response.model_dump_json())
@@ -4358,6 +4664,7 @@ class AnalysisApiContractTestCase(unittest.TestCase):
                     notify=True,
                     analysis_phase="auto",
                 ),
+                http_request=self.http_request,
                 config=SimpleNamespace(),
             )
         self.assertEqual(response.status_code, 202)
@@ -4443,6 +4750,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._original_instance = AnalysisTaskQueue._instance
         AnalysisTaskQueue._instance = None
+        self.owner = GLOBAL_ANALYSIS_OWNER
 
     def tearDown(self) -> None:
         queue = AnalysisTaskQueue._instance
@@ -4456,28 +4764,49 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
         class FailingExecutor:
             def __init__(self) -> None:
                 self.submit_count = 0
+                self.first_future = Future()
 
             def submit(self, *args, **kwargs):
                 self.submit_count += 1
                 if self.submit_count == 2:
                     raise RuntimeError("executor down")
-                return Future()
+                self.first_future.set_running_or_notify_cancel()
+                return self.first_future
 
         queue = AnalysisTaskQueue(max_workers=1)
-        queue._executor = FailingExecutor()
+        executor = FailingExecutor()
+        queue._executor = executor
+        broadcast_events = []
+        queue._broadcast_event = lambda event_type, data: broadcast_events.append((event_type, data))
+        reserved_batches = []
+        compensated_batches = []
 
         with self.assertRaisesRegex(RuntimeError, "executor down"):
-            queue.submit_tasks_batch(["600519", "000858"], report_type="detailed")
+            queue.submit_tasks_batch(
+                ["600519", "000858"],
+                report_type="detailed",
+                before_submit=lambda codes: reserved_batches.append(codes),
+                on_submit_failure=lambda codes: compensated_batches.append(codes),
+                owner=self.owner,
+            )
 
-        self.assertEqual(queue._tasks, {})
-        self.assertEqual(queue._analyzing_stocks, {})
-        self.assertEqual(queue._futures, {})
+        self.assertEqual(reserved_batches, [["600519", "000858"]])
+        self.assertEqual(compensated_batches, [["000858"]])
+        self.assertTrue(executor.first_future.running())
+        self.assertFalse(executor.first_future.cancelled())
+        self.assertFalse(executor.first_future.cancel())
+        self.assertEqual([task.stock_code for task in queue._tasks.values()], ["600519"])
+        retained_task = next(iter(queue._tasks.values()))
+        self.assertEqual(queue._analyzing_stocks[retained_task.dedupe_key], retained_task.task_id)
+        self.assertIs(queue._futures[retained_task.task_id], executor.first_future)
+        self.assertEqual([event_type for event_type, _ in broadcast_events], ["task_created"])
+        self.assertEqual(broadcast_events[0][1]["task_id"], retained_task.task_id)
 
     def test_batch_submit_ignores_blank_stock_codes(self) -> None:
         queue = AnalysisTaskQueue(max_workers=1)
         queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
 
-        accepted, duplicates = queue.submit_tasks_batch(["600519", "   "], report_type="detailed")
+        accepted, duplicates = queue.submit_tasks_batch(["600519", "   "], report_type="detailed", owner=self.owner)
 
         self.assertEqual([task.stock_code for task in accepted], ["600519"])
         self.assertEqual(duplicates, [])
@@ -4512,6 +4841,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             query_source="portfolio",
             portfolio_context=portfolio_context,
             skills=request_skills,
+            owner=self.owner,
         )
         request_skills.append("mutated_after_submit")
         portfolio_context["quantity"] = 999
@@ -4552,17 +4882,18 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
         queue = AnalysisTaskQueue(max_workers=1)
         queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
 
-        accepted, duplicates = queue.submit_tasks_batch(["600519"], report_type="detailed")
+        accepted, duplicates = queue.submit_tasks_batch(["600519"], report_type="detailed", owner=self.owner)
 
         self.assertEqual(len(accepted), 1)
         self.assertEqual(duplicates, [])
-        self.assertTrue(queue.is_analyzing("600519.SH"))
-        self.assertEqual(queue.get_analyzing_task_id("600519.SH"), accepted[0].task_id)
+        self.assertTrue(queue.is_analyzing("600519.SH", owner=self.owner))
+        self.assertEqual(queue.get_analyzing_task_id("600519.SH", owner=self.owner), accepted[0].task_id)
 
         accepted_again, duplicates_again = queue.submit_tasks_batch(
             ["600519.SH"],
             report_type="detailed",
             analysis_phase="intraday",
+            owner=self.owner,
         )
 
         self.assertEqual(accepted_again, [])
@@ -4575,7 +4906,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
         queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
 
         with self.assertRaisesRegex(ValueError, "股票代码不能为空或仅包含空白字符"):
-            queue.submit_task("   ", report_type="detailed")
+            queue.submit_task("   ", report_type="detailed", owner=self.owner)
 
         self.assertEqual(queue._tasks, {})
         self.assertEqual(queue._analyzing_stocks, {})
@@ -4592,7 +4923,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
 
         queue._broadcast_event = record_broadcast
 
-        accepted, duplicates = queue.submit_tasks_batch(["600519", "000858"], report_type="detailed")
+        accepted, duplicates = queue.submit_tasks_batch(["600519", "000858"], report_type="detailed", owner=self.owner)
 
         self.assertEqual(len(accepted), 2)
         self.assertEqual(duplicates, [])
@@ -4601,7 +4932,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
     def test_update_task_progress_broadcasts_task_progress_event(self) -> None:
         queue = AnalysisTaskQueue(max_workers=1)
         queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
-        accepted, _ = queue.submit_tasks_batch(["600519"], report_type="detailed")
+        accepted, _ = queue.submit_tasks_batch(["600519"], report_type="detailed", owner=self.owner)
 
         events = []
         queue._broadcast_event = lambda event_type, data: events.append((event_type, data))
@@ -4633,18 +4964,19 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             ["sh000016", "000016"],
             analysis_targets=[index_target, None],
             report_type="detailed",
+            owner=self.owner,
         )
 
         self.assertEqual(duplicates, [])
         self.assertEqual(len(accepted), 2)
         codes = sorted(task.stock_code for task in accepted)
         self.assertEqual(codes, ["000016", "sh000016"])
-        # The index task keeps a canonical-id dedupe key; the stock keeps its
-        # code-based key, so neither collapses with the other.
+        # The index task keeps its parser canonical id behind the owner
+        # partition key; the stock remains distinct in the same partition.
         index_task = next(task for task in accepted if task.stock_code == "sh000016")
         stock_task = next(task for task in accepted if task.stock_code == "000016")
-        self.assertEqual(index_task.dedupe_key, "sh000016")
-        self.assertNotEqual(stock_task.dedupe_key, "sh000016")
+        self.assertEqual(index_task.dedupe_key, f"{self.owner.key}:sh000016")
+        self.assertNotEqual(stock_task.dedupe_key, f"{self.owner.key}:sh000016")
         self.assertIs(index_task.analysis_target, index_target)
 
     def test_alias_index_input_submits_canonical_task_info(self) -> None:
@@ -4664,6 +4996,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             ["000300.CSI"],
             analysis_targets=[target],
             report_type="detailed",
+            owner=self.owner,
         )
 
         self.assertEqual(duplicates, [])
@@ -4672,7 +5005,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
         self.assertEqual(task.stock_code, "sh000300")
         self.assertEqual(task.to_dict()["stock_code"], "sh000300")
         self.assertEqual(task.to_dict()["asset_type"], "index")
-        self.assertEqual(task.dedupe_key, "sh000300")
+        self.assertEqual(task.dedupe_key, f"{self.owner.key}:sh000300")
         self.assertIs(task.analysis_target, target)
 
     def test_csi_aliases_converge_to_single_task_queue_key(self) -> None:
@@ -4690,12 +5023,13 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             ["930955.CSI", "csi930955"],
             analysis_targets=[a, b],
             report_type="detailed",
+            owner=self.owner,
         )
 
         self.assertEqual(len(accepted), 1)
         self.assertEqual(len(duplicates), 1)
         self.assertEqual(accepted[0].stock_code, "csi930955")
-        self.assertEqual(accepted[0].dedupe_key, "csi930955")
+        self.assertEqual(accepted[0].dedupe_key, f"{self.owner.key}:csi930955")
 
     def test_mixed_quad_batch_produces_four_independent_tasks(self) -> None:
         from src.services.stock_list_parser import parse_analysis_target
@@ -4714,6 +5048,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             ["sh000016", "000016", "600519", "930955.CSI"],
             analysis_targets=[index_sh, stock_bare, stock_600, index_csi],
             report_type="detailed",
+            owner=self.owner,
         )
 
         self.assertEqual(duplicates, [])
@@ -4724,21 +5059,23 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             sorted(task.stock_code for task in accepted),
             ["000016", "600519", "csi930955", "sh000016"],
         )
-        # INDEX keys are canonical ids; STOCK keys stay code-based and distinct.
+        # Keys combine owner partition with canonical identity, so CSI alias
+        # input is submitted under its canonical identity without cross-user
+        # dedupe collisions.
         keys = {task.stock_code: task.dedupe_key for task in accepted}
-        self.assertEqual(keys["sh000016"], "sh000016")
-        self.assertEqual(keys["csi930955"], "csi930955")
-        self.assertNotEqual(keys["000016"], "sh000016")
-        self.assertNotEqual(keys["600519"], "csi930955")
+        self.assertEqual(keys["sh000016"], f"{self.owner.key}:sh000016")
+        self.assertEqual(keys["csi930955"], f"{self.owner.key}:csi930955")
+        self.assertNotEqual(keys["000016"], f"{self.owner.key}:sh000016")
+        self.assertNotEqual(keys["600519"], f"{self.owner.key}:csi930955")
 
     def test_stock_dedup_semantics_unchanged_with_analysis_targets_none(self) -> None:
         queue = self._executor_stub_queue()
-        accepted, duplicates = queue.submit_tasks_batch(["600519"], report_type="detailed")
+        accepted, duplicates = queue.submit_tasks_batch(["600519"], report_type="detailed", owner=self.owner)
 
         self.assertEqual(len(accepted), 1)
         self.assertEqual(duplicates, [])
-        self.assertTrue(queue.is_analyzing("600519.SH"))
-        self.assertEqual(queue.get_analyzing_task_id("600519.SH"), accepted[0].task_id)
+        self.assertTrue(queue.is_analyzing("600519.SH", owner=self.owner))
+        self.assertEqual(queue.get_analyzing_task_id("600519.SH", owner=self.owner), accepted[0].task_id)
         self.assertIsNone(accepted[0].analysis_target)
         self.assertIsNotNone(accepted[0].dedupe_key)
 
@@ -4751,6 +5088,7 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             ["sh000016"],
             analysis_targets=[index_target],
             report_type="detailed",
+            owner=self.owner,
         )
         task = accepted[0]
 
@@ -4785,9 +5123,11 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
             ["sh000016"],
             analysis_targets=[index_target],
             report_type="detailed",
+            owner=self.owner,
         )
         task = accepted[0]
-        self.assertIn("sh000016", queue._analyzing_stocks)
+        # The owner-partitioned canonical key must be removed on failure.
+        self.assertIn(f"{self.owner.key}:sh000016", queue._analyzing_stocks)
 
         service_instance = MagicMock()
         service_instance.analyze_stock.side_effect = RuntimeError("boom")

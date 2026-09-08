@@ -34,7 +34,6 @@ from api.v1.schemas.system_config import (
     ValidateSystemConfigRequest,
     ValidateSystemConfigResponse,
 )
-from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.services.system_config_service import (
     ConfigConflictError,
     ConfigImportError,
@@ -92,29 +91,25 @@ class EnvBackupAccessDenied(Exception):
 
 
 def _allow_env_backup_access(request: Request) -> None:
-    """Gate raw .env backup/restore to explicit secure modes.
+    """Gate raw .env backup/restore behind canonical identity and system permission.
 
-    - Desktop runtime keeps existing local behavior via DSA_DESKTOP_MODE.
-    - Non-desktop runtime must have admin auth enabled and a valid session.
+    Desktop mode retains its local-only workflow. Web and API requests must be
+    authenticated by the unified middleware and explicitly hold system.manage.
     """
     if os.getenv("DSA_DESKTOP_MODE") == "true":
         return
 
-    refresh_auth_state()
-    if not is_auth_enabled():
+    principal = getattr(request.state, "miniapp_principal", None)
+    if principal is None:
+        raise EnvBackupAccessDenied(
+            status_code=401,
+            message="System config backup requires an authenticated user session",
+        )
+    if "system.manage" not in principal.permissions:
         raise EnvBackupAccessDenied(
             status_code=403,
-            message="System config backup is disabled; enable admin authentication first",
+            message="System config backup requires the system.manage permission",
         )
-
-    cookie_val = request.cookies.get(COOKIE_NAME)
-    if cookie_val and verify_session(cookie_val):
-        return
-
-    raise EnvBackupAccessDenied(
-        status_code=401,
-        message="System config backup requires a valid admin session",
-    )
 
 
 def _raise_env_backup_access_error(exc: EnvBackupAccessDenied) -> None:

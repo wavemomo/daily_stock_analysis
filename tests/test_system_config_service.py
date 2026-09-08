@@ -1221,6 +1221,58 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["primary_backend_id"], "codex_cli")
         self.assertEqual(payload["primary"]["last_error_code"], "command_not_found")
 
+    def test_generation_backend_preview_local_cli_ignores_inactive_litellm_channel_errors(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=litellm",
+            "LLM_CHANNELS=primary",
+            "LLM_PRIMARY_PROTOCOL=openai",
+            "LLM_PRIMARY_MODELS=gpt-4o-mini",
+            "LLM_PRIMARY_API_KEY=",
+            "LITELLM_MODEL=gemini/gemini-3-flash-preview",
+        )
+
+        with (
+            patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True),
+            patch("src.llm.local_cli_backend.shutil.which", return_value=None),
+        ):
+            payload = self.service.preview_generation_backend_status(
+                items=[
+                    {"key": "GENERATION_BACKEND", "value": "codex_cli"},
+                    {"key": "GENERATION_FALLBACK_BACKEND", "value": ""},
+                ],
+                mask_token="******",
+            )
+
+        self.assertEqual(payload["primary_backend_id"], "codex_cli")
+        self.assertEqual(payload["primary"]["last_error_code"], "command_not_found")
+
+    def test_generation_backend_preview_keeps_litellm_channel_errors_when_fallback_is_active(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=litellm",
+            "LLM_CHANNELS=primary",
+            "LLM_PRIMARY_PROTOCOL=openai",
+            "LLM_PRIMARY_MODELS=gpt-4o-mini",
+            "LLM_PRIMARY_API_KEY=",
+        )
+
+        with patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True):
+            with self.assertRaises(ConfigValidationError) as ctx:
+                self.service.preview_generation_backend_status(
+                    items=[
+                        {"key": "GENERATION_BACKEND", "value": "codex_cli"},
+                        {"key": "GENERATION_FALLBACK_BACKEND", "value": "litellm"},
+                    ],
+                    mask_token="******",
+                )
+
+        self.assertTrue(
+            any(
+                issue["key"] == "LLM_PRIMARY_API_KEY"
+                and issue["code"] == "missing_api_key"
+                for issue in ctx.exception.issues
+            )
+        )
+
     def test_generation_backend_preview_ignores_unrelated_draft_errors(self) -> None:
         self._rewrite_env(
             "GENERATION_BACKEND=litellm",
@@ -2046,6 +2098,41 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertFalse(validation["valid"])
         self.assertTrue(any(issue["code"] == "missing_api_key" for issue in validation["issues"]))
+
+    def test_validate_update_and_import_remain_strict_for_inactive_litellm_config(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=codex_cli",
+            "GENERATION_FALLBACK_BACKEND=",
+        )
+        invalid_items = [
+            {"key": "LLM_CHANNELS", "value": "primary"},
+            {"key": "LLM_PRIMARY_PROTOCOL", "value": "openai"},
+            {"key": "LLM_PRIMARY_MODELS", "value": "gpt-4o-mini"},
+            {"key": "LLM_PRIMARY_API_KEY", "value": ""},
+        ]
+        import_content = "\n".join(
+            f"{item['key']}={item['value']}" for item in invalid_items
+        ) + "\n"
+        before = self.env_path.read_text(encoding="utf-8")
+        version = self.manager.get_config_version()
+
+        with patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True):
+            self.assertFalse(self.service.validate(items=invalid_items)["valid"])
+            with self.assertRaises(ConfigValidationError):
+                self.service.update(
+                    config_version=version,
+                    items=invalid_items,
+                    reload_now=False,
+                )
+            with self.assertRaises(ConfigValidationError):
+                self.service.import_env(
+                    config_version=version,
+                    content=import_content,
+                    reload_now=False,
+                )
+
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.manager.get_config_version(), version)
 
     def test_validate_rejects_unknown_llm_api_surface(self) -> None:
         validation = self.service.validate(

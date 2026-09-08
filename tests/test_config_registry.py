@@ -352,9 +352,7 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         "OPENAI_TEMPERATURE",
         "VISION_MODEL",
     }
-    _SYSTEM_HIDDEN_KEYS = {
-        "ADMIN_AUTH_ENABLED",
-    }
+    _SYSTEM_HIDDEN_KEYS: set[str] = set()
 
     _HELP_KEYS = (
         "STOCK_LIST",
@@ -374,7 +372,6 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         "WECHAT_WEBHOOK_URL",
         "EMAIL_RECEIVERS",
         "SCHEDULE_TIME",
-        "ADMIN_AUTH_ENABLED",
         # PR3 Phase 1: Agent + Event Alert
         "AGENT_MODE",
         "AGENT_MAX_STEPS",
@@ -517,11 +514,6 @@ class TestSettingsHelpMetadata(unittest.TestCase):
 
         self.assertEqual(fields["STOCK_LIST"]["help_key"], "settings.base.STOCK_LIST")
         self.assertIn("docs/full-guide.md", fields["STOCK_LIST"]["docs"][0]["href"])
-
-    def test_admin_auth_help_is_read_only_in_generic_settings(self):
-        field = get_field_definition("ADMIN_AUTH_ENABLED")
-        self.assertFalse(field["is_editable"])
-        self.assertIn("auth_settings_endpoint_required", field.get("warning_codes", []))
 
 
 class TestIssue1512SettingsFields(unittest.TestCase):

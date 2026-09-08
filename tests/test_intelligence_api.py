@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
@@ -15,7 +16,13 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from src.config import Config
+from src.services.rbac_service import PERMISSIONS
 from src.storage import DatabaseManager
+
+# Authenticated principal granted the full permission set so intelligence route
+# RBAC policy (intelligence.read / intelligence.manage) is satisfied; tests here
+# exercise business logic, not permission gating.
+_TEST_PERMISSIONS = tuple(PERMISSIONS)
 
 RSS_FIXTURE = b'<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0"><channel><item><title>Market event</title><link>https://news.example.com/market-event</link><description>Evidence summary</description></item></channel></rss>'
 
@@ -32,7 +39,20 @@ class IntelligenceApiTestCase(unittest.TestCase):
         )
         self._dns_patcher.start()
         self.addCleanup(self._dns_patcher.stop)
-        self.client = TestClient(create_app(static_dir=Path(self._temp_dir.name)))
+        self.principal = SimpleNamespace(
+            user=SimpleNamespace(id=101),
+            permissions=_TEST_PERMISSIONS,
+        )
+        self._auth_patcher = patch(
+            "src.services.wechat_miniapp_auth_service.WechatMiniappAuthService.authenticate_token",
+            return_value=self.principal,
+        )
+        self._auth_patcher.start()
+        self.addCleanup(self._auth_patcher.stop)
+        self.client = TestClient(
+            create_app(static_dir=Path(self._temp_dir.name)),
+            headers={"Authorization": "Bearer intelligence-api-token"},
+        )
 
     def tearDown(self) -> None:
         DatabaseManager.reset_instance()

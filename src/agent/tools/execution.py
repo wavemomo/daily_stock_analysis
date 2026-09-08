@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.portfolio_ownership import PortfolioScope, UNSET_PORTFOLIO_SCOPE, scope_from_legacy_owner
 from src.agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,8 @@ class ToolAccessContext:
     data_sources: Optional[List[str]] = None
     backend: Optional[str] = None
     session_id: Optional[str] = None
+    resource_owner_id: Optional[str] = None
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE
     timeout_seconds: Optional[float] = None
     deadline: Optional[float] = None
     cancel_event: Optional[threading.Event] = None
@@ -128,6 +131,11 @@ def bind_tool_execution_context(context: ToolAccessContext) -> contextvars.Token
 def reset_tool_execution_context(token: contextvars.Token) -> None:
     """Restore the previous Tool Surface execution context."""
     _ACTIVE_TOOL_CONTEXT.reset(token)
+
+
+def get_active_tool_execution_context() -> Optional[ToolAccessContext]:
+    """Return the trusted context bound to the current tool execution."""
+    return _ACTIVE_TOOL_CONTEXT.get()
 
 
 def check_tool_execution() -> None:
@@ -382,9 +390,12 @@ def execute_runner_tool_call(
     tool_call: Any,
     tool_registry: ToolRegistry,
     stock_scope: Any = None,
+    resource_owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     non_retriable_tool_results: Optional[Dict[str, str]] = None,
 ) -> tuple[Any, str, bool, float, bool, Optional[Dict[str, Any]]]:
     """Execute a single tool call using the legacy runner semantics."""
+    portfolio_scope = scope_from_legacy_owner(portfolio_scope)
     t0 = time.time()
     cache_key = _build_tool_cache_key(tool_call.name, tool_call.arguments)
     guard_result = _guard_tool_stock_scope(tool_registry, tool_call.name, tool_call.arguments, stock_scope)
@@ -412,7 +423,18 @@ def execute_runner_tool_call(
         return tool_call, non_retriable_tool_results[cache_key], False, dur, True, None
 
     try:
-        res = tool_registry.execute(tool_call.name, **tool_call.arguments)
+        token = bind_tool_execution_context(
+            ToolAccessContext(
+                stock_scope=stock_scope,
+                backend="litellm",
+                resource_owner_id=resource_owner_id,
+                portfolio_scope=portfolio_scope,
+            )
+        )
+        try:
+            res = tool_registry.execute(tool_call.name, **tool_call.arguments)
+        finally:
+            reset_tool_execution_context(token)
         res_str = serialize_tool_result(res)
         ok = True
         if cache_key and non_retriable_tool_results is not None and _is_non_retriable_tool_result(res):

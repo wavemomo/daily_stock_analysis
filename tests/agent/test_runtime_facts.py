@@ -33,6 +33,7 @@ from src.agent.runtime_facts import (
     SkillOpinionFact,
     build_agent_runtime_facts,
 )
+from src.portfolio_ownership import PortfolioScope
 
 
 def _orchestrator(*, risk_override=True):
@@ -598,6 +599,7 @@ def test_runner_failure_sources_propagate_through_base_agent():
         tool_registry=MagicMock(),
         llm_adapter=MagicMock(),
         max_steps=0,
+        portfolio_scope=PortfolioScope.user("agent-runtime-facts"),
     )
 
     agent = _TestAgent(MagicMock(), MagicMock())

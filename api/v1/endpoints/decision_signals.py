@@ -6,9 +6,9 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Security
-from fastapi.security import APIKeyCookie
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from api.deps import get_request_portfolio_scope
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.decision_signals import (
     DecisionSignalCreateRequest,
@@ -26,12 +26,13 @@ from api.v1.schemas.decision_signals import (
     DecisionSignalReassessResponse,
     DecisionSignalStatusUpdateRequest,
 )
-from src.auth import COOKIE_NAME
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.services.decision_signal_service import (
     DecisionSignalNotFoundError,
     DecisionSignalService,
     DecisionSignalStorageError,
 )
+from src.services.feature_quota_service import FeatureQuotaService
 from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
 from src.services.decision_signal_reassess_service import (
     DecisionSignalReassessGuardrailBlockedError,
@@ -44,17 +45,12 @@ from src.services.decision_signal_reassess_service import (
 
 logger = logging.getLogger(__name__)
 
-admin_session_cookie = APIKeyCookie(
-    name=COOKIE_NAME,
-    scheme_name="AdminSessionCookie",
-    auto_error=False,
-)
-router = APIRouter(dependencies=[Security(admin_session_cookie)])
+router = APIRouter()
 
 AUTH_RESPONSE = {
     401: {
         "model": ErrorResponse,
-        "description": "未登录或管理员会话无效（ADMIN_AUTH_ENABLED=true 时）",
+        "description": "未登录或会话无效",
     },
 }
 
@@ -145,11 +141,13 @@ def create_signal(request: DecisionSignalCreateRequest) -> DecisionSignalMutatio
         "当 source_type=analysis 且只传 source_report_id 查询时，若无命中信号会尝试基于该历史报告一次性懒回填 "
         "（仅首次命中列表场景，且该精确查询会触发历史决策信号回填写入，属于 read-with-write 行为；"
         "不影响其他分页列表筛选参数场景）。"
-        "holding_only=true 只读取 active 账户的 portfolio_positions 缓存持仓，不触发 portfolio snapshot replay。"
+        "holding_only=true 只读取 active 账户的 portfolio_positions 缓存持仓，不触发 portfolio snapshot replay；"
+        "所有请求都仅查询当前统一登录用户拥有的账户。"
     ),
     operation_id="listDecisionSignals",
 )
 def list_signals(
+    request: Request,
     market: Optional[str] = Query(None, description="Optional market filter: cn/hk/us/jp/kr/tw"),
     stock_code: Optional[str] = Query(None, description="Optional stock code filter"),
     action: Optional[str] = Query(None, description="Optional decision action filter"),
@@ -195,6 +193,11 @@ def list_signals(
                 expires_to=expires_to,
                 holding_only=holding_only,
                 account_id=account_id,
+                portfolio_scope=(
+                    get_request_portfolio_scope(request)
+                    if holding_only
+                    else UNSET_PORTFOLIO_SCOPE
+                ),
                 page=page,
                 page_size=page_size,
             )
@@ -225,26 +228,33 @@ def list_signals(
     ),
     operation_id="runDecisionSignalOutcomes",
 )
-def run_outcomes(request: DecisionSignalOutcomeRunRequest) -> DecisionSignalOutcomeRunResponse:
+def run_outcomes(
+    request: DecisionSignalOutcomeRunRequest,
+    http_request: Request,
+) -> DecisionSignalOutcomeRunResponse:
     service = DecisionSignalOutcomeService()
     try:
+        prepared = service.prepare_run_request(
+            signal_id=request.signal_id,
+            horizons=request.horizons,
+            force=request.force,
+            market=request.market,
+            stock_code=request.stock_code,
+            action=request.action,
+            source_type=request.source_type,
+            status=request.status,
+            limit=request.limit,
+        )
+        FeatureQuotaService().reserve_for_request(http_request, 'decision_signal_outcomes')
         return DecisionSignalOutcomeRunResponse(
-            **service.run_outcomes(
-                signal_id=request.signal_id,
-                horizons=request.horizons,
-                force=request.force,
-                market=request.market,
-                stock_code=request.stock_code,
-                action=request.action,
-                source_type=request.source_type,
-                status=request.status,
-                limit=request.limit,
-            )
+            **service.run_outcomes(prepared=prepared)
         )
     except DecisionSignalNotFoundError as exc:
         raise _not_found(exc)
     except ValueError as exc:
         raise _bad_request(exc)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _internal_error("Run decision signal outcomes failed", exc)
 
@@ -340,15 +350,20 @@ def get_outcome_stats(
     ),
     operation_id="reassessDecisionSignalPreview",
 )
-def reassess_signal(request: DecisionSignalReassessRequest) -> DecisionSignalReassessResponse:
+def reassess_signal(
+    request: DecisionSignalReassessRequest,
+    http_request: Request,
+) -> DecisionSignalReassessResponse:
     service = DecisionSignalReassessService()
     try:
+        prepared = service.prepare_reassess(
+            source_report_id=request.source_report_id,
+            decision_profile=request.decision_profile,
+            persist=request.persist,
+        )
+        FeatureQuotaService().reserve_for_request(http_request, 'decision_signal_reassess')
         return DecisionSignalReassessResponse(
-            **service.reassess(
-                source_report_id=request.source_report_id,
-                decision_profile=request.decision_profile,
-                persist=request.persist,
-            )
+            **service.complete_reassess(prepared, persist=request.persist)
         )
     except DecisionSignalSourceReportNotFoundError as exc:
         raise _error(404, exc, error="source_report_not_found")
@@ -358,6 +373,8 @@ def reassess_signal(request: DecisionSignalReassessRequest) -> DecisionSignalRea
         raise _error(400, exc, error="unsupported_report_snapshot")
     except DecisionSignalReassessGuardrailBlockedError as exc:
         raise _guardrail_blocked(exc)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _internal_error("Reassess decision signal failed", exc)
 

@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import Future
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,26 +22,18 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-import src.auth as auth
 from api.app import create_app
+from src.analysis_ownership import AnalysisOwner, GLOBAL_ANALYSIS_OWNER
 from src.config import Config
 from src.services.portfolio_service import PortfolioBusyError
+from src.services.task_queue import AnalysisTaskQueue
 from src.storage import DatabaseManager
-
-
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
 
 
 class PortfolioApiTestCase(unittest.TestCase):
     """Portfolio API contract tests for account/events/snapshot."""
 
     def setUp(self) -> None:
-        _reset_auth_globals()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp_dir.name)
         self.env_path = self.data_dir / ".env"
@@ -50,7 +43,6 @@ class PortfolioApiTestCase(unittest.TestCase):
                 [
                     "STOCK_LIST=600519",
                     "GEMINI_API_KEY=test",
-                    "ADMIN_AUTH_ENABLED=true",
                     f"DATABASE_PATH={self.db_path}",
                 ]
             )
@@ -62,12 +54,22 @@ class PortfolioApiTestCase(unittest.TestCase):
         os.environ["DATABASE_PATH"] = str(self.db_path)
         Config.reset_instance()
         DatabaseManager.reset_instance()
+        self.principal = SimpleNamespace(
+            user=SimpleNamespace(id=101),
+            permissions=("portfolio.read", "portfolio.manage", "analysis.execute"),
+        )
+        self.analysis_owner = AnalysisOwner.user(self.principal.user.id)
+        self.auth_patch = patch(
+            "src.services.wechat_miniapp_auth_service.WechatMiniappAuthService.authenticate_token",
+            return_value=self.principal,
+        )
+        self.auth_patch.start()
         app = create_app(static_dir=self.data_dir / "empty-static")
-        self.client = TestClient(app)
-        self.client.cookies.set("dsa_session", auth.create_session())
+        self.client = TestClient(app, headers={"Authorization": "Bearer portfolio-api-token"})
         self.db = DatabaseManager.get_instance()
 
     def tearDown(self) -> None:
+        self.auth_patch.stop()
         DatabaseManager.reset_instance()
         Config.reset_instance()
         os.environ.pop("ENV_FILE", None)
@@ -460,9 +462,70 @@ class PortfolioApiTestCase(unittest.TestCase):
         self.assertEqual(kwargs["query_source"], "portfolio")
         self.assertEqual(kwargs["analysis_phase"], "intraday")
         self.assertTrue(kwargs["force_refresh"])
+        self.assertEqual(kwargs["owner"], AnalysisOwner.user(self.principal.user.id))
         self.assertEqual(kwargs["portfolio_context"]["account_id"], account_id)
         self.assertEqual(kwargs["portfolio_context"]["quantity"], 10.0)
         self.assertEqual(kwargs["portfolio_context"]["cost_method"], "fifo")
+
+    def test_position_analysis_failure_preserves_existing_task_and_releases_reserved_utc_period(self) -> None:
+        class FailingExecutor:
+            def __init__(self) -> None:
+                self.submit_count = 0
+                self.first_future = Future()
+
+            def submit(self, *_args, **_kwargs):
+                self.submit_count += 1
+                if self.submit_count == 2:
+                    raise RuntimeError("executor rejected")
+                self.first_future.set_running_or_notify_cancel()
+                return self.first_future
+
+        account_id = self._create_position(quantity=10)
+        period_start = date(2026, 9, 6)
+        quota_service = MagicMock()
+        quota_service.current_period_start.return_value = period_start
+        original_queue_instance = AnalysisTaskQueue._instance
+        AnalysisTaskQueue._instance = None
+        queue = AnalysisTaskQueue(max_workers=1)
+        executor = FailingExecutor()
+        queue._executor = executor
+        queue.submit_tasks_batch(
+            ["000001"],
+            report_type="detailed",
+            owner=GLOBAL_ANALYSIS_OWNER,
+        )
+
+        try:
+            with patch(
+                "src.services.portfolio_service.PortfolioService._fetch_realtime_position_price",
+                return_value=(None, None),
+            ), patch(
+                "api.v1.endpoints.portfolio.FeatureQuotaService",
+                return_value=quota_service,
+            ), patch("api.v1.endpoints.portfolio.get_task_queue", return_value=queue):
+                with self.assertRaisesRegex(RuntimeError, "executor rejected"):
+                    self.client.post(
+                        "/api/v1/portfolio/positions/600519/analysis",
+                        json={"account_id": account_id, "force": True},
+                    )
+        finally:
+            AnalysisTaskQueue._instance = original_queue_instance
+
+        quota_service.reserve_many_for_request.assert_called_once()
+        quota_service.release_many_for_request.assert_called_once()
+        reserve_call = quota_service.reserve_many_for_request.call_args
+        release_call = quota_service.release_many_for_request.call_args
+        self.assertEqual(reserve_call.args[1], "stock_analysis")
+        self.assertEqual(release_call.args[1], "stock_analysis")
+        self.assertEqual(reserve_call.kwargs["amount"], 1)
+        self.assertEqual(release_call.kwargs["amount"], 1)
+        self.assertIs(reserve_call.kwargs["period_start"], period_start)
+        self.assertIs(release_call.kwargs["period_start"], period_start)
+        self.assertEqual([task.stock_code for task in queue._tasks.values()], ["000001"])
+        retained_task = next(iter(queue._tasks.values()))
+        self.assertEqual(queue._analyzing_stocks[retained_task.dedupe_key], retained_task.task_id)
+        self.assertIs(queue._futures[retained_task.task_id], executor.first_future)
+        self.assertTrue(executor.first_future.running())
 
     def test_position_analysis_matches_exchange_suffix_position_symbol(self) -> None:
         account_id = self._create_position(symbol="600519.SH", quantity=10)

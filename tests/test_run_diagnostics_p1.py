@@ -24,6 +24,7 @@ from src.services.run_diagnostics import (
     record_provider_run,
     reset_run_diagnostic_context,
 )
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
 from src.services.task_queue import AnalysisTaskQueue, TaskInfo, TaskStatus
 
 
@@ -125,7 +126,11 @@ class RunDiagnosticsP1TestCase(unittest.TestCase):
         AnalysisTaskQueue._instance = self._original_queue
 
     def test_task_info_exposes_trace_id_for_sse_and_status_payloads(self) -> None:
-        task = TaskInfo(task_id="task-1", stock_code="600519")
+        task = TaskInfo(
+            task_id="task-1",
+            stock_code="600519",
+            owner=GLOBAL_ANALYSIS_OWNER,
+        )
 
         self.assertEqual(task.to_dict()["trace_id"], "task-1")
         self.assertEqual(task.copy().trace_id, "task-1")
@@ -138,8 +143,9 @@ class RunDiagnosticsP1TestCase(unittest.TestCase):
             lambda: {"ok": True},
             stock_code="market_review",
             task_id="market-task-1",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
-        stored = queue.get_task(task.task_id)
+        stored = queue.get_task(task.task_id, owner=GLOBAL_ANALYSIS_OWNER)
 
         self.assertIsNotNone(stored)
         self.assertEqual(stored.trace_id, "market-task-1")

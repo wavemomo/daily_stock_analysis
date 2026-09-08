@@ -65,7 +65,7 @@ def test_docker_compose_default_memory_recommendation_is_not_512m() -> None:
     compose = yaml.safe_load(compose_text)
     resources = compose["x-common"]["deploy"]["resources"]
 
-    assert resources["limits"]["memory"] == "1G"
+    assert resources["limits"]["memory"] == "3G"
     assert resources["reservations"]["memory"] == "512M"
     assert "512M" in compose_text
     assert "MAX_WORKERS=1" in compose_text

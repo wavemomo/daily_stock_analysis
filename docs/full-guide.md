@@ -152,6 +152,19 @@ daily_stock_analysis/
 > 2) 浏览器语言检测（`navigator.languages` / `navigator.language`，`zh-*` 或 `en-*`）
 > 3) 默认回退 `zh`。
 
+#### Web/小程序功能对齐
+
+- Web 普通用户可从侧边栏进入独立的 `/feature-quotas` 页面查看自己的服务端实时功能额度；该页面只读。管理员的全局策略、套餐、用户计划、单个 override 和白名单继续集中在 Web `Access Control`/权限管理页，不复制第二套管理入口。
+- 小程序使用本地存储键 `upupup.language` 独立保存 `zh-CN`/`en-US` 页面语言；它不修改 Web 的 `dsa.uiLanguage`，也不改变报告/问股的 `REPORT_LANGUAGE`。所有 `app.json` 注册页面共享该状态，在切换时即时刷新，页面重新显示时也会按当前语言同步；小程序“我的”顶部将品牌信息、登录状态和语言切换操作分区排列，窄屏下保持语言按钮完整可见。
+- 小程序只翻译确定性的界面文案、标签和状态；服务端自由文本、Markdown 报告、Agent 回复和用户输入保持原样。界面语言切换不改写既有 `report_language: 'zh'` API 契约。
+- Web `/decision-signals` 与小程序 `pages/decision-signals/index` 共享同一决策信号 API。两端的详情“操作建议”均优先使用同源 `operation_advice`，避免 Web 与小程序分别生成不一致的 AI 建议文本。
+
+#### 小程序系统设置与 Web 管理边界
+
+小程序设置页使用严格 Bearer-only 的 `/api/v1/miniapp/system/*` 接口。调用者先通过微信小程序登录取得同一 canonical user 的 Bearer，再由服务端执行对应的 RBAC 检查；该入口仅提供掩码配置读取、schema、初始化/后端/调度状态查询、配置校验和受版本保护的非 raw 配置更新。raw `.env` 导入导出、立即调度、生成后端 smoke test、LLM/通知外部渠道测试和模型发现属于高风险 Web 管理操作，只能由微信开放平台 OAuth 建立的受保护 Web 会话访问 `/api/v1/system/*`，并受独立、明确的权限策略约束；拥有 `rbac.manage` 或 `admin` 角色本身不会自动扩大这些能力。
+
+Web 侧边栏退出使用 `POST /api/v1/web-auth/logout`：请求必须携带当前 `dsa_user_session` Cookie、会话对应的 `X-CSRF-Token` 和精确可信 `Origin`。成功后显式跳转登录页；401 代表会话已失效或已撤销，前端仍会完成本地清理并跳转；403 `csrf_failed` 则保留当前会话界面并提示刷新后重试，避免掩盖后端会话状态；其他失败同样保留当前界面并展示可重试错误，避免网络或后端撤销失败时出现“看似已退出”的状态。小程序 Bearer 的退出和撤销仅通过其 Bearer 专用端点执行，不能作为浏览器 Cookie 或跨端凭据使用。
+
 #### 其他配置
 
 | Secret 名称 | 说明 | 必填 |
@@ -484,8 +497,17 @@ daily_stock_analysis/
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `STOCK_LIST` | 自选股代码（逗号分隔） | - |
-| `ADMIN_AUTH_ENABLED` | Web 登录：设为 `true` 启用密码保护。首次 Auth Settings/初始密码设置仅接受 direct ASGI client 为 loopback 的请求，且不信任 `X-Forwarded-For` 来取得本地资格；远程部署请在服务主机本地完成、通过 SSH 隧道直连 loopback，或使用已有 `python -m src.auth reset_password` CLI。登录后可在「系统设置 > 修改密码」修改。Web 的 `.env` 备份导入导出仅在开启该开关后可用（桌面端不受此限制）。 | `false` |
-| `TRUST_X_FORWARDED_FOR` | 单层可信反向代理部署时设为 `true`，取 `X-Forwarded-For` 最右值作为真实客户端 IP（用于登录限流等）；直连公网时保持 `false` 防伪造。多级代理/CDN 场景下限流 key 可能退化为边缘代理 IP，需额外评估 | `false` |
+| `WECHAT_OPEN_WEB_APP_ID` | 微信开放平台网站应用 AppID，仅由后端用于 Web 扫码 OAuth。 | - |
+| `WECHAT_OPEN_WEB_APP_SECRET` | 微信开放平台网站应用 AppSecret；仅存于后端部署环境，不进入 Web 构建、客户端、日志或错误响应。 | - |
+| `WECHAT_OPEN_WEB_REDIRECT_URI` | 已在微信开放平台登记的公开 HTTPS callback，例如 `https://example.com/api/v1/web-auth/wechat/callback`。 | - |
+| `WECHAT_OPEN_WEB_STATE_TTL_SECONDS` | Web OAuth state/binding transaction 的有效期（秒）。 | `300` |
+| `WEB_USER_SESSION_TTL_SECONDS` | Web 微信 OAuth 建立的 HttpOnly `dsa_user_session` Cookie 有效期（秒）；不复用小程序 Bearer。 | `604800` |
+| `WECHAT_MINIAPP_APP_ID` | 小程序 AppID，由后端 `code2session` 使用。 | - |
+| `WECHAT_MINIAPP_APP_SECRET` | 小程序 AppSecret；仅存于后端部署环境。 | - |
+| `WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS` | 小程序 `code2session` 超时（秒）。 | `8` |
+| `WECHAT_MINIAPP_SESSION_TTL_HOURS` | 小程序 Bearer session 有效期（小时）。 | `720` |
+| `CORS_ORIGINS` | 允许浏览器调用 API 的明确 origin 列表；不替代 OAuth callback 配置，`*` 不是可信写操作 Origin。 | - |
+| `TRUST_X_FORWARDED_FOR` | 仅在单层且完全可信的反向代理拓扑中设为 `true`；直连公网或多级代理/CDN 未经专门评估时保持 `false`。 | `false` |
 | `MAX_WORKERS` | 并发线程数 | `3` |
 | `MARKET_REVIEW_ENABLED` | 启用大盘复盘 | `true` |
 | `DAILY_MARKET_CONTEXT_ENABLED` | 将当日大盘环境摘要注入个股分析 Prompt，并在高风险/退潮环境下软化激进买入建议；默认开启，设为 `false` 后仍可运行大盘复盘 | `true` |
@@ -498,6 +520,14 @@ daily_stock_analysis/
 | `DSA_RUNTIME_SCHEDULER_TIMEOUT_SECONDS` | Web/API runtime scheduler 单次分析硬超时（秒，最小 60 秒）；超时后终止独立分析进程，不阻塞后续任务 | `2700` |
 | `LOG_DIR` | 日志目录 | `./logs` |
 | `SAVE_CONTEXT_SNAPSHOT` | 保存分析历史 `context_snapshot`；设为 `false` 时新历史不保存 enhanced_context、market_phase_summary、AnalysisContextPack overview 或诊断快照，但不关闭当次 Prompt 低敏摘要 | `true` |
+
+### 统一 Web / 小程序身份、RBAC 与 CSRF
+
+Web 与小程序使用同一 canonical user：Web 登录由微信开放平台 OAuth 完成，浏览器从 `GET /api/v1/web-auth/wechat/start` 跳转并由 `GET /api/v1/web-auth/wechat/callback?code=&state=` 回调建立 HttpOnly `dsa_user_session`；回调固定重定向到 `/`。Web 通过 `GET /api/v1/web-auth/me` 获取当前用户和会话绑定的 `csrf_token`。如需显式绑定已有身份，仅使用 `POST /api/v1/web-auth/identity-bind/start|consume`；旧的网页登录 link、扫码批准和密码管理员登录不再存在。小程序使用 `POST /api/v1/miniapp/auth/login` 提交 `{"code":"<wx.login code>"}` 获取 Bearer，再通过 Bearer-only 的 `/api/v1/miniapp/*` 接口访问同一主体；Bearer 绝不进入浏览器 Cookie、URL、localStorage、日志或 Web 请求。
+
+受保护的通用 `/api/v1/*` 请求只能选择一种有效认证载体：有效 Web Cookie 与 Bearer 同时出现时一律返回 `400 authentication_conflict`。`/api/v1/rbac/*` 和 `/api/v1/miniapp/rbac/*` 都要求 `rbac.manage`；后者仍严格 Bearer-only，前者依照当前入口的认证载体解析主体。`admin` 只是 RBAC role，不能绕过 `owner_user_id == principal.user_id` 的资源范围；高风险系统操作还需要其独立、明确的权限策略，不能通过角色名称臆测权限码。系统不支持 service principal、API key 或 bot token 作为 DSA 认证凭据，`XAI_API_KEY` 与 LLM provider key 也不是用户凭据。
+
+浏览器所有 Cookie 认证的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）均须携带会话对应的 `X-CSRF-Token`，并且 `Origin` 必须与默认本地开发 origin 或 `CORS_ORIGINS` 条目精确匹配；`POST /api/v1/web-auth/logout` 同样遵守该规则。`*` 不是可信 Origin，部署自定义 Web 域名时必须将完整 origin 显式加入 `CORS_ORIGINS`。小程序 Bearer-only 请求不伪造或依赖 Cookie/CSRF 流程。功能额度只从 `user_override`、`whitelist_feature`、`whitelist_all`、`plan` 或 `global_policy` 推导；无限额度仅来自白名单，不因 `admin` 角色或 Cookie 类型自动获得。策略选股在后台任务 admission 前预留额度；若队列提交失败，则以原 UTC `period_start` 补偿释放，补偿失败只记录日志且不覆盖原始队列错误。
 
 ---
 
@@ -1523,9 +1553,9 @@ P3 开始，生命周期由 `DecisionSignalService` 统一补齐：显式传入�
 
 `source_report_id` 可为空且不强制校验历史记录存在；删除历史记录时只显式清理 `source_type=analysis` 且 `source_report_id` 命中实际删除 ID 的历史绑定信号，`manual/agent/alert/market_review` 等弱引用信号不会仅因 ID 碰撞被删除；列表接口支持按 `source_report_id` 和 `trace_id` 做 typed filter。`task_id`、`alert_trigger_id` 等后续关联字段先放入 `metadata`，P1 不新增独立列，也不提供 typed filter，后续联动阶段再提升为独立契约。JSON 字段、长文本字段和展示型短文本字段（`stock_name/source_agent/trigger_source/action_label`）会在写入前执行信号专用脱敏，覆盖敏感 key、Bearer、Authorization/Cookie header 或赋值、token-like 字符串、其他敏感赋值、webhook URL、URL userinfo 以及带敏感 query/fragment 参数的 URL；普通证据 URL 会保留以保证来源可追溯，且长文本不会套用诊断文本的 300 字符截断。`trace_id` 是同源去重身份字段，若包含会被脱敏的敏感 credential，API 会拒绝请求而不是保存有损 redaction 后的值。
 
-这些接口继承现有 `/api/v1/*` 管理员鉴权：`ADMIN_AUTH_ENABLED=true` 时必须携带有效管理员会话 Cookie；本功能不新增独立认证方式。
+这些接口复用统一身份与授权契约：Web 调用由受保护的微信 OAuth `dsa_user_session` 解析主体，小程序调用由 Bearer 解析同一 canonical user；管理、写入或跨用户操作必须经过显式 RBAC policy（至少包括需要时的 `rbac.manage`）和 owner scope 校验。DecisionSignal 不新增独立认证方式，也不接受管理员密码 Cookie、service principal 或 provider API key。
 
-#1390 P4 在 Web 端接入已有 `DecisionSignal` API。#1756 后侧边栏“AI 建议”入口 `/decision-signals` 仍是结构化决策信号的集中查询入口，默认展示 `status=active` 的信号，并支持按市场、股票代码、动作、市场阶段、来源、来源报告 ID 和状态筛选；时间线区域新增 profile filter，复用 list API 的 server-side `decision_profile` 查询，`unknown` 仅用于筛选和展示 legacy `NULL` 行，普通高级列表不新增 profile filter。页面还提供按股票代码查询最新 active 信号的入口。卡片、详情和时间线展示优先读取正式 `decision_profile` 字段，只有字段缺失时才 fallback legacy metadata；显式 `null`、历史缺失或非法 profile 显示为 unknown。信号详情展示动作、风格、置信度/评分、horizon、plan_quality、market_phase、价格计划、风险、观察条件、来源报告和数据质量；Web 只允许把信号标记为 `closed`、`invalidated` 或 `archived`，不提供 terminal 状态恢复为 active。
+#1390 P4 在 Web 端接入已有 `DecisionSignal` API。#1756 后侧边栏“AI 建议”入口 `/decision-signals` 仍是结构化决策信号的集中查询入口，默认展示 `status=active` 的信号，并支持按市场、股票代码、动作、市场阶段、来源、来源报告 ID 和状态筛选；时间线区域新增 profile filter，复用 list API 的 server-side `decision_profile` 查询，`unknown` 仅用于筛选和展示 legacy `NULL` 行，普通高级列表不新增 profile filter。页面还提供按股票代码查询最新 active 信号的入口。卡片、详情和时间线展示优先读取正式 `decision_profile` 字段，只有字段缺失时才 fallback legacy metadata；显式 `null`、历史缺失或非法 profile 显示为 unknown。信号详情展示动作、风格、置信度/评分、horizon、plan_quality、market_phase、价格计划、风险、观察条件、来源报告和数据质量；Web 只允许把信号标记为 `closed`、`invalidated` 或 `archived`，不提供 terminal 状态恢复为 active。小程序 `pages/decision-signals/index` 复用同一资源，并在详情中以 `operation_advice` 展示“操作建议”，保持两端 AI 建议来源一致。
 
 #1390 P5 新增信号级反馈、后验评估和统计 sidecar，不扩展 `decision_signals` 主表，也不复用绑定 `analysis_history_id` 的 `BacktestResult`。`decision_signal_feedback` 按 `signal_id` 保存最新 `useful|not_useful` 反馈、可选原因/备注和来源；`decision_signal_outcomes` 按 `(signal_id, horizon, engine_version)` 幂等保存后验结果，当前 `engine_version=decision-signal-v1`。Outcome 在评估时冻结 `action/market/market_phase/source_type/source_agent/plan_quality/data_quality_level/holding_state` 等统计维度，历史统计不依赖后续 live join 改写。删除历史报告时，会先找出 `source_type=analysis` 且绑定被删历史 ID 的信号，再清理对应 feedback/outcome 子表。
 

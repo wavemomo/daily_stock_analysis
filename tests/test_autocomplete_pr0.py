@@ -13,6 +13,7 @@ Test backend data contract extensions:
 
 from api.v1.schemas.analysis import AnalyzeRequest
 from concurrent.futures import Future
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
 from src.services.task_queue import TaskInfo, get_task_queue, DuplicateTaskError, AnalysisTaskQueue
 
 
@@ -94,6 +95,7 @@ class TestTaskInfo:
             stock_name="贵州茅台",
             original_query="茅台",
             selection_source="autocomplete",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         d = task.to_dict()
         assert "original_query" in d
@@ -101,11 +103,12 @@ class TestTaskInfo:
         assert d["original_query"] == "茅台"
         assert d["selection_source"] == "autocomplete"
 
-    def test_task_info_backward_compatible(self):
-        """Test TaskInfo backward compatibility: works fine without new fields"""
+    def test_task_info_allows_omitted_optional_autocomplete_fields(self):
+        """Test TaskInfo supports omitted autocomplete fields with an explicit owner."""
         task = TaskInfo(
             task_id="test123",
             stock_code="600519",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         d = task.to_dict()
         assert d["original_query"] is None
@@ -119,6 +122,7 @@ class TestTaskInfo:
             stock_name="贵州茅台",
             original_query="茅台",
             selection_source="autocomplete",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         copied = task.copy()
         assert copied.original_query == "茅台"
@@ -154,17 +158,19 @@ class TestTaskQueue:
             stock_name="贵州茅台",
             original_query="茅台",
             selection_source="autocomplete",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         assert len(tasks) == 1
         assert tasks[0].stock_name == "贵州茅台"
         assert tasks[0].original_query == "茅台"
         assert tasks[0].selection_source == "autocomplete"
 
-    def test_task_queue_backward_compatible(self):
-        """Test task queue backward compatibility: works fine without new fields"""
+    def test_task_queue_allows_omitted_optional_autocomplete_fields(self):
+        """Test task queue supports omitted autocomplete fields with an explicit owner."""
         queue = self._build_queue()
         tasks, _duplicates = queue.submit_tasks_batch(
             stock_codes=["600519"],
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         assert len(tasks) == 1
         assert tasks[0].original_query is None
@@ -178,6 +184,7 @@ class TestTaskQueue:
             stock_name="批量股票",
             original_query="600519,000001",
             selection_source="import",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         assert len(tasks) == 2
         for task in tasks:
@@ -196,6 +203,7 @@ class TestTaskQueue:
             stock_name="贵州茅台",
             original_query="茅台",
             selection_source="autocomplete",
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         assert len(tasks1) == 1
         assert len(dups1) == 0
@@ -206,6 +214,7 @@ class TestTaskQueue:
             stock_name="贵州茅台",
             original_query="茅台",
             selection_source="manual",  # Rejection still applies even if selection_source differs
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         assert len(tasks2) == 0
         assert len(dups2) == 1
@@ -220,6 +229,7 @@ class TestTaskQueue:
         queue = self._build_queue()
         accepted, duplicates = queue.submit_tasks_batch(
             stock_codes=["csi930955", "930955.CSI"],
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
         assert len(accepted) == 1
         assert accepted[0].stock_code == "csi930955"
@@ -264,6 +274,7 @@ class TestIntegration:
             original_query=request.original_query,
             selection_source=request.selection_source,
             report_type=request.report_type,
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
 
         assert len(tasks) == 1
@@ -290,6 +301,7 @@ class TestIntegration:
             stock_codes=[request.stock_code],
             selection_source=request.selection_source,
             report_type=request.report_type,
+            owner=GLOBAL_ANALYSIS_OWNER,
         )
 
         assert len(tasks) == 1

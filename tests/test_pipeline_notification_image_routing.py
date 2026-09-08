@@ -16,7 +16,9 @@ from tests.litellm_stub import ensure_litellm_stub
 
 ensure_litellm_stub()
 
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
 from src.core.pipeline import StockAnalysisPipeline, NotificationChannel
+from src.repositories.analysis_repo import AnalysisRepository
 from src.services.run_diagnostics import (
     activate_run_diagnostic_context,
     build_run_diagnostic_summary,
@@ -129,6 +131,8 @@ class TestPipelineEmailGroupImageRouting(unittest.TestCase):
         pipeline = self._build_pipeline()
         pipeline.save_context_snapshot = True
         pipeline.db = MagicMock()
+        pipeline.owner = GLOBAL_ANALYSIS_OWNER
+        pipeline.repo = AnalysisRepository(pipeline.db, owner=GLOBAL_ANALYSIS_OWNER)
         pipeline.notifier.send_to_email.side_effect = [RuntimeError("group failed"), True]
         results = self._make_results()
         results[0].query_id = "query-group"
@@ -424,6 +428,8 @@ class TestPipelineReportRouteFiltering(unittest.TestCase):
             pipeline.config = SimpleNamespace(stock_email_groups=[])
             pipeline.save_context_snapshot = True
             pipeline.db = MagicMock()
+            pipeline.owner = GLOBAL_ANALYSIS_OWNER
+            pipeline.repo = AnalysisRepository(pipeline.db, owner=GLOBAL_ANALYSIS_OWNER)
             results = [SimpleNamespace(code="000001", query_id="query-context")]
 
             with patch("src.core.pipeline.logger.info") as mock_info:

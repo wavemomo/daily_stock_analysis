@@ -186,18 +186,15 @@
       </section>
 
       <section id="bootstrap">
-        <h2>添加第一位管理员：Bootstrap OpenID 引导</h2>
-        <p class="lead">Bootstrap 只用于尚没有管理员或紧急恢复的首次引导。首位管理员可用后，日常授权请使用“我的 → 权限管理”页面；系统会在认证时，为配置中匹配的 OpenID 幂等授予 <code>admin</code>。</p>
+        <h2>添加第一位管理员：受控角色授予</h2>
+        <p class="lead">目标用户必须先完成一次微信登录，由受控运维流程向现有用户授予 <code>admin</code> 或包含 <code>rbac.manage</code> 的角色并记录审计事件。首位管理员可用后，日常授权统一在“我的 → 权限管理”完成。</p>
         <ol class="steps">
-          <li><strong>完成微信后端配置。</strong>在服务器本地 <code>.env</code> 配置 <code>WECHAT_MINIAPP_APP_ID</code> 与 <code>WECHAT_MINIAPP_APP_SECRET</code>；密钥只能存在后端，绝不能写入小程序代码。</li>
-          <li><strong>让目标管理员先登录一次小程序。</strong>这样后端会在 <code>miniapp_users</code> 中创建该用户与默认 <code>member</code> 角色。</li>
-          <li><strong>通过受控运维渠道获取该用户 OpenID。</strong>当前 <code>/miniapp/auth/me</code> 不会返回 OpenID；请仅在服务端受保护的数据库或内部运维工具中读取 <code>miniapp_users.openid</code>，不要在前端、日志、群聊或工单中传播。</li>
-          <li><strong>在后端 .env 设置管理员白名单。</strong>多个 OpenID 用英文逗号分隔，然后按你的部署方式重启后端服务。</li>
-          <li><strong>让该用户重新进入小程序或重新登录。</strong>认证时系统会授予 <code>admin</code>；确认“我的”出现“权限管理”，或调用 <code>GET /api/v1/miniapp/auth/me</code> 检查 <code>roles</code>。</li>
+          <li><strong>完成微信后端配置。</strong>在服务器部署环境配置 <code>WECHAT_MINIAPP_APP_ID</code> 与 <code>WECHAT_MINIAPP_APP_SECRET</code>；密钥只能存在后端，绝不能写入小程序代码。</li>
+          <li><strong>让目标管理员先登录一次小程序。</strong>后端会创建用户及默认 <code>member</code> 角色。</li>
+          <li><strong>通过受控运维流程确认目标用户。</strong>使用内部受保护的用户管理边界，避免在前端、日志、群聊或工单传播 OpenID、UnionID、Bearer token 或会话信息。</li>
+          <li><strong>执行一次性角色授予并保存审计记录。</strong>验证该用户重新登录后，<code>GET /api/v1/miniapp/auth/me</code> 返回预期的 <code>roles</code> 与 <code>permissions</code>。</li>
         </ol>
-        <pre><code># 后端 .env：仅在服务器保存；不要写入小程序或 Git
-RBAC_BOOTSTRAP_ADMIN_OPENIDS=openid-of-first-admin,openid-of-break-glass-admin</code></pre>
-        <div class="callout warning"><strong>自动回授风险：</strong>在数据库中移除 <code>admin</code> 后，只要该 OpenID 仍在 <code>RBAC_BOOTSTRAP_ADMIN_OPENIDS</code> 中，用户下次认证时仍会自动重新获得管理员角色，并留下不含 OpenID 的自动授予审计记录。先从环境变量移除该 OpenID 并重启服务，再在管理页面回收角色；环境变量移除本身不会回收数据库中既有角色。</div>
+        <div class="callout warning"><strong>不要配置自动回授白名单：</strong>管理员资格必须是可审计的显式角色关系。回收角色后，应通过权限管理页或受控运维流程完成，并验证至少另一位拥有 <code>rbac.manage</code> 的活跃用户可用。</div>
       </section>
 
       <section id="api">
@@ -276,8 +273,8 @@ RBAC_BOOTSTRAP_ADMIN_OPENIDS=openid-of-first-admin,openid-of-break-glass-admin</
         <dl class="faq">
           <dt>为什么登录后仍看不到某个页面？</dt>
           <dd>先检查 <code>GET /api/v1/miniapp/auth/me</code> 返回的 <code>roles</code> 与 <code>permissions</code>，再确认该页面的最低权限要求。隐藏入口不代表后端会放行；缺权限请求会返回 403。</dd>
-          <dt>为什么设置了 Bootstrap OpenID 仍不是管理员？</dt>
-          <dd>确认 OpenID 属于已完成登录的目标用户、后端确实加载了更新后的 .env，并让用户重新认证或重新进入小程序触发会话验证。不要把 AppID、昵称、用户 ID 或 UnionID 误填为 OpenID。</dd>
+          <dt>为什么首次管理员没有自动出现？</dt>
+          <dd>管理员资格不再由 OpenID 配置自动授予。先确认目标用户已完成微信登录，再由受控运维流程对该用户执行一次性角色授予并写入审计；随后通过 <code>GET /api/v1/miniapp/auth/me</code> 核对 <code>roles</code> 与 <code>permissions</code>。</dd>
           <dt>可以直接把 AppSecret 放进小程序配置吗？</dt>
           <dd>不可以。AppSecret 必须只保存在后端环境变量；小程序只获取临时 code，并把 code 交给业务后端。</dd>
           <dt>移除一个管理员为什么被拒绝？</dt>

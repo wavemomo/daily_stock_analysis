@@ -29,7 +29,6 @@ from api.v1.schemas.system_config import (
     TestNotificationChannelRequest,
     UpdateSystemConfigRequest,
 )
-import src.auth as auth
 from src.config import Config
 from src.core.config_manager import ConfigManager
 from src.services.system_config_service import SystemConfigService
@@ -39,12 +38,6 @@ class SystemConfigApiTestCase(unittest.TestCase):
     """System config API tests in isolation without loading the full app."""
 
     def setUp(self) -> None:
-        auth._auth_enabled = None
-        auth._session_secret = None
-        auth._password_hash_salt = None
-        auth._password_hash_stored = None
-        auth._rate_limit = {}
-
         self.temp_dir = tempfile.TemporaryDirectory()
         self.env_path = Path(self.temp_dir.name) / ".env"
         self.env_path.write_text(
@@ -68,12 +61,9 @@ class SystemConfigApiTestCase(unittest.TestCase):
 
         self.manager = ConfigManager(env_path=self.env_path)
         self.service = SystemConfigService(manager=self.manager)
-        self._verify_session_patch = patch.object(system_config, "verify_session", return_value=True)
-        self._verify_session_patch.start()
 
     def tearDown(self) -> None:
         Config.reset_instance()
-        self._verify_session_patch.stop()
         os.environ.pop("ENV_FILE", None)
         if self._orig_dsa_desktop_mode is None:
             os.environ.pop("DSA_DESKTOP_MODE", None)
@@ -86,9 +76,21 @@ class SystemConfigApiTestCase(unittest.TestCase):
         self.temp_dir.cleanup()
 
     @staticmethod
-    def _build_request(cookies: dict[str, str] | None = None) -> SimpleNamespace:
+    def _principal(*permissions: str) -> SimpleNamespace:
         return SimpleNamespace(
-            cookies=cookies if cookies is not None else {system_config.COOKIE_NAME: "valid-session-token"}
+            user=SimpleNamespace(id=101),
+            roles=("member",),
+            permissions=permissions,
+        )
+
+    @classmethod
+    def _build_request(cls, *permissions: str) -> SimpleNamespace:
+        principal = cls._principal(*(permissions or ("system.read", "system.manage")))
+        return SimpleNamespace(
+            state=SimpleNamespace(
+                auth_kind="miniapp",
+                miniapp_principal=principal,
+            )
         )
 
     def _rewrite_env(self, *lines: str) -> None:
@@ -216,8 +218,12 @@ class SystemConfigApiTestCase(unittest.TestCase):
     def test_get_generation_backend_status_uses_saved_config_only(self) -> None:
         self._rewrite_env(
             "GENERATION_BACKEND=litellm",
-            "LITELLM_MODEL=gemini/gemini-3-flash-preview",
-            "GEMINI_API_KEY=secret-key-value",
+            "LLM_CHANNELS=deepseek",
+            "LLM_DEEPSEEK_PROTOCOL=deepseek",
+            "LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com",
+            "LLM_DEEPSEEK_API_KEY=sk-test-value",
+            "LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro",
+            "LITELLM_MODEL=deepseek/deepseek-v4-flash",
         )
 
         payload = system_config.get_generation_backend_status(service=self.service).model_dump()
@@ -229,8 +235,12 @@ class SystemConfigApiTestCase(unittest.TestCase):
     def test_preview_generation_backend_status_uses_draft_items(self) -> None:
         self._rewrite_env(
             "GENERATION_BACKEND=litellm",
-            "LITELLM_MODEL=gemini/gemini-3-flash-preview",
-            "GEMINI_API_KEY=secret-key-value",
+            "LLM_CHANNELS=deepseek",
+            "LLM_DEEPSEEK_PROTOCOL=deepseek",
+            "LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com",
+            "LLM_DEEPSEEK_API_KEY=sk-test-value",
+            "LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro",
+            "LITELLM_MODEL=deepseek/deepseek-v4-flash",
         )
 
         with patch("src.llm.local_cli_backend.shutil.which", return_value=None):
@@ -251,6 +261,66 @@ class SystemConfigApiTestCase(unittest.TestCase):
 
         saved_payload = system_config.get_generation_backend_status(service=self.service).model_dump()
         self.assertEqual(saved_payload["primary_backend_id"], "litellm")
+
+    def test_preview_generation_backend_status_scopes_inactive_litellm_validation_to_draft(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=litellm",
+            "LLM_CHANNELS=primary",
+            "LLM_PRIMARY_PROTOCOL=openai",
+            "LLM_PRIMARY_MODELS=gpt-4o-mini",
+            "LLM_PRIMARY_API_KEY=",
+            "LITELLM_MODEL=gemini/gemini-3-flash-preview",
+        )
+
+        with (
+            patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True),
+            patch("src.llm.local_cli_backend.shutil.which", return_value=None),
+        ):
+            payload = system_config.preview_generation_backend_status(
+                request=GenerationBackendStatusPreviewRequest(
+                    items=[
+                        {"key": "GENERATION_BACKEND", "value": "codex_cli"},
+                        {"key": "GENERATION_FALLBACK_BACKEND", "value": ""},
+                    ],
+                    mask_token="******",
+                ),
+                service=self.service,
+            ).model_dump()
+
+        self.assertEqual(payload["primary_backend_id"], "codex_cli")
+        self.assertEqual(payload["primary"]["last_error_code"], "command_not_found")
+
+    def test_preview_generation_backend_status_keeps_active_litellm_validation(self) -> None:
+        self._rewrite_env(
+            "GENERATION_BACKEND=litellm",
+            "LLM_CHANNELS=primary",
+            "LLM_PRIMARY_PROTOCOL=openai",
+            "LLM_PRIMARY_MODELS=gpt-4o-mini",
+            "LLM_PRIMARY_API_KEY=",
+        )
+
+        with patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True):
+            with self.assertRaises(HTTPException) as ctx:
+                system_config.preview_generation_backend_status(
+                    request=GenerationBackendStatusPreviewRequest(
+                        items=[
+                            {"key": "GENERATION_BACKEND", "value": "codex_cli"},
+                            {"key": "GENERATION_FALLBACK_BACKEND", "value": "litellm"},
+                        ],
+                        mask_token="******",
+                    ),
+                    service=self.service,
+                )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail["error"], "validation_failed")
+        self.assertTrue(
+            any(
+                issue["key"] == "LLM_PRIMARY_API_KEY"
+                and issue["code"] == "missing_api_key"
+                for issue in ctx.exception.detail["issues"]
+            )
+        )
 
     def test_generation_backend_smoke_test_returns_structured_failure(self) -> None:
         self._rewrite_env(
@@ -657,77 +727,52 @@ class SystemConfigApiTestCase(unittest.TestCase):
             self.assertTrue(import_payload["success"])
             self.assertEqual(self.manager.read_config_map()["STOCK_LIST"], "300750")
 
-    def test_config_env_endpoints_reject_without_backup_access(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"DSA_DESKTOP_MODE": "false"},
-            clear=False,
-        ):
-            self.env_path.write_text(
-                "\n".join(
-                    [
-                        "STOCK_LIST=600519,000001",
-                        "GEMINI_API_KEY=secret-key-value",
-                        "SCHEDULE_TIME=18:00",
-                        "LOG_LEVEL=INFO",
-                        "ADMIN_AUTH_ENABLED=false",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            self.manager = ConfigManager(env_path=self.env_path)
-            self.service = SystemConfigService(manager=self.manager)
-            Config.reset_instance()
-
+    def test_config_env_endpoints_require_miniapp_principal_and_manage_permission(self) -> None:
+        with patch.dict(os.environ, {"DSA_DESKTOP_MODE": "false"}, clear=False):
             current = system_config.get_system_config(include_schema=False, service=self.service).model_dump()
+            anonymous_request = SimpleNamespace(state=SimpleNamespace())
 
-            with self.assertRaises(HTTPException) as export_ctx:
-                system_config.export_system_config(
-                    request=self._build_request(),
+            for operation in (
+                lambda: system_config.export_system_config(
+                    request=anonymous_request,
                     service=self.service,
-                )
-            self.assertEqual(export_ctx.exception.status_code, 403)
-            self.assertEqual(export_ctx.exception.detail["error"], "env_backup_access_denied")
-
-            with self.assertRaises(HTTPException) as import_ctx:
-                system_config.import_system_config(
-                    request_obj=self._build_request(),
+                ),
+                lambda: system_config.import_system_config(
+                    request_obj=anonymous_request,
                     request=ImportSystemConfigRequest(
                         config_version=current["config_version"],
                         content="STOCK_LIST=300750\n",
                         reload_now=False,
                     ),
                     service=self.service,
-                )
-            self.assertEqual(import_ctx.exception.status_code, 403)
-            self.assertEqual(import_ctx.exception.detail["error"], "env_backup_access_denied")
+                ),
+            ):
+                with self.assertRaises(HTTPException) as context:
+                    operation()
+                self.assertEqual(context.exception.status_code, 401)
+                self.assertEqual(context.exception.detail["error"], "env_backup_access_denied")
 
-    def test_config_env_endpoints_require_valid_admin_session(self) -> None:
-        with (
-            patch.dict(os.environ, {"DSA_DESKTOP_MODE": "false"}, clear=False),
-            patch.object(system_config, "verify_session", return_value=False),
-        ):
-            current = system_config.get_system_config(include_schema=False, service=self.service).model_dump()
-            invalid_request = self._build_request({system_config.COOKIE_NAME: "invalid-session"})
-
-            with self.assertRaises(HTTPException) as export_ctx:
-                system_config.export_system_config(request=invalid_request, service=self.service)
-            self.assertEqual(export_ctx.exception.status_code, 401)
-            self.assertEqual(export_ctx.exception.detail["error"], "env_backup_access_denied")
-
-            with self.assertRaises(HTTPException) as import_ctx:
-                system_config.import_system_config(
-                    request_obj=invalid_request,
+            read_only_request = self._build_request("system.read")
+            for operation in (
+                lambda: system_config.export_system_config(
+                    request=read_only_request,
+                    service=self.service,
+                ),
+                lambda: system_config.import_system_config(
+                    request_obj=read_only_request,
                     request=ImportSystemConfigRequest(
                         config_version=current["config_version"],
                         content="STOCK_LIST=300750\n",
                         reload_now=False,
                     ),
                     service=self.service,
-                )
-            self.assertEqual(import_ctx.exception.status_code, 401)
-            self.assertEqual(import_ctx.exception.detail["error"], "env_backup_access_denied")
+                ),
+            ):
+                with self.assertRaises(HTTPException) as context:
+                    operation()
+                self.assertEqual(context.exception.status_code, 403)
+                self.assertEqual(context.exception.detail["error"], "env_backup_access_denied")
+                self.assertIn("system.manage", context.exception.detail["message"])
 
     def test_config_env_endpoints_require_explicit_true_for_desktop_bypass(self) -> None:
         with patch.dict(
@@ -752,13 +797,13 @@ class SystemConfigApiTestCase(unittest.TestCase):
             self.service = SystemConfigService(manager=self.manager)
             Config.reset_instance()
 
+            anonymous_request = SimpleNamespace(state=SimpleNamespace())
             with self.assertRaises(HTTPException) as export_ctx:
                 system_config.export_system_config(
-                    request=self._build_request(),
+                    request=anonymous_request,
                     service=self.service,
                 )
-
-            self.assertEqual(export_ctx.exception.status_code, 403)
+            self.assertEqual(export_ctx.exception.status_code, 401)
             self.assertEqual(export_ctx.exception.detail["error"], "env_backup_access_denied")
 
     def test_config_env_endpoints_return_server_error_for_storage_permission_error(self) -> None:
@@ -789,39 +834,7 @@ class SystemConfigApiTestCase(unittest.TestCase):
         self.assertEqual(import_ctx.exception.status_code, 500)
         self.assertEqual(import_ctx.exception.detail["error"], "internal_error")
 
-    def test_config_env_endpoints_reject_without_session_after_auth_toggle(self) -> None:
-        self.env_path.write_text(
-            "\n".join(
-                [
-                    "STOCK_LIST=600519,000001",
-                    "GEMINI_API_KEY=secret-key-value",
-                    "SCHEDULE_TIME=18:00",
-                    "LOG_LEVEL=INFO",
-                    "ADMIN_AUTH_ENABLED=false",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        self.manager = ConfigManager(env_path=self.env_path)
-        self.service = SystemConfigService(manager=self.manager)
-        Config.reset_instance()
-
-        self.env_path.write_text(
-            "\n".join(
-                [
-                    "STOCK_LIST=600519,000001",
-                    "GEMINI_API_KEY=secret-key-value",
-                    "SCHEDULE_TIME=18:00",
-                    "LOG_LEVEL=INFO",
-                    "ADMIN_AUTH_ENABLED=true",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        auth._auth_enabled = False
-
+    def test_config_env_export_requires_bearer_authentication(self) -> None:
         async def request_export() -> httpx.Response:
             transport = httpx.ASGITransport(app=self._build_client_app())
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -829,7 +842,7 @@ class SystemConfigApiTestCase(unittest.TestCase):
 
         response = asyncio.run(request_export())
         self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["error"], "env_backup_access_denied")
+        self.assertEqual(response.json(), {"error": "unauthorized", "message": "Login required"})
 
     def test_test_llm_channel_endpoint_returns_service_payload(self) -> None:
         with patch.object(

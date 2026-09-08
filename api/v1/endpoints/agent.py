@@ -13,9 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from src.services.feature_quota_service import FeatureQuotaService
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from api.deps import get_agent_chat_session_service, get_request_resource_owner
+from api.deps import get_agent_chat_session_service, get_request_portfolio_scope, get_request_resource_owner
 from api.v1.schemas.system_config import AgentBackendStatusResponse
 from src.config import get_config
 from src.services.agent_chat_session_service import AgentChatSessionService
@@ -136,6 +137,7 @@ def _build_agent_chat_context(request: ChatRequest, config, skills: Optional[Lis
     context = dict(request.context or {})
     context.pop("skills", None)
     context.pop("strategies", None)
+    context.pop("resource_owner_id", None)
     if skills is not None:
         context["skills"] = skills
     report_language = context.get("report_language")
@@ -284,6 +286,7 @@ async def agent_chat(
             },
         )
     owner_id = get_request_resource_owner(http_request)
+    portfolio_scope = get_request_portfolio_scope(http_request)
     session_id = _resolve_session_id(
         requested_session_id=request.session_id,
         owner_id=owner_id,
@@ -300,13 +303,16 @@ async def agent_chat(
         executor = _build_executor(config, skills or None)
 
         ctx = _build_agent_chat_context(request, config, skills)
+        FeatureQuotaService().reserve_for_request(http_request, 'agent_chat')
 
         # Offload the blocking call to a thread to avoid blocking the event loop.
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: executor.chat(message=request.message, session_id=session_id,
-                                  context=ctx, selected_skill_ids=selected_skill_ids),
+                                  context=ctx, selected_skill_ids=selected_skill_ids,
+                                  resource_owner_id=owner_id,
+                                  portfolio_scope=portfolio_scope),
         )
 
         return ChatResponse(
@@ -316,6 +322,8 @@ async def agent_chat(
             error=result.error,
         )
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Agent chat API failed: {e}")
         logger.exception("Agent chat error details:")
@@ -482,7 +490,10 @@ class ResearchResponse(BaseModel):
 
 
 @router.post("/research", response_model=ResearchResponse)
-async def agent_research(request: ResearchRequest):
+async def agent_research(
+    request: ResearchRequest,
+    http_request: Request = None,
+):
     """Run a deep-research query via the ResearchAgent.
 
     Similar to the ``/research`` bot command but exposed as a REST endpoint.
@@ -513,6 +524,7 @@ async def agent_research(request: ResearchRequest):
         )
 
         research_timeout = getattr(config, "agent_deep_research_timeout", 180)
+        FeatureQuotaService().reserve_for_request(http_request, 'agent_research')
 
         result = await _run_research_in_background(
             agent,
@@ -537,6 +549,8 @@ async def agent_research(request: ResearchRequest):
             token_usage=result.total_tokens,
             error=result.error if not result.success else None,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Agent research API failed: %s", e)
         logger.exception("Agent research error details:")
@@ -568,6 +582,7 @@ async def agent_chat_stream(
     backend_id = _select_agent_chat_backend(config)
 
     owner_id = get_request_resource_owner(http_request)
+    portfolio_scope = get_request_portfolio_scope(http_request)
     session_id = _resolve_session_id(
         requested_session_id=request.session_id,
         owner_id=owner_id,
@@ -657,6 +672,8 @@ async def agent_chat_stream(
                     session_id=session_id,
                     context=stream_ctx,
                     selected_skill_ids=selected_skill_ids,
+                    resource_owner_id=owner_id,
+                    portfolio_scope=portfolio_scope,
                 )
             except asyncio.CancelledError:
                 raise
@@ -666,6 +683,22 @@ async def agent_chat_stream(
                     "type": "error",
                     "message": "Agent request was not accepted",
                     "error_code": "request_not_accepted",
+                    "backend": backend_id,
+                    "request_id": request_id,
+                }
+                yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+                return
+
+            try:
+                FeatureQuotaService().reserve_for_request(http_request, 'agent_chat')
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                event = {
+                    "type": "error",
+                    "message": detail.get("message") or "Agent request quota is unavailable",
+                    "error_code": detail.get("error") or "feature_quota_unavailable",
+                    "reason": detail.get("reason"),
+                    "status_code": exc.status_code,
                     "backend": backend_id,
                     "request_id": request_id,
                 }
@@ -740,7 +773,10 @@ async def agent_chat_stream(
 
 
 @router.post("/chat/stream/{request_id}/cancel")
-async def cancel_agent_chat_stream(request_id: str, http_request: Request):
+async def cancel_agent_chat_stream(
+    request_id: str,
+    http_request: Request,
+):
     """Cancel one owned Codex stream without exposing foreign request ids."""
     owner_id = get_request_resource_owner(http_request)
     _cancel_owned_active_stream(

@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from api.deps import get_request_resource_owner
+from api.deps import get_request_analysis_owner_context, get_request_portfolio_scope
 
 from api.v1.errors import api_error
 from api.v1.schemas.analysis import DuplicateTaskErrorResponse, TaskAccepted
@@ -37,6 +37,8 @@ from api.v1.schemas.portfolio import (
     PortfolioTradeListResponse,
     PortfolioTradeCreateRequest,
 )
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
+from src.services.feature_quota_service import FeatureQuotaService
 from src.services.task_queue import get_task_queue
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_risk_service import PortfolioRiskService
@@ -97,7 +99,7 @@ def create_account(
             broker=payload.broker,
             market=payload.market,
             base_currency=payload.base_currency,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioAccountItem(**row)
     except ValueError as exc:
@@ -120,7 +122,7 @@ def list_accounts(
     try:
         rows = service.list_accounts(
             include_inactive=include_inactive,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioAccountListResponse(accounts=[PortfolioAccountItem(**item) for item in rows])
     except Exception as exc:
@@ -147,7 +149,7 @@ def update_account(
             market=payload.market,
             base_currency=payload.base_currency,
             is_active=payload.is_active,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         if updated is None:
             raise api_error(404, "not_found", f"Account not found: {account_id}")
@@ -170,7 +172,7 @@ def delete_account(request: Request, account_id: int):
     try:
         ok = service.deactivate_account(
             account_id,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         if not ok:
             raise api_error(404, "not_found", f"Account not found: {account_id}")
@@ -206,7 +208,7 @@ def create_trade(
             currency=payload.currency,
             trade_uid=payload.trade_uid,
             note=payload.note,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioEventCreatedResponse(**data)
     except PortfolioNotFoundError:
@@ -249,7 +251,7 @@ def list_trades(
             side=side,
             page=page,
             page_size=page_size,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioTradeListResponse(**data)
     except PortfolioNotFoundError:
@@ -271,7 +273,7 @@ def delete_trade(request: Request, trade_id: int) -> PortfolioDeleteResponse:
     try:
         ok = service.delete_trade_event(
             trade_id,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         if not ok:
             raise api_error(404, "not_found", f"Trade not found: {trade_id}")
@@ -303,7 +305,7 @@ def create_cash_ledger(
             amount=payload.amount,
             currency=payload.currency,
             note=payload.note,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioEventCreatedResponse(**data)
     except PortfolioNotFoundError:
@@ -340,7 +342,7 @@ def list_cash_ledger(
             direction=direction,
             page=page,
             page_size=page_size,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioCashLedgerListResponse(**data)
     except PortfolioNotFoundError:
@@ -362,7 +364,7 @@ def delete_cash_ledger(request: Request, entry_id: int) -> PortfolioDeleteRespon
     try:
         ok = service.delete_cash_ledger_event(
             entry_id,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         if not ok:
             raise api_error(404, "not_found", f"Cash ledger entry not found: {entry_id}")
@@ -397,7 +399,7 @@ def create_corporate_action(
             cash_dividend_per_share=payload.cash_dividend_per_share,
             split_ratio=payload.split_ratio,
             note=payload.note,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioEventCreatedResponse(**data)
     except PortfolioNotFoundError:
@@ -436,7 +438,7 @@ def list_corporate_actions(
             action_type=action_type,
             page=page,
             page_size=page_size,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioCorporateActionListResponse(**data)
     except PortfolioNotFoundError:
@@ -458,7 +460,7 @@ def delete_corporate_action(request: Request, action_id: int) -> PortfolioDelete
     try:
         ok = service.delete_corporate_action_event(
             action_id,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         if not ok:
             raise api_error(404, "not_found", f"Corporate action not found: {action_id}")
@@ -494,7 +496,7 @@ def get_snapshot(
             as_of=as_of,
             cost_method=cost_method,
             include_realtime=include_realtime,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioSnapshotResponse(**data)
     except PortfolioNotFoundError:
@@ -523,7 +525,7 @@ def analyze_position(
             service,
             symbol=symbol,
             account_id=payload.account_id,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
     except HTTPException:
         raise
@@ -535,6 +537,29 @@ def analyze_position(
         raise _internal_error("Resolve portfolio position failed", exc)
 
     queue = get_task_queue()
+    quota_service = FeatureQuotaService()
+    reservation_period_start = None
+
+    def reserve_accepted_codes(accepted_codes):
+        nonlocal reservation_period_start
+        reservation_period_start = quota_service.current_period_start()
+        return quota_service.reserve_many_for_request(
+            request,
+            'stock_analysis',
+            amount=len(accepted_codes),
+            period_start=reservation_period_start,
+        )
+
+    def release_unsubmitted_codes(unsubmitted_codes):
+        if reservation_period_start is None:
+            raise RuntimeError("持仓分析配额补偿缺少预留账期")
+        return quota_service.release_many_for_request(
+            request,
+            'stock_analysis',
+            amount=len(unsubmitted_codes),
+            period_start=reservation_period_start,
+        )
+
     accepted, duplicates = queue.submit_tasks_batch(
         [context["symbol"]],
         stock_name=None,
@@ -546,6 +571,9 @@ def analyze_position(
         analysis_phase=payload.analysis_phase,
         force_refresh=bool(payload.force),
         notify=True,
+        owner=get_request_analysis_owner_context(request),
+        before_submit=reserve_accepted_codes,
+        on_submit_failure=release_unsubmitted_codes,
     )
     if duplicates:
         dup = duplicates[0]
@@ -572,7 +600,7 @@ def _resolve_position_analysis_context(
     *,
     symbol: str,
     account_id: Optional[int],
-    owner_id: Optional[str] = None,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
 ) -> dict:
     target = service._normalize_symbol_for_position(symbol)
     if not target:
@@ -581,7 +609,8 @@ def _resolve_position_analysis_context(
     snapshot = service.get_portfolio_snapshot(
         account_id=account_id,
         cost_method="fifo",
-        owner_id=owner_id,
+        include_realtime=False,
+        portfolio_scope=portfolio_scope,
     )
     matches = []
     for account in snapshot.get("accounts") or []:
@@ -699,7 +728,7 @@ def commit_csv_import(
             broker=parsed["broker"],
             records=list(parsed.get("records", [])),
             dry_run=dry_run,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioImportCommitResponse(**result)
     except PortfolioNotFoundError:
@@ -726,7 +755,7 @@ def refresh_fx_rates(
         data = service.refresh_fx_rates(
             account_id=account_id,
             as_of=as_of,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioFxRefreshResponse(**data)
     except PortfolioNotFoundError:
@@ -760,7 +789,7 @@ def get_risk_report(
             as_of=as_of,
             cost_method=cost_method,
             include_realtime=include_realtime,
-            owner_id=get_request_resource_owner(request),
+            portfolio_scope=get_request_portfolio_scope(request),
         )
         return PortfolioRiskResponse(**data)
     except PortfolioNotFoundError:

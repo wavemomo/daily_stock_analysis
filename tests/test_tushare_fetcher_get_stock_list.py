@@ -45,7 +45,10 @@ from data_provider.tushare_fetcher import TushareFetcher
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+    # Respect ENV_FILE (tests point it at an empty file via conftest) so importing
+    # this module during collection never leaks the real repository .env into the
+    # process environment; live runs with ENV_FILE unset still load the repo .env.
+    load_dotenv(os.environ.get("ENV_FILE") or os.path.join(_PROJECT_ROOT, ".env"))
 except ImportError:
     pass
 

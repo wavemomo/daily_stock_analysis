@@ -38,6 +38,10 @@ from src.agent.tools.registry import (
 )
 from src.agent.runner import _execute_tools, _resolve_per_tool_timeout
 from src.agent.tools.execution import _build_tool_cache_key
+from src.portfolio_ownership import PortfolioScope
+
+
+_TIMEOUT_TEST_PORTFOLIO_SCOPE = PortfolioScope.user("agent-tool-timeout")
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +137,7 @@ class TestExecuteToolsTimeout:
             [_make_tool_call("slow")], reg, step=1,
             progress_callback=None, tool_calls_log=log,
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         assert len(results) == 1
         parsed = json.loads(results[0]["result_str"])
@@ -151,6 +156,7 @@ class TestExecuteToolsTimeout:
             [_make_tool_call("fast")], reg, step=1,
             progress_callback=None, tool_calls_log=log,
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         assert json.loads(results[0]["result_str"]).get("ok") is True
         assert not any(e.get("timeout") for e in log)
@@ -169,6 +175,7 @@ class TestExecuteToolsTimeout:
             [_make_tool_call("plain")], reg, step=1,
             progress_callback=None, tool_calls_log=log,
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         assert json.loads(results[0]["result_str"]).get("ok") is True
 
@@ -190,6 +197,7 @@ class TestExecuteToolsTimeout:
             [_make_tool_call("slowA", tc_id="c1"), _make_tool_call("slowB", tc_id="c2")],
             reg, step=1, progress_callback=None, tool_calls_log=log,
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         assert len(results) == 2
         assert all(json.loads(r["result_str"]).get("timeout") is True for r in results)
@@ -218,6 +226,7 @@ class TestExecuteToolsTimeout:
             [_make_tool_call("fast", tc_id="c1"), _make_tool_call("slow", tc_id="c2")],
             reg, step=1, progress_callback=None, tool_calls_log=log,
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         elapsed = time.time() - start
 
@@ -256,6 +265,7 @@ class TestExecuteToolsTimeout:
         results = _execute_tools(
             tool_calls, reg, step=1, progress_callback=None, tool_calls_log=[],
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         fast_res = next(r for r in results if r["tc"].name == "fast")
         # The queued fast tool must run and succeed — never a false timeout that
@@ -715,6 +725,7 @@ class TestFirstWinsTimeoutPrecedence:
             progress_callback=None, tool_calls_log=[],
             tool_call_timeout_seconds=0.6,   # explicit override > per-tool 0.1s
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         parsed = json.loads(results[0]["result_str"])
         assert parsed.get("timeout") is True
@@ -770,6 +781,7 @@ class TestTimeoutResultNonRetriable:
             [_make_tool_call("slow")], reg, step=1,
             progress_callback=None, tool_calls_log=[],
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         parsed = json.loads(results[0]["result_str"])
         assert parsed.get("timeout") is True
@@ -792,6 +804,7 @@ class TestTimeoutResultNonRetriable:
             [_make_tool_call("slow", tc_id="c1")], reg, step=1,
             progress_callback=None, tool_calls_log=[],
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
             non_retriable_tool_results=shared_non_retriable,
         )
         assert json.loads(res1[0]["result_str"]).get("timeout") is True
@@ -803,6 +816,7 @@ class TestTimeoutResultNonRetriable:
             [_make_tool_call("slow", tc_id="c1")], reg, step=2,
             progress_callback=None, tool_calls_log=[],
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
             non_retriable_tool_results=shared_non_retriable,
         )
         assert json.loads(res2[0]["result_str"]).get("timeout") is True
@@ -825,6 +839,7 @@ class TestTimeoutResultNonRetriable:
             [_make_tool_call("slow", args=None)], reg, step=1,
             progress_callback=None, tool_calls_log=[],
             tool_wait_timeout_seconds=None,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
             non_retriable_tool_results=shared_non_retriable,
         )
         assert json.loads(results[0]["result_str"]).get("timeout") is True
@@ -1005,6 +1020,7 @@ class TestTimeoutCooperativeCancel:
             tool_calls, reg, 1, None, [],
             non_retriable_tool_results={},
             tool_wait_timeout_seconds=0.1,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         # Give the still-running background handler time to observe the armed signal.
         _time.sleep(0.8)
@@ -1045,6 +1061,7 @@ class TestTimeoutCooperativeCancel:
             tool_calls, reg, 1, None, [],
             non_retriable_tool_results={},
             tool_wait_timeout_seconds=0.1,
+            portfolio_scope=_TIMEOUT_TEST_PORTFOLIO_SCOPE,
         )
         # The handler aborts at its next checkpoint shortly after the 0.1s
         # timeout; it must NOT run its full 3s body to completion.

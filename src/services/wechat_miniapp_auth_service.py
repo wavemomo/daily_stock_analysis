@@ -17,6 +17,7 @@ import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from src.config import Config, get_config
+from src.repositories.auth_identity_repo import AuthIdentityConflictError
 from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.rbac_service import RbacService
 from src.storage import MiniappUserRecord
@@ -74,10 +75,15 @@ class WechatMiniappAuthService:
             raise MiniappAuthError("微信登录未返回用户标识")
 
         unionid = str(payload.get("unionid") or "").strip() or None
-        user, created = self.repository.upsert_user_with_status(
-            openid=openid,
-            unionid=unionid,
-        )
+        try:
+            user, created = self.repository.upsert_user_with_status(
+                openid=openid,
+                unionid=unionid,
+                issuer=self.config.wechat_miniapp_app_id,
+            )
+        except AuthIdentityConflictError as exc:
+            # Do not reveal whether another account owns an identity mapping.
+            raise MiniappAuthError("当前微信身份暂时无法登录，请稍后重试") from exc
         access = RbacService().ensure_user_access(user, assign_default=created)
         raw_token = secrets.token_urlsafe(32)
         expires_at = datetime.utcnow() + timedelta(

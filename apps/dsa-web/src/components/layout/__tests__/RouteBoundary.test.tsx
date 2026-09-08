@@ -8,8 +8,18 @@ import { Shell } from '../Shell';
 
 vi.mock('../../../contexts/AuthContext', () => ({
   useAuth: () => ({
-    authEnabled: false,
+    actor: 'web_user',
+    hasAnyPermission: () => true,
     logout: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+
+vi.mock('../../../contexts/FeatureQuotaContext', () => ({
+  useFeatureQuotas: () => ({
+    items: [],
+    isLoading: false,
+    refresh: vi.fn(),
+    describe: () => '暂无额度信息',
   }),
 }));
 

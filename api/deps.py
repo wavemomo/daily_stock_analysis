@@ -1,21 +1,13 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-API 依赖注入模块
-===================================
-
-职责：
-1. 提供数据库 Session 依赖
-2. 提供配置依赖
-3. 提供服务层依赖
-4. 提供微信小程序用户认证依赖
-"""
+"""API dependency injection and trusted request identity boundaries."""
 
 from typing import Generator
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from src.analysis_ownership import AnalysisOwner
+from src.portfolio_ownership import PortfolioScope
 from src.storage import DatabaseManager
 from src.config import get_config, Config
 from src.services.system_config_service import SystemConfigService
@@ -70,9 +62,25 @@ def get_runtime_scheduler_service(request: Request) -> RuntimeSchedulerService:
     return service
 
 
+def get_current_web_user_principal(request: Request) -> MiniappPrincipal:
+    """Return the canonical user established from the Web Cookie session."""
+    if getattr(request.state, "auth_kind", None) != "web_user":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Web 登录已失效，请重新使用微信扫码登录",
+        )
+    principal = getattr(request.state, "miniapp_principal", None)
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Web 登录已失效，请重新使用微信扫码登录",
+        )
+    return principal
+
+
 def get_current_miniapp_principal(request: Request) -> MiniappPrincipal:
-    """校验 Bearer token 并返回当前微信小程序用户。"""
-    established = getattr(request.state, 'miniapp_principal', None)
+    """Return the principal established by middleware for either supported client."""
+    established = getattr(request.state, "miniapp_principal", None)
     if established is not None:
         return established
     authorization = request.headers.get("authorization", "")
@@ -106,20 +114,38 @@ def require_permission(permission: str):
     return dependency
 
 
-def get_request_resource_owner(request: Request) -> str | None:
-    """Return the trusted owner id for a miniapp request.
-
-    A miniapp caller is always scoped to its authenticated user.  The legacy
-    administrator-cookie session intentionally returns ``None`` so existing
-    operational tools can still access global and historical resources.  API
-    request bodies must never decide this value.
-    """
+def _request_principal(request: Request) -> MiniappPrincipal:
     principal = getattr(request.state, "miniapp_principal", None)
-    if principal is not None:
-        return str(principal.user.id)
-    if getattr(request.state, "auth_kind", None) == "admin":
-        return None
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="微信登录已失效，请重新登录",
-    )
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录已失效，请重新登录",
+        )
+    user_id = principal.user.id
+    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录已失效，请重新登录",
+        )
+    return principal
+
+
+def get_request_analysis_owner_context(request: Request) -> AnalysisOwner:
+    """Bind every HTTP analysis request to its canonical authenticated user."""
+    return AnalysisOwner.user(_request_principal(request).user.id)
+
+
+def get_request_analysis_owner(request: Request) -> tuple[str, int | None]:
+    """Return legacy storage parameters derived from the canonical request user."""
+    owner = get_request_analysis_owner_context(request)
+    return owner.scope, owner.user_id
+
+
+def get_request_portfolio_scope(request: Request) -> PortfolioScope:
+    """Bind every HTTP portfolio request to its canonical authenticated user."""
+    return PortfolioScope.user(str(_request_principal(request).user.id))
+
+
+def get_request_resource_owner(request: Request) -> str:
+    """Return the canonical request user id for agent-session ownership."""
+    return str(_request_principal(request).user.id)

@@ -322,24 +322,29 @@ sudo systemctl reload nginx
 配置成功后，直接用 `http://your-domain.com` 访问即可，不需要带端口号。
 
 > **使用 Nginx 后的注意事项**：
-> - 如果你开启了 Web 登录认证（`ADMIN_AUTH_ENABLED=true`），建议在 `.env` 中把 `TRUST_X_FORWARDED_FOR=true` 一并打开，否则系统可能无法正确识别真实 IP。该选项适用于**单层可信反向代理**（Nginx → App）部署；如果使用多级代理或 CDN（CDN → Nginx → App），登录限流的 key 可能退化为边缘代理 IP 而非真实客户端 IP，需根据实际拓扑评估。
+> - Web 身份入口是微信开放平台网站应用扫码 OAuth；若应用直接位于**单层可信反向代理**（Nginx → App）之后，可在部署环境设置 `TRUST_X_FORWARDED_FOR=true`，让 OAuth 启动/回调等按真实客户端 IP 限流。多级代理或 CDN（CDN → Nginx → App）下，客户端 IP 语义必须按真实链路验证；不要把该开关当作认证或授权机制。
 > - 如需 HTTPS，可以用 [Certbot](https://certbot.eff.org/) 自动申请免费的 Let's Encrypt 证书。
 
 ---
 
 ## 安全建议
 
-把 Web 界面暴露到公网之前，强烈建议开启登录密码保护：
-
-在 `.env` 中设置：
+公网部署的 Web 身份入口是微信开放平台网站应用扫码 OAuth，不再提供内置管理员用户名密码或 `dsa_session` Cookie。请仅在服务端部署环境配置：
 
 ```env
-ADMIN_AUTH_ENABLED=true
+WECHAT_OPEN_WEB_APP_ID=wx...
+WECHAT_OPEN_WEB_APP_SECRET=...
+WECHAT_OPEN_WEB_REDIRECT_URI=https://your-domain.com/api/v1/web-auth/wechat/callback
+WECHAT_OPEN_WEB_STATE_TTL_SECONDS=300
+WEB_USER_SESSION_TTL_SECONDS=604800
+CORS_ORIGINS=https://your-domain.com
 ```
 
-重启服务后需要设置初始密码。首次 Auth Settings/初始密码设置入口仅接受 direct ASGI client 为 loopback 的请求，不会采信 `X-Forwarded-For` 来获得本地资格；上面的 `TRUST_X_FORWARDED_FOR` 仅服务于登录限流等真实 IP 判断，不能把远程请求变成本地首次设置请求。远程部署请在服务主机本地完成、通过 SSH 隧道直连服务的 loopback 地址，或使用已有的 `python -m src.auth reset_password` CLI 设置/重置密码。设置完成后，每次打开设置页面都需要输入密码，可以防止 API Key 等敏感配置被他人看到。
+`WECHAT_OPEN_WEB_REDIRECT_URI` 必须是已在微信开放平台网站应用中登记的公开 HTTPS 回调地址。`WECHAT_OPEN_WEB_APP_SECRET` 只能保存在后端运行环境，不能进入 Web 构建产物、日志或错误响应。登录后，浏览器只持有 HttpOnly `dsa_user_session`；Web Cookie 的写请求必须同时通过精确 `Origin` 校验和从 `GET /api/v1/web-auth/me` 获取的 `X-CSRF-Token` 校验。
 
-> 如果忘了密码，也可以在服务器上执行：`python -m src.auth reset_password`
+权限管理不依赖独立管理员身份域：Web 使用 `/api/v1/rbac/*`，小程序使用 Bearer-only 的 `/api/v1/miniapp/rbac/*`，两者均要求 `rbac.manage`。角色 `admin` 只是 RBAC 角色，不会绕过个人资源 owner scope；高风险系统接口仍以其明确的权限策略保护。
+
+反向代理必须终止 HTTPS，并只将已知的公网 Origin 放入 `CORS_ORIGINS`（不能使用 `*`）。`TRUST_X_FORWARDED_FOR=true` 只适用于 App 直接位于单层、完全可信反向代理之后的拓扑；多级代理或 CDN 场景应按真实链路配置并验证客户端 IP 语义，不能把该开关当作认证或授权机制。
 
 ---
 

@@ -12,7 +12,10 @@ from api.v1.schemas.miniapp import (
     MiniappLoginResponse,
     MiniappProfileUpdateRequest,
     MiniappUserItem,
+    MiniappIdentityBindApproveRequest,
+    MiniappIdentityBindApproveResponse,
 )
+from src.services.web_user_auth_service import WebUserAuthService
 from src.services.wechat_miniapp_auth_service import (
     MAX_AVATAR_BYTES,
     MiniappAuthConfigurationError,
@@ -107,6 +110,30 @@ def get_public_avatar(filename: str) -> FileResponse:
             "Cache-Control": "public, max-age=31536000, immutable",
             "X-Content-Type-Options": "nosniff",
         },
+    )
+
+
+@router.post(
+    "/identity-bind/approve",
+    response_model=MiniappIdentityBindApproveResponse,
+    summary="批准 Web 端显式身份绑定",
+)
+def approve_identity_bind(
+    request: MiniappIdentityBindApproveRequest,
+    principal: MiniappPrincipal = Depends(require_permission('account.self')),
+) -> MiniappIdentityBindApproveResponse:
+    expires_at = WebUserAuthService().approve_identity_bind(
+        challenge=request.challenge,
+        approved_user_id=int(principal.user.id),
+    )
+    if expires_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_identity_bind", "message": "身份绑定挑战无效、已过期或已处理"},
+        )
+    return MiniappIdentityBindApproveResponse(
+        status="approved",
+        expires_at=expires_at.isoformat(),
     )
 
 

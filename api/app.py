@@ -155,19 +155,15 @@ def _missing_asset_media_type(asset_path: str) -> str:
 
 
 def _warn_if_open_cors_without_auth() -> None:
-    if is_auth_enabled():
-        return
     logger.warning(
-        "CORS_ALLOW_ALL=true is enabled while ADMIN_AUTH_ENABLED is false. "
-        "The API will accept browser requests from any origin; only use this "
-        "on trusted local networks or enable admin authentication."
+        "CORS_ALLOW_ALL=true allows browser requests from any origin. "
+        "Use only on trusted networks and configure explicit origins in production."
     )
 
 from api.v1 import api_v1_router
 from api.middlewares.auth import add_auth_middleware
 from api.middlewares.error_handler import add_error_handlers
 from api.v1.schemas.common import HealthResponse
-from src.auth import is_auth_enabled
 from src.data.stock_index_loader import find_existing_stock_index_path
 from src.services.system_config_service import SystemConfigService
 from src.services.runtime_scheduler import (
@@ -340,8 +336,9 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
             "- 历史记录：查询历史分析报告\n"
             "- 股票数据：获取行情数据\n\n"
             "## 认证方式\n"
-            "除登录、状态、健康检查和 OpenAPI 文档外，/api/v1/* 必须认证。"
-            "ADMIN_AUTH_ENABLED=true 时可使用管理员会话 Cookie；微信小程序使用 Bearer 会话并按 RBAC 权限授权。"
+            "除登录、健康检查和 OpenAPI 文档外，/api/v1/* 必须认证。"
+            "Web 使用微信开放平台扫码 OAuth 建立 HttpOnly Cookie 会话；微信小程序使用 Bearer 会话。"
+            "两类会话均按统一 RBAC 权限授权。"
         ),
         version="1.0.0",
         lifespan=app_lifespan,

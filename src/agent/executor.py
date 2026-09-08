@@ -27,6 +27,7 @@ from src.agent.provider_trace import persist_provider_trace_turns
 from src.agent.runner import run_agent_loop, parse_dashboard_json
 from src.agent.runtime_facts import AgentRuntimeFacts
 from src.agent.stock_scope import StockScope, resolve_stock_scope
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.storage import get_db
 from src.agent.tools.registry import ToolRegistry
 from src.report_language import normalize_report_language
@@ -665,7 +666,13 @@ class AgentExecutor:
         self.max_steps = max_steps
         self.timeout_seconds = timeout_seconds
 
-    def run(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+    def run(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
+    ) -> AgentResult:
         """Execute the agent loop for a given task.
 
         Args:
@@ -708,9 +715,23 @@ class AgentExecutor:
             {"role": "user", "content": self._build_user_message(task, context)},
         ]
 
-        return self._run_loop(messages, tool_decls, parse_dashboard=True)
+        return self._run_loop(
+            messages,
+            tool_decls,
+            parse_dashboard=True,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
+        )
 
-    def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+    def chat(
+        self,
+        message: str,
+        session_id: str,
+        progress_callback: Optional[Callable] = None,
+        context: Optional[Dict[str, Any]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
+    ) -> AgentResult:
         """Execute the agent loop for a free-form chat message.
 
         Args:
@@ -756,6 +777,8 @@ class AgentExecutor:
             parse_dashboard=False,
             progress_callback=progress_callback,
             stock_scope=prepared.stock_scope,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
         )
 
         # Persist assistant reply (or error note) for context continuity
@@ -803,6 +826,8 @@ class AgentExecutor:
         parse_dashboard: bool,
         progress_callback: Optional[Callable] = None,
         stock_scope: Optional[StockScope] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> AgentResult:
         """Delegate to the shared runner and adapt the result.
 
@@ -817,6 +842,8 @@ class AgentExecutor:
             progress_callback=progress_callback,
             max_wall_clock_seconds=self.timeout_seconds,
             stock_scope=stock_scope,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
         )
 
         model_str = loop_result.model

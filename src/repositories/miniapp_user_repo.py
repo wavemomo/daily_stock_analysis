@@ -8,6 +8,8 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from src.repositories.auth_identity_repo import AuthIdentityRepository
+from src.services.identity_service import IdentityService
 from src.storage import DatabaseManager, MiniappSessionRecord, MiniappUserRecord
 
 
@@ -22,38 +24,37 @@ class MiniappUserRepository:
         *,
         openid: str,
         unionid: Optional[str] = None,
+        issuer: str,
     ) -> tuple[MiniappUserRecord, bool]:
-        """创建或更新用户，并明确返回本次是否新建。"""
-        now = datetime.utcnow()
-        created = False
-        with self.db.get_session() as session:
-            row = session.execute(
-                select(MiniappUserRecord)
-                .where(MiniappUserRecord.openid == openid)
-                .limit(1)
-            ).scalar_one_or_none()
-            if row is None:
-                created = True
-                row = MiniappUserRecord(
-                    openid=openid,
-                    unionid=unionid,
-                    created_at=now,
-                    updated_at=now,
-                    last_login_at=now,
-                )
-                session.add(row)
-            else:
-                if unionid:
-                    row.unionid = unionid
-                row.updated_at = now
-                row.last_login_at = now
-            session.commit()
-            session.refresh(row)
-            return row, created
+        """创建或更新 issuer-scoped canonical user，并返回是否新建。
 
-    def upsert_user(self, *, openid: str, unionid: Optional[str] = None) -> MiniappUserRecord:
-        """兼容原调用方，仅返回用户。"""
-        return self.upsert_user_with_status(openid=openid, unionid=unionid)[0]
+        小程序身份只能由 provider/issuer/subject 三元组解析。禁止按裸
+        OpenID 查询，避免不同小程序的同值 OpenID 被静默合并。
+        """
+        normalized_issuer = str(issuer or "").strip()
+        if not normalized_issuer:
+            raise ValueError("issuer 不能为空")
+        return IdentityService(
+            AuthIdentityRepository(self.db)
+        ).resolve_miniapp_user(
+            app_id=normalized_issuer,
+            openid=openid,
+            unionid=unionid,
+        )
+
+    def upsert_user(
+        self,
+        *,
+        openid: str,
+        unionid: Optional[str] = None,
+        issuer: str,
+    ) -> MiniappUserRecord:
+        """仅返回 issuer-scoped canonical user。"""
+        return self.upsert_user_with_status(
+            openid=openid,
+            unionid=unionid,
+            issuer=issuer,
+        )[0]
 
     def get_user_by_id(self, user_id: int) -> Optional[MiniappUserRecord]:
         with self.db.get_session() as session:

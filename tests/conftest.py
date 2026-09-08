@@ -3,6 +3,35 @@
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Hermetic environment guard (must run before any test module import).
+# ---------------------------------------------------------------------------
+# ``src.config.setup_env`` loads the repository ``.env`` into ``os.environ`` via
+# ``load_dotenv`` whenever ``ENV_FILE`` is unset. The first ``get_config()`` call
+# during collection therefore leaks the developer's real provider keys and
+# ``LITELLM_MODEL`` into the process environment, and later suites (most visibly
+# ``test_system_config_service``) read that leaked state and fail their
+# configuration validation only when run together. Pointing ``ENV_FILE`` at an
+# empty file before any test module is imported prevents the real ``.env`` from
+# ever being loaded; suites that need their own environment still set ``ENV_FILE``
+# explicitly and override this default.
+import os as _os
+import tempfile as _tempfile
+
+# Stable, empty env file that ``setup_env`` can load without ever touching the
+# developer's real ``.env``. Reused by the autouse guard below so a single test
+# that pops ``ENV_FILE`` in its teardown cannot expose the real file to the next
+# suite. Honour an explicitly provided ``ENV_FILE`` (e.g. from CI) instead of
+# clobbering it.
+_HERMETIC_ENV_FILE = _os.environ.get("ENV_FILE")
+if not _HERMETIC_ENV_FILE:
+    _empty_env = _tempfile.NamedTemporaryFile(
+        prefix="dsa-test-empty-", suffix=".env", delete=False
+    )
+    _empty_env.close()
+    _HERMETIC_ENV_FILE = _empty_env.name
+    _os.environ["ENV_FILE"] = _HERMETIC_ENV_FILE
+
 import asyncio
 import concurrent.futures
 import time
@@ -150,12 +179,14 @@ class _ThreadlessTestClient:
         base_url: str = "http://testserver",
         raise_server_exceptions: bool = True,
         follow_redirects: bool = True,
+        headers: dict[str, str] | None = None,
         **_: Any,
     ) -> None:
         self.app = app
         self.base_url = base_url
         self.raise_server_exceptions = raise_server_exceptions
         self.follow_redirects = follow_redirects
+        self.headers = dict(headers or {})
         self.cookies = httpx.Cookies()
         self._lifespan_ctx = None
         self._lifespan_enter_count = 0
@@ -175,6 +206,7 @@ class _ThreadlessTestClient:
             base_url=self.base_url,
             follow_redirects=follow_redirects,
             cookies=self.cookies,
+            headers=self.headers,
         )
 
     def __enter__(self):
@@ -249,3 +281,27 @@ class _ThreadlessTestClient:
 
 fastapi.testclient.TestClient = _ThreadlessTestClient
 starlette.testclient.TestClient = _ThreadlessTestClient
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env_file_guard():
+    """Keep ``ENV_FILE`` pointing at a real, empty file for every test.
+
+    Many suites set ``ENV_FILE`` in ``setUp`` and simply ``os.environ.pop`` it in
+    ``tearDown`` (rather than restoring the hermetic default). Once popped, the
+    next test that rebuilds config through ``src.config.setup_env`` finds no
+    ``ENV_FILE`` and falls back to loading the developer's real repository
+    ``.env``, leaking live provider keys and ``LITELLM_MODEL`` into ``os.environ``
+    for the remainder of the session (most visibly breaking
+    ``test_system_config_service`` only when run together). Re-pointing a missing
+    or dangling ``ENV_FILE`` at the hermetic empty file before each test closes
+    that fallback at the source. Suites that set their own existing ``ENV_FILE``
+    are left untouched.
+    """
+    current = _os.environ.get("ENV_FILE")
+    if not current or not _os.path.isfile(current):
+        _os.environ["ENV_FILE"] = _HERMETIC_ENV_FILE
+    yield

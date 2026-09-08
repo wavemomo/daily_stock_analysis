@@ -8,6 +8,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from src.portfolio_ownership import (
+    PortfolioScope,
+    UNSET_PORTFOLIO_SCOPE,
+    scope_from_legacy_owner,
+)
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.runner import run_agent_loop
 from src.agent.stock_scope import StockScope
@@ -65,6 +70,11 @@ class AgentRunRequest:
     max_wall_clock_seconds: Optional[float]
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     cancel_event: Optional[threading.Event] = None
+    resource_owner_id: Optional[str] = None
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "portfolio_scope", scope_from_legacy_owner(self.portfolio_scope))
 
 
 @dataclass
@@ -117,6 +127,8 @@ class LiteLLMAgentBackend(AgentBackend):
             progress_callback=request.progress_callback,
             max_wall_clock_seconds=request.max_wall_clock_seconds,
             stock_scope=request.stock_scope,
+            resource_owner_id=request.resource_owner_id,
+            portfolio_scope=request.portfolio_scope,
         )
         usage = {"total_tokens": loop_result.total_tokens} if loop_result.total_tokens > 0 else None
         error_code = None

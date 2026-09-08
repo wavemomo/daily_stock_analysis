@@ -9,6 +9,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
 from src.utils.data_processing import normalize_signal_attribution_values, normalize_dashboard_signal_attribution
 from src.schemas.report_schema import Dashboard, SignalAttribution
 
@@ -142,7 +143,7 @@ class TestHistoryServiceDisplay:
         class MockRecord:
             created_at = None
 
-        markdown = HistoryService()._generate_single_stock_markdown(result, MockRecord())
+        markdown = HistoryService(owner=GLOBAL_ANALYSIS_OWNER)._generate_single_stock_markdown(result, MockRecord())
         assert "信号归因" in markdown or "Signal Attribution" in markdown
         assert "70%" in markdown or "70%" in markdown
 
@@ -162,7 +163,7 @@ class TestHistoryServiceDisplay:
         class MockRecord:
             created_at = None
 
-        markdown = HistoryService()._generate_single_stock_markdown(result, MockRecord())
+        markdown = HistoryService(owner=GLOBAL_ANALYSIS_OWNER)._generate_single_stock_markdown(result, MockRecord())
         assert "信号归因" not in markdown
 
 

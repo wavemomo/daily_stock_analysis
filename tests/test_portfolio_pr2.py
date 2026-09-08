@@ -20,9 +20,9 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-import src.auth as auth
 from api.app import create_app
 from src.config import Config
+from src.portfolio_ownership import PortfolioScope
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_risk_service import PortfolioRiskService
@@ -30,19 +30,10 @@ from src.services.portfolio_service import PortfolioBusyError, PortfolioService
 from src.storage import DatabaseManager
 
 
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
-
-
 class PortfolioPr2TestCase(unittest.TestCase):
     """End-to-end style tests for PR2 import, dedup, risk and fx behavior."""
 
     def setUp(self) -> None:
-        _reset_auth_globals()
         self.temp_dir = tempfile.TemporaryDirectory()
         data_dir = Path(self.temp_dir.name)
         self.env_path = data_dir / ".env"
@@ -52,7 +43,6 @@ class PortfolioPr2TestCase(unittest.TestCase):
                 [
                     "STOCK_LIST=600519",
                     "GEMINI_API_KEY=test",
-                    "ADMIN_AUTH_ENABLED=true",
                     "PORTFOLIO_RISK_CONCENTRATION_ALERT_PCT=70.0",
                     "PORTFOLIO_RISK_DRAWDOWN_ALERT_PCT=10.0",
                     "PORTFOLIO_RISK_STOP_LOSS_ALERT_PCT=25.0",
@@ -70,22 +60,59 @@ class PortfolioPr2TestCase(unittest.TestCase):
         Config.reset_instance()
         DatabaseManager.reset_instance()
 
+        self.principal = SimpleNamespace(
+            user=SimpleNamespace(id=101),
+            permissions=("portfolio.read", "portfolio.manage", "analysis.execute"),
+        )
+        self.auth_patch = patch(
+            "src.services.wechat_miniapp_auth_service.WechatMiniappAuthService.authenticate_token",
+            return_value=self.principal,
+        )
+        self.auth_patch.start()
         self.db = DatabaseManager.get_instance()
         self.service = PortfolioService()
         self.import_service = PortfolioImportService(portfolio_service=self.service)
         self.risk_service = PortfolioRiskService(portfolio_service=self.service)
         self._board_fetch_patcher = patch.object(PortfolioRiskService, "_fetch_belong_boards", return_value=[])
         self._board_fetch_patcher.start()
-        self.client = TestClient(create_app(static_dir=data_dir / "empty-static"))
-        self.client.cookies.set("dsa_session", auth.create_session())
+        self.client = TestClient(
+            create_app(static_dir=data_dir / "empty-static"),
+            headers={"Authorization": "Bearer portfolio-pr2-token"},
+        )
 
     def tearDown(self) -> None:
+        self.auth_patch.stop()
         DatabaseManager.reset_instance()
         Config.reset_instance()
         os.environ.pop("ENV_FILE", None)
         os.environ.pop("DATABASE_PATH", None)
         self._board_fetch_patcher.stop()
         self.temp_dir.cleanup()
+
+    @property
+    def portfolio_scope(self) -> PortfolioScope:
+        return PortfolioScope.user(str(self.principal.user.id))
+
+    def _create_account(self, **kwargs):
+        return self.service.create_account(**kwargs, portfolio_scope=self.portfolio_scope)
+
+    def _record_trade(self, **kwargs):
+        return self.service.record_trade(**kwargs, portfolio_scope=self.portfolio_scope)
+
+    def _record_cash_ledger(self, **kwargs):
+        return self.service.record_cash_ledger(**kwargs, portfolio_scope=self.portfolio_scope)
+
+    def _get_portfolio_snapshot(self, **kwargs):
+        return self.service.get_portfolio_snapshot(**kwargs, portfolio_scope=self.portfolio_scope)
+
+    def _refresh_fx_rates(self, **kwargs):
+        return self.service.refresh_fx_rates(**kwargs, portfolio_scope=self.portfolio_scope)
+
+    def _commit_trade_records(self, **kwargs):
+        return self.import_service.commit_trade_records(**kwargs, portfolio_scope=self.portfolio_scope)
+
+    def _get_risk_report(self, **kwargs):
+        return self.risk_service.get_risk_report(**kwargs, portfolio_scope=self.portfolio_scope)
 
     def _save_close(self, symbol: str, on_date: date, close: float) -> None:
         df = pd.DataFrame(
@@ -105,7 +132,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.db.save_daily_data(df, code=symbol, data_source="portfolio-pr2-test")
 
     def _create_position(self, account_id: int, symbol: str, price: float = 100.0, *, market: str = "cn") -> None:
-        self.service.record_trade(
+        self._record_trade(
             account_id=account_id,
             symbol=symbol,
             trade_date=date(2026, 1, 1),
@@ -147,16 +174,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
         return csv_text.encode("utf-8")
 
     def test_import_dedup_trade_uid_and_hash(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
 
         parsed_uid = self.import_service.parse_trade_csv(broker="huatai", content=self._csv_bytes(with_trade_uid=True))
-        first_uid = self.import_service.commit_trade_records(
+        first_uid = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed_uid["records"],
         )
-        second_uid = self.import_service.commit_trade_records(
+        second_uid = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed_uid["records"],
@@ -168,12 +195,12 @@ class PortfolioPr2TestCase(unittest.TestCase):
             broker="huatai",
             content=self._csv_bytes(with_trade_uid=False),
         )
-        first_hash = self.import_service.commit_trade_records(
+        first_hash = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed_hash["records"],
         )
-        second_hash = self.import_service.commit_trade_records(
+        second_hash = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed_hash["records"],
@@ -215,7 +242,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(parsed["records"][0]["symbol"], "000001")
 
     def test_import_dry_run_counts_in_file_duplicates(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
         csv_text = (
             "成交日期,证券代码,买卖标志,成交数量,成交均价,成交编号,手续费,印花税\n"
@@ -226,7 +253,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             broker="huatai",
             content=csv_text.encode("utf-8"),
         )
-        result = self.import_service.commit_trade_records(
+        result = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed["records"],
@@ -237,7 +264,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(result["duplicate_count"], 1)
 
     def test_import_allows_identical_split_fills_without_trade_uid(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
         csv_text = (
             "成交日期,证券代码,买卖标志,成交数量,成交均价,手续费,印花税\n"
@@ -251,12 +278,12 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(parsed["record_count"], 2)
         self.assertEqual(len({item["dedup_hash"] for item in parsed["records"]}), 2)
 
-        first_commit = self.import_service.commit_trade_records(
+        first_commit = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed["records"],
         )
-        second_commit = self.import_service.commit_trade_records(
+        second_commit = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=parsed["records"],
@@ -268,9 +295,9 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(second_commit["duplicate_count"], 2)
 
     def test_import_oversell_counts_failed_not_duplicate(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="600519",
             trade_date=date(2026, 1, 1),
@@ -281,7 +308,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             currency="CNY",
         )
 
-        result = self.import_service.commit_trade_records(
+        result = self._commit_trade_records(
             account_id=aid,
             broker="huatai",
             records=[
@@ -307,7 +334,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(len(result["errors"]), 1)
 
     def test_import_busy_counts_failed_not_duplicate(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
 
         with patch.object(
@@ -315,7 +342,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             "record_trade",
             side_effect=PortfolioBusyError("Portfolio ledger is busy; please retry shortly."),
         ):
-            result = self.import_service.commit_trade_records(
+            result = self._commit_trade_records(
                 account_id=aid,
                 broker="huatai",
                 records=[
@@ -341,16 +368,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertIn("portfolio_busy", result["errors"][0])
 
     def test_risk_threshold_boundary(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=20000,
             currency="CNY",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="600519",
             trade_date=date(2026, 1, 1),
@@ -360,7 +387,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             market="cn",
             currency="CNY",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="000001",
             trade_date=date(2026, 1, 1),
@@ -373,11 +400,11 @@ class PortfolioPr2TestCase(unittest.TestCase):
 
         self._save_close("600519", date(2026, 1, 1), 100.0)
         self._save_close("000001", date(2026, 1, 1), 20.0)
-        self.service.get_portfolio_snapshot(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
+        self._get_portfolio_snapshot(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
 
         self._save_close("600519", date(2026, 1, 2), 70.0)
         self._save_close("000001", date(2026, 1, 2), 20.0)
-        report = self.risk_service.get_risk_report(account_id=aid, as_of=date(2026, 1, 2), cost_method="fifo")
+        report = self._get_risk_report(account_id=aid, as_of=date(2026, 1, 2), cost_method="fifo")
 
         self.assertTrue(report["concentration"]["alert"])
         self.assertTrue(report["drawdown"]["alert"])
@@ -386,16 +413,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertAlmostEqual(report["thresholds"]["drawdown_alert_pct"], 10.0, places=6)
 
     def test_risk_drawdown_backfills_snapshot_window_on_first_call(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=20000,
             currency="CNY",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="600519",
             trade_date=date(2026, 1, 1),
@@ -408,25 +435,25 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self._save_close("600519", date(2026, 1, 1), 100.0)
         self._save_close("600519", date(2026, 1, 2), 70.0)
 
-        report = self.risk_service.get_risk_report(account_id=aid, as_of=date(2026, 1, 2), cost_method="fifo")
+        report = self._get_risk_report(account_id=aid, as_of=date(2026, 1, 2), cost_method="fifo")
         self.assertGreaterEqual(report["drawdown"]["series_points"], 2)
         self.assertGreater(report["drawdown"]["max_drawdown_pct"], 10.0)
         self.assertTrue(report["drawdown"]["alert"])
 
     def test_concentration_uses_cny_normalized_exposure(self) -> None:
-        cn_account = self.service.create_account(name="CN", broker="Demo", market="cn", base_currency="CNY")
-        us_account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="USD")
+        cn_account = self._create_account(name="CN", broker="Demo", market="cn", base_currency="CNY")
+        us_account = self._create_account(name="US", broker="Demo", market="us", base_currency="USD")
         cn_id = cn_account["id"]
         us_id = us_account["id"]
 
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=cn_id,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=1000.0,
             currency="CNY",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=cn_id,
             symbol="600519",
             trade_date=date(2026, 1, 1),
@@ -437,14 +464,14 @@ class PortfolioPr2TestCase(unittest.TestCase):
             currency="CNY",
         )
 
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=us_id,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=100.0,
             currency="USD",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=us_id,
             symbol="AAPL",
             trade_date=date(2026, 1, 1),
@@ -464,24 +491,24 @@ class PortfolioPr2TestCase(unittest.TestCase):
             source="manual",
             is_stale=False,
         )
-        self.service.get_portfolio_snapshot(as_of=date(2026, 1, 1), cost_method="fifo")
+        self._get_portfolio_snapshot(as_of=date(2026, 1, 1), cost_method="fifo")
 
-        report = self.risk_service.get_risk_report(as_of=date(2026, 1, 1), cost_method="fifo")
+        report = self._get_risk_report(as_of=date(2026, 1, 1), cost_method="fifo")
         positions = {item["symbol"]: item for item in report["concentration"]["top_positions"]}
         self.assertIn("AAPL", positions)
         self.assertAlmostEqual(positions["AAPL"]["market_value_base"], 700.0, places=6)
 
     def test_sector_concentration_uses_unclassified_for_non_cn(self) -> None:
-        us_account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="USD")
+        us_account = self._create_account(name="US", broker="Demo", market="us", base_currency="USD")
         us_id = us_account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=us_id,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=100.0,
             currency="USD",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=us_id,
             symbol="AAPL",
             trade_date=date(2026, 1, 1),
@@ -492,7 +519,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             currency="USD",
         )
         self._save_close("AAPL", date(2026, 1, 1), 100.0)
-        report = self.risk_service.get_risk_report(account_id=us_id, as_of=date(2026, 1, 1), cost_method="fifo")
+        report = self._get_risk_report(account_id=us_id, as_of=date(2026, 1, 1), cost_method="fifo")
         self.assertIn("sector_concentration", report)
         sectors = report["sector_concentration"]["top_sectors"]
         self.assertTrue(len(sectors) >= 1)
@@ -500,16 +527,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
 
     @patch.object(PortfolioRiskService, "_fetch_belong_boards", return_value=[{"name": "白酒", "type": "行业"}])
     def test_sector_concentration_cn_board_mapping(self, _mock_fetch) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=10000.0,
             currency="CNY",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="600519",
             trade_date=date(2026, 1, 1),
@@ -520,15 +547,15 @@ class PortfolioPr2TestCase(unittest.TestCase):
             currency="CNY",
         )
         self._save_close("600519", date(2026, 1, 1), 100.0)
-        report = self.risk_service.get_risk_report(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
+        report = self._get_risk_report(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
         sectors = report["sector_concentration"]["top_sectors"]
         self.assertTrue(len(sectors) >= 1)
         self.assertEqual(sectors[0]["sector"], "白酒")
 
     def test_risk_report_aggregates_active_defensive_decision_signals_for_holdings(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -546,7 +573,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self._create_signal("002000", "sell")
         self._create_signal("600519", "alert", status="expired", trace_id="expired-alert-600519")
 
-        report = self.risk_service.get_risk_report(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
+        report = self._get_risk_report(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
 
         block = report["decision_signal_risk"]
         self.assertTrue(block["available"])
@@ -563,16 +590,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(signal_actions["000001"], "alert")
 
     def test_risk_report_uses_requested_snapshot_for_decision_signal_filters(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=100000.0,
             currency="CNY",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="600519",
             trade_date=date(2026, 1, 1),
@@ -584,7 +611,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         )
         self._save_close("600519", date(2026, 1, 1), 100.0)
         self._save_close("600519", date(2026, 1, 2), 100.0)
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="000001",
             trade_date=date(2026, 1, 2),
@@ -603,7 +630,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             "list_signals",
             wraps=original,
         ) as spy:
-            report = self.risk_service.get_risk_report(
+            report = self._get_risk_report(
                 account_id=aid,
                 as_of=date(2026, 1, 2),
                 cost_method="fifo",
@@ -630,9 +657,9 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertIn(("cn", "600519"), observed_identities)
 
     def test_risk_report_decision_signal_fail_open(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -649,16 +676,21 @@ class PortfolioPr2TestCase(unittest.TestCase):
             portfolio_service=self.service,
             decision_signal_service=BrokenSignalService(),
         )
-        report = risk_service.get_risk_report(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
+        report = risk_service.get_risk_report(
+            account_id=aid,
+            as_of=date(2026, 1, 1),
+            cost_method="fifo",
+            portfolio_scope=self.portfolio_scope,
+        )
 
         self.assertFalse(report["decision_signal_risk"]["available"])
         self.assertEqual(report["decision_signal_risk"]["total"], 0)
         self.assertEqual(report["decision_signal_risk"]["items"], [])
 
     def test_portfolio_risk_endpoint_returns_defensive_decision_signals(self) -> None:
-        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        account = self._create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -680,16 +712,16 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(payload["decision_signal_risk"]["items"][0]["signal"]["action"], "sell")
 
     def test_snapshot_does_not_trigger_online_fx_refresh(self) -> None:
-        account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
+        account = self._create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
             amount=1000.0,
             currency="USD",
         )
-        self.service.record_trade(
+        self._record_trade(
             account_id=aid,
             symbol="AAPL",
             trade_date=date(2026, 1, 1),
@@ -710,12 +742,12 @@ class PortfolioPr2TestCase(unittest.TestCase):
         )
 
         with patch.object(PortfolioService, "_fetch_fx_rate_from_yfinance", side_effect=AssertionError("should not call")):
-            self.service.get_portfolio_snapshot(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
+            self._get_portfolio_snapshot(account_id=aid, as_of=date(2026, 1, 1), cost_method="fifo")
 
     def test_fx_refresh_fallback_marks_stale(self) -> None:
-        account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
+        account = self._create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -732,7 +764,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         )
 
         with patch.object(PortfolioService, "_fetch_fx_rate_from_yfinance", return_value=None):
-            summary = self.service.refresh_fx_rates(account_id=aid, as_of=date(2026, 1, 2))
+            summary = self._refresh_fx_rates(account_id=aid, as_of=date(2026, 1, 2))
 
         self.assertEqual(summary["pair_count"], 1)
         self.assertEqual(summary["updated_count"], 0)
@@ -747,9 +779,9 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertAlmostEqual(float(latest.rate), 7.0, places=6)
 
     def test_fx_refresh_disabled_returns_real_pair_count_without_fetching(self) -> None:
-        account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
+        account = self._create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         aid = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=aid,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -763,7 +795,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             "_fetch_fx_rate_from_yfinance",
             side_effect=AssertionError("should not call"),
         ), patch.object(self.service.repo, "save_fx_rate", wraps=self.service.repo.save_fx_rate) as save_fx_rate_mock:
-            summary = self.service.refresh_fx_rates(account_id=aid, as_of=date(2026, 1, 2))
+            summary = self._refresh_fx_rates(account_id=aid, as_of=date(2026, 1, 2))
 
         self.assertFalse(summary["refresh_enabled"])
         self.assertEqual(summary["disabled_reason"], "portfolio_fx_update_disabled")
@@ -775,7 +807,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         save_fx_rate_mock.assert_not_called()
 
     def test_fx_refresh_disabled_skips_invalid_currency_rows(self) -> None:
-        account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
+        account = self._create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         aid = account["id"]
 
         disabled_config = SimpleNamespace(portfolio_fx_update_enabled=False)
@@ -794,7 +826,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             "_fetch_fx_rate_from_yfinance",
             side_effect=AssertionError("should not call"),
         ):
-            summary = self.service.refresh_fx_rates(account_id=aid, as_of=date(2026, 1, 2))
+            summary = self._refresh_fx_rates(account_id=aid, as_of=date(2026, 1, 2))
 
         self.assertFalse(summary["refresh_enabled"])
         self.assertEqual(summary["pair_count"], 1)
@@ -803,9 +835,9 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(summary["error_count"], 0)
 
     def test_fx_refresh_endpoint_returns_disabled_status_fields(self) -> None:
-        account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
+        account = self._create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         account_id = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=account_id,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -834,9 +866,9 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(payload["error_count"], 0)
 
     def test_fx_refresh_endpoint_returns_enabled_status_fields(self) -> None:
-        account = self.service.create_account(name="US", broker="Demo", market="us", base_currency="CNY")
+        account = self._create_account(name="US", broker="Demo", market="us", base_currency="CNY")
         account_id = account["id"]
-        self.service.record_cash_ledger(
+        self._record_cash_ledger(
             account_id=account_id,
             event_date=date(2026, 1, 1),
             direction="in",
@@ -876,7 +908,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(import_resp.json()["inserted_count"], 1)
 
         self._save_close("600519", date(2026, 1, 2), 95.0)
-        self.service.get_portfolio_snapshot(account_id=account_id, as_of=date(2026, 1, 2), cost_method="fifo")
+        self._get_portfolio_snapshot(account_id=account_id, as_of=date(2026, 1, 2), cost_method="fifo")
         risk_resp = self.client.get(
             "/api/v1/portfolio/risk",
             params={"account_id": account_id, "as_of": "2026-01-02", "cost_method": "fifo"},

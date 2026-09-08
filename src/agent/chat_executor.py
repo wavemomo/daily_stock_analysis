@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from src.portfolio_ownership import PortfolioScope, UNSET_PORTFOLIO_SCOPE, scope_from_legacy_owner
 from src.agent.agent_backend import AgentBackend, AgentRunRequest
 from src.agent.conversation import conversation_manager
 from src.agent.executor import AgentResult, PreparedAgentChat, prepare_agent_chat
@@ -23,6 +24,8 @@ class PreparedAgentChatTurn:
     baseline_len: int
     run_id: str
     user_message_id: int
+    resource_owner_id: Optional[str] = None
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE
 
 
 class AgentChatExecutor:
@@ -57,12 +60,16 @@ class AgentChatExecutor:
         context: Optional[Dict[str, Any]] = None,
         cancel_event=None,
         selected_skill_ids: Optional[List[str]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> AgentResult:
         turn = self.prepare_turn(
             message=message,
             session_id=session_id,
             context=context,
             selected_skill_ids=selected_skill_ids,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
         )
         return self.execute_turn(
             turn,
@@ -77,8 +84,11 @@ class AgentChatExecutor:
         session_id: str,
         context: Optional[Dict[str, Any]] = None,
         selected_skill_ids: Optional[List[str]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> PreparedAgentChatTurn:
         """Prepare context and persist the user message without starting a backend."""
+        portfolio_scope = scope_from_legacy_owner(portfolio_scope)
         conversation_manager.get_or_create(session_id)
         prepared = prepare_agent_chat(
             message=message,
@@ -107,6 +117,8 @@ class AgentChatExecutor:
             baseline_len=baseline_len,
             run_id=run_id,
             user_message_id=user_message_id,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
         )
 
     def execute_turn(
@@ -128,6 +140,8 @@ class AgentChatExecutor:
                 max_wall_clock_seconds=self.timeout_seconds,
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
+                resource_owner_id=turn.resource_owner_id,
+                portfolio_scope=turn.portfolio_scope,
             )
         )
         total_tokens = 0

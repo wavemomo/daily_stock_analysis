@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
-from src.config import Config, get_config
 from src.repositories.rbac_repo import RbacRepository
 from src.storage import MiniappUserRecord
 
@@ -13,7 +12,8 @@ PERMISSIONS: Dict[str, str] = {
     'account.self': '查看和维护本人会话',
     'daily_reflections.read': '读取本人每日心得',
     'daily_reflections.manage': '保存和删除本人每日心得',
-    'stocks.read': '读取股票与行情', 'stocks.manage': '维护自选股与导入',
+    'stocks.read': '读取股票与行情', 'stocks.manage': '维护全局默认自选股与导入',
+    'watchlist.read': '读取本人自选股', 'watchlist.manage': '维护本人自选股',
     'analysis.read': '读取分析任务', 'analysis.execute': '执行股票与市场分析',
     'history.read': '读取分析历史', 'history.delete': '删除分析历史',
     'agent.read': '读取智能体能力与会话', 'agent.execute': '执行智能体任务', 'agent.manage': '管理智能体会话', 'agent.share': '发送智能体内容到外部通知渠道',
@@ -21,7 +21,7 @@ PERMISSIONS: Dict[str, str] = {
     'portfolio.read': '读取持仓', 'portfolio.manage': '维护和导入持仓',
     'backtest.read': '读取回测结果', 'backtest.execute': '执行回测',
     'alerts.read': '读取告警', 'alerts.manage': '维护和测试告警', 'alerts.notify': '发送告警到外部通知渠道',
-    'decision_signals.read': '读取决策信号', 'decision_signals.manage': '维护和评估决策信号',
+    'decision_signals.read': '读取决策信号', 'decision_signals.execute': '执行决策信号成本计算', 'decision_signals.manage': '维护和评估决策信号',
     'intelligence.read': '读取情报源', 'intelligence.manage': '维护和抓取情报源',
     'usage.read': '读取用量', 'data.read': '读取数据能力',
     'system.read': '读取系统配置', 'system.manage': '维护系统配置和调度',
@@ -33,8 +33,12 @@ PERMISSIONS: Dict[str, str] = {
 MEMBER_PERMISSIONS = (
     'account.self',
     'daily_reflections.read', 'daily_reflections.manage',
+    'watchlist.read', 'watchlist.manage',
     'stocks.read',
     'agent.read', 'agent.execute', 'agent.manage',
+    'analysis.read', 'analysis.execute',
+    'screening.read', 'screening.execute',
+    'backtest.read', 'backtest.execute',
     'portfolio.read', 'portfolio.manage',
     'alerts.read', 'alerts.manage',
     'decision_signals.read',
@@ -54,13 +58,21 @@ ROLES = {
         }),
     },
     'admin': {
-        'name': '管理员',
-        'description': '拥有全部系统与授权管理能力',
+        'name': '平台管理者',
+        'description': '拥有系统维护与授权管理能力',
         'permissions': tuple(PERMISSIONS),
     },
 }
 
 DOMAIN_PREFIXES = (
+    # Miniapp routes must use the same middleware policy resolver as Web/Bearer
+    # routes.  Keep these entries ahead of their generic counterparts so a new
+    # miniapp endpoint cannot silently bypass RBAC when it omits a dependency.
+    ('/api/v1/miniapp/rbac', 'rbac'),
+    ('/api/v1/miniapp/daily-reflections', 'daily_reflections'),
+    ('/api/v1/miniapp/watchlist', 'watchlist'),
+    ('/api/v1/miniapp/auth', 'account'),
+    ('/api/v1/rbac', 'rbac'),
     ('/api/v1/decision-signals', 'decision_signals'),
     ('/api/v1/intelligence', 'intelligence'),
     ('/api/v1/portfolio', 'portfolio'),
@@ -73,15 +85,14 @@ DOMAIN_PREFIXES = (
     ('/api/v1/agent', 'agent'),
     ('/api/v1/usage', 'usage'),
     ('/api/v1/data', 'data'),
+    ('/api/v1/miniapp/system', 'system'),
     ('/api/v1/system', 'system'),
-    ('/api/v1/auth', 'system'),
 )
 
 
 class RbacService:
-    def __init__(self, repository: Optional[RbacRepository] = None, config: Optional[Config] = None):
+    def __init__(self, repository: Optional[RbacRepository] = None):
         self.repository = repository or RbacRepository()
-        self.config = config or get_config()
         self.repository.seed(PERMISSIONS, ROLES)
 
     def ensure_user_access(
@@ -93,16 +104,6 @@ class RbacService:
         access = self.repository.get_access(user.id)
         if assign_default or not access['roles']:
             self.repository.ensure_role(user.id, 'member')
-        if user.openid in self.config.rbac_bootstrap_admin_openids:
-            self.repository.ensure_role(
-                user.id,
-                'admin',
-                audit_action='user.bootstrap_admin_granted',
-                audit_metadata={
-                    'role': 'admin',
-                    'source': 'bootstrap_openid',
-                },
-            )
         return self.repository.get_access(user.id)
 
     def resolve(self, user_id: int) -> Dict[str, List[str]]:
@@ -114,11 +115,22 @@ class RbacService:
     def list_users(self, *, query: Optional[str], page: int, page_size: int) -> Dict[str, object]:
         return self.repository.list_users(query=query, page=page, page_size=page_size)
 
-    def replace_user_roles(self, user_id: int, role_codes: Sequence[str], assigned_by_user_id: int) -> Dict[str, List[str]]:
+    def replace_user_roles(
+        self,
+        user_id: int,
+        role_codes: Sequence[str],
+        assigned_by_user_id: Optional[int],
+    ) -> Dict[str, List[str]]:
         self.repository.replace_user_roles(user_id, role_codes, assigned_by_user_id)
         return self.resolve(user_id)
 
-    def set_user_active(self, user_id: int, is_active: bool, *, changed_by_user_id: int) -> Dict[str, object]:
+    def set_user_active(
+        self,
+        user_id: int,
+        is_active: bool,
+        *,
+        changed_by_user_id: Optional[int],
+    ) -> Dict[str, object]:
         return self.repository.set_user_active(
             user_id,
             is_active,
@@ -132,7 +144,7 @@ class RbacService:
         name: str,
         description: str,
         permissions: Sequence[str],
-        created_by_user_id: int,
+        created_by_user_id: Optional[int],
     ) -> Dict[str, object]:
         return self.repository.create_custom_role(
             code=code,
@@ -149,7 +161,7 @@ class RbacService:
         name: str,
         description: str,
         permissions: Sequence[str],
-        changed_by_user_id: int,
+        changed_by_user_id: Optional[int],
     ) -> Dict[str, object]:
         return self.repository.update_custom_role(
             role_code,
@@ -159,7 +171,12 @@ class RbacService:
             changed_by_user_id=changed_by_user_id,
         )
 
-    def delete_custom_role(self, role_code: str, *, deleted_by_user_id: int) -> None:
+    def delete_custom_role(
+        self,
+        role_code: str,
+        *,
+        deleted_by_user_id: Optional[int],
+    ) -> None:
         self.repository.delete_custom_role(role_code, deleted_by_user_id=deleted_by_user_id)
 
     def list_audit_events(self, *, page: int, page_size: int) -> Dict[str, object]:
@@ -168,6 +185,8 @@ class RbacService:
     @staticmethod
     def permission_for_request(path: str, method: str) -> Optional[str]:
         normalized_method = method.upper()
+        if normalized_method == 'GET' and path == '/api/v1/feature-quotas/me':
+            return 'account.self'
         if normalized_method == 'POST' and path in {
             '/api/v1/stocks/extract-from-image',
             '/api/v1/stocks/parse-import',
@@ -179,6 +198,8 @@ class RbacService:
             if path == prefix or path.startswith(prefix + '/'):
                 if domain in {'usage', 'data'}:
                     return f'{domain}.read'
+                if domain == 'account':
+                    return 'account.self'
                 if domain == 'history':
                     return 'history.delete' if normalized_method == 'DELETE' else 'history.read'
                 if domain == 'agent':
@@ -187,12 +208,23 @@ class RbacService:
                     if normalized_method == 'GET': return 'agent.read'
                     if normalized_method == 'DELETE': return 'agent.manage'
                     return 'agent.execute'
+                if domain == 'decision_signals':
+                    if normalized_method == 'GET':
+                        return 'decision_signals.read'
+                    if path in {
+                        '/api/v1/decision-signals/outcomes/run',
+                        '/api/v1/decision-signals/reassess',
+                    }:
+                        return 'decision_signals.execute'
+                    return 'decision_signals.manage'
                 if domain == 'analysis':
                     return 'analysis.read' if normalized_method == 'GET' else 'analysis.execute'
                 if domain == 'screening':
                     return 'screening.read' if normalized_method == 'GET' else 'screening.execute'
                 if domain == 'backtest':
                     return 'backtest.read' if normalized_method == 'GET' else 'backtest.execute'
+                if domain == 'rbac':
+                    return 'rbac.manage'
                 if domain == 'system':
                     return 'system.read' if normalized_method == 'GET' else 'system.manage'
                 suffix = 'read' if normalized_method == 'GET' else 'manage'

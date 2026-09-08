@@ -79,8 +79,9 @@ Grok Bot Skill 正文见 [`docs/examples/grok_bot/SKILL.md`](examples/grok_bot/S
 
 ## 认证
 
-普通 `/api/v1/*` 业务 API 现在始终要求认证。Grok Bot 集成应启用 `ADMIN_AUTH_ENABLED=true`，完成管理员登录并维持会话 Cookie；微信小程序 Bearer 仅签发给微信用户且受 RBAC 限制，不能使用 `XAI_API_KEY` 作为 DSA API 鉴权密钥。若 Bot 只能携带自定义 Bearer 而不能维持 Cookie，则不能直接调用这些业务 API，需要由受控网关完成会话集成。
+普通 `/api/v1/*` 业务 API 按 RBAC 策略要求用户主体：Web 是微信开放平台扫码 OAuth 建立的 `dsa_user_session` Cookie，小程序是微信登录签发的 Bearer token。当前不提供服务主体、bot token、API key 或自定义 Bearer 的交换接口。Grok Bot 无法自行完成交互式扫码授权，因而不能直接持有受保护 DSA API 的长期访问权。
 
+`XAI_API_KEY` 仅用于将 Grok 作为 DSA 的 LLM provider，并非 DSA API 鉴权凭据。需要自动化时，应先设计一个受控、用户可审计的集成边界来代表已授权用户调用；在该能力实际落地前，Bot 只能调用明确匿名开放的健康检查等接口。
 ## 明确不做的事
 
 - 不把 Grok Bot 注册成 LiteLLM managed channel。

@@ -9,12 +9,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 import pytest
 
-import src.auth as auth
 from api.app import create_app
 from src.config import Config
 from src.services.stock_profile_service import InvalidStockProfileCode, StockProfileService
@@ -615,44 +615,44 @@ def test_all_dependency_failures_return_unavailable_profile_instead_of_raising()
     assert set(payload["evidence_quality"]["blocks"].values()) == {"unavailable"}
 
 
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
-
-
 def _endpoint_payload() -> dict:
     service, _ = _service()
     return service.get_profile("AAPL")
 
 
 def test_profile_endpoint_validates_code_and_exposes_contract() -> None:
-    _reset_auth_globals()
     with tempfile.TemporaryDirectory() as temp_dir:
+        old_database_path = os.environ.get("DATABASE_PATH")
         try:
             os.environ["DATABASE_PATH"] = str(Path(temp_dir) / "profile.db")
-            os.environ["ADMIN_AUTH_ENABLED"] = "false"
             Config.reset_instance()
             DatabaseManager.reset_instance()
-            app = create_app(static_dir=Path(temp_dir) / "empty-static")
-            client = TestClient(app)
+            principal = SimpleNamespace(
+                user=SimpleNamespace(id=101),
+                roles=("member",),
+                permissions=("stocks.read",),
+            )
             with patch(
-                "api.v1.endpoints.stocks.StockProfileService.get_profile",
-                return_value=_endpoint_payload(),
-            ) as get_profile:
-                response = client.get("/api/v1/stocks/AAPL/profile", params={"history_days": 90})
-                jp = client.get("/api/v1/stocks/7203.T/profile")
-                kr = client.get("/api/v1/stocks/005930.KS/profile")
-                tw = client.get("/api/v1/stocks/2330.TW/profile")
-                two = client.get("/api/v1/stocks/6505.TWO/profile")
-                tw_etf = client.get("/api/v1/stocks/006208.TW/profile")
-            invalid = client.get("/api/v1/stocks/invalid-code/profile")
-            conflicts = [
-                client.get(f"/api/v1/stocks/{code}/profile")
-                for code in ("600519.SZ", "000001.SH", "920748.SH")
-            ]
+                "api.middlewares.auth.WechatMiniappAuthService.authenticate_token",
+                side_effect=lambda token: principal if token == "stock-profile-token" else None,
+            ):
+                app = create_app(static_dir=Path(temp_dir) / "empty-static")
+                client = TestClient(app, headers={"Authorization": "Bearer stock-profile-token"})
+                with patch(
+                    "api.v1.endpoints.stocks.StockProfileService.get_profile",
+                    return_value=_endpoint_payload(),
+                ) as get_profile:
+                    response = client.get("/api/v1/stocks/AAPL/profile", params={"history_days": 90})
+                    jp = client.get("/api/v1/stocks/7203.T/profile")
+                    kr = client.get("/api/v1/stocks/005930.KS/profile")
+                    tw = client.get("/api/v1/stocks/2330.TW/profile")
+                    two = client.get("/api/v1/stocks/6505.TWO/profile")
+                    tw_etf = client.get("/api/v1/stocks/006208.TW/profile")
+                invalid = client.get("/api/v1/stocks/invalid-code/profile")
+                conflicts = [
+                    client.get(f"/api/v1/stocks/{code}/profile")
+                    for code in ("600519.SZ", "000001.SH", "920748.SH")
+                ]
 
             assert response.status_code == 200, response.text
             assert response.json()["canonical_code"] == "AAPL"
@@ -674,10 +674,7 @@ def test_profile_endpoint_validates_code_and_exposes_contract() -> None:
             ]
             assert invalid.status_code == 400
             assert [item.status_code for item in conflicts] == [400, 400, 400]
-            assert {
-                item.json()["error"]
-                for item in conflicts
-            } == {"invalid_stock_code"}
+            assert {item.json()["error"] for item in conflicts} == {"invalid_stock_code"}
             assert jp.status_code == 200
             assert kr.status_code == 200
             assert tw.status_code == 200
@@ -686,9 +683,10 @@ def test_profile_endpoint_validates_code_and_exposes_contract() -> None:
         finally:
             DatabaseManager.reset_instance()
             Config.reset_instance()
-            os.environ.pop("DATABASE_PATH", None)
-            os.environ.pop("ADMIN_AUTH_ENABLED", None)
-            _reset_auth_globals()
+            if old_database_path is None:
+                os.environ.pop("DATABASE_PATH", None)
+            else:
+                os.environ["DATABASE_PATH"] = old_database_path
 
 
 def test_static_openapi_matches_stock_profile_runtime_contract() -> None:

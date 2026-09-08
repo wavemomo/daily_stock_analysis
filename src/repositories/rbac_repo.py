@@ -213,7 +213,7 @@ class RbacRepository:
         self,
         user_id: int,
         role_codes: Sequence[str],
-        assigned_by_user_id: int,
+        assigned_by_user_id: Optional[int],
     ) -> None:
         normalized = sorted(set(role_codes))
         if not normalized:
@@ -268,14 +268,14 @@ class RbacRepository:
         user_id: int,
         is_active: bool,
         *,
-        changed_by_user_id: int,
+        changed_by_user_id: Optional[int],
     ) -> Dict[str, object]:
         with self.db.get_session() as session:
             self._begin_write(session)
             target = session.get(MiniappUserRecord, user_id)
             if target is None:
                 raise LookupError('用户不存在')
-            if not is_active and user_id == changed_by_user_id:
+            if not is_active and changed_by_user_id is not None and user_id == changed_by_user_id:
                 raise ValueError('不能停用当前管理员账户')
             if (
                 not is_active
@@ -305,7 +305,7 @@ class RbacRepository:
         name: str,
         description: str,
         permission_codes: Sequence[str],
-        created_by_user_id: int,
+        created_by_user_id: Optional[int],
     ) -> Dict[str, object]:
         normalized_code = self._normalize_role_code(code)
         normalized_permissions = sorted(set(permission_codes))
@@ -356,7 +356,7 @@ class RbacRepository:
         name: str,
         description: str,
         permission_codes: Sequence[str],
-        changed_by_user_id: int,
+        changed_by_user_id: Optional[int],
     ) -> Dict[str, object]:
         normalized_permissions = sorted(set(permission_codes))
         with self.db.get_session() as session:
@@ -403,7 +403,12 @@ class RbacRepository:
                 'permissions': normalized_permissions,
             }
 
-    def delete_custom_role(self, role_code: str, *, deleted_by_user_id: int) -> None:
+    def delete_custom_role(
+        self,
+        role_code: str,
+        *,
+        deleted_by_user_id: Optional[int],
+    ) -> None:
         with self.db.get_session() as session:
             self._begin_write(session)
             role = self._get_custom_role(session, role_code)
@@ -623,11 +628,11 @@ class RbacRepository:
         target_is_active: bool,
         current_has_management: bool,
         next_has_management: bool,
-        actor_user_id: int,
+        actor_user_id: Optional[int],
     ) -> None:
         if not current_has_management or next_has_management:
             return
-        if user_id == actor_user_id:
+        if actor_user_id is not None and user_id == actor_user_id:
             raise ValueError('不能移除当前操作者的 rbac.manage 权限')
         if target_is_active and self._active_management_user_count(session) <= 1:
             raise ValueError('不能移除最后一个可管理权限的活跃账户')
@@ -639,7 +644,7 @@ class RbacRepository:
         role_id: int,
         before_permissions: Sequence[str],
         next_permissions: Sequence[str],
-        actor_user_id: int,
+        actor_user_id: Optional[int],
     ) -> None:
         if 'rbac.manage' not in before_permissions or 'rbac.manage' in next_permissions:
             return
@@ -658,7 +663,7 @@ class RbacRepository:
         ]
         if not losing_user_ids:
             return
-        if actor_user_id in losing_user_ids:
+        if actor_user_id is not None and actor_user_id in losing_user_ids:
             raise ValueError('不能移除当前操作者的 rbac.manage 权限')
         if self._active_management_user_count(session) <= len(losing_user_ids):
             raise ValueError('不能移除最后一个可管理权限的活跃账户')

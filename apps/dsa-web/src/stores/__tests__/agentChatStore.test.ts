@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAgentChatStore } from '../agentChatStore';
 
+const notifyFeatureQuotaChanged = vi.hoisted(() => vi.fn());
+
+vi.mock('../../api', () => ({
+  notifyFeatureQuotaChanged,
+}));
+
 vi.mock('../../api/agent', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/agent')>();
   return {
@@ -298,6 +304,7 @@ describe('agentChatStore.startStream', () => {
 
     const state = useAgentChatStore.getState();
     expect(onAccepted).toHaveBeenCalledTimes(1);
+    expect(notifyFeatureQuotaChanged).toHaveBeenCalledOnce();
     expect(onAccepted).toHaveBeenCalledWith({
       type: 'accepted',
       backend: 'codex_app_server',
@@ -508,6 +515,60 @@ describe('agentChatStore.startStream', () => {
       title: '连接上游服务超时',
       category: 'upstream_timeout',
       rawMessage: 'connect timeout while calling upstream provider',
+    });
+  });
+
+  it.each([
+    ['daily_limit_exceeded', '今日功能额度已用尽'],
+    ['feature_disabled', '该功能已被管理员停用'],
+  ])('handles a pre-accepted %s quota rejection without creating a ghost turn', async (reason, title) => {
+    vi.mocked(agentApi.chatStream).mockResolvedValue(
+      createStreamResponse([
+        `data: ${JSON.stringify({
+          type: 'error',
+          error_code: 'feature_quota_exceeded',
+          reason,
+          status_code: 429,
+          message: '功能请求被拒绝',
+        })}`,
+      ]),
+    );
+
+    await useAgentChatStore.getState().startStream({
+      message: '分析茅台',
+      session_id: 'session-test',
+      request_id: `request-${reason}`,
+    });
+
+    const state = useAgentChatStore.getState();
+    expect(state.messages).toEqual([]);
+    expect(state.sessions).toEqual([]);
+    expect(state.chatError).toMatchObject({
+      category: 'feature_quota_exceeded',
+      title,
+      status: 429,
+    });
+    expect(notifyFeatureQuotaChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes quota consumers when an accepted stream reports feature_quota_exceeded', async () => {
+    vi.mocked(agentApi.chatStream).mockResolvedValue(
+      createStreamResponse([
+        accepted('request-quota-exceeded'),
+        'data: {"type":"error","error_code":"feature_quota_exceeded","reason":"daily_limit_exceeded","status_code":429,"message":"今日额度已用尽"}',
+      ]),
+    );
+
+    await useAgentChatStore.getState().startStream({
+      message: '分析茅台',
+      session_id: 'session-test',
+      request_id: 'request-quota-exceeded',
+    });
+
+    expect(notifyFeatureQuotaChanged).toHaveBeenCalledTimes(2);
+    expect(useAgentChatStore.getState().chatError).toMatchObject({
+      category: 'feature_quota_exceeded',
+      title: '今日功能额度已用尽',
     });
   });
 

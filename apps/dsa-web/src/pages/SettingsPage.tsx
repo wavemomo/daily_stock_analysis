@@ -11,8 +11,6 @@ import { systemConfigApi } from '../api/systemConfig';
 import { ApiErrorAlert, Button, ConfirmDialog, EmptyState } from '../components/common';
 import {
   AgentBackendStatusPanel,
-  AuthSettingsCard,
-  ChangePasswordCard,
   GenerationBackendStatusPanel,
   IntelligentImport,
   LLMChannelEditor,
@@ -424,7 +422,10 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
   const scheduleEnabledItem = getConfigItem(items, 'SCHEDULE_ENABLED');
   const scheduleTimesItem = getConfigItem(items, 'SCHEDULE_TIMES');
   const scheduleTimeItem = getConfigItem(items, 'SCHEDULE_TIME');
-  const hasSchedulerSettings = Boolean(scheduleEnabledItem || scheduleTimesItem || scheduleTimeItem);
+  const scheduleRunImmediatelyItem = getConfigItem(items, 'SCHEDULE_RUN_IMMEDIATELY');
+  const hasSchedulerSettings = Boolean(
+    scheduleEnabledItem || scheduleTimesItem || scheduleTimeItem || scheduleRunImmediatelyItem,
+  );
   const [status, setStatus] = useState<SchedulerStatusResponse | null>(null);
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
   const [isRunningNow, setIsRunningNow] = useState(false);
@@ -482,6 +483,7 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
     ...(issueByKey.SCHEDULE_ENABLED || []),
     ...(issueByKey.SCHEDULE_TIMES || []),
     ...(issueByKey.SCHEDULE_TIME || []),
+    ...(issueByKey.SCHEDULE_RUN_IMMEDIATELY || []),
   ];
 
   const updateScheduleTimes = (nextTimes: string[]) => {
@@ -533,6 +535,26 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
                 <span className="block text-xs leading-6 text-muted-text">{t('settings.schedulerEnableDescription')}</span>
               </span>
             </label>
+
+            {scheduleRunImmediatelyItem ? (
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 rounded border-border text-cyan focus:ring-cyan/20"
+                  checked={isEnabledConfigValue(scheduleRunImmediatelyItem.value)}
+                  data-testid="scheduler-run-on-start-checkbox"
+                  disabled={disabled || !scheduleRunImmediatelyItem.schema?.isEditable}
+                  onChange={(event) => onChange(
+                    'SCHEDULE_RUN_IMMEDIATELY',
+                    event.target.checked ? 'true' : 'false',
+                  )}
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-foreground">{t('settings.schedulerRunOnStart')}</span>
+                  <span className="block text-xs leading-6 text-muted-text">{t('settings.schedulerRunOnStartDescription')}</span>
+                </span>
+              </label>
+            ) : null}
 
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -677,7 +699,7 @@ const SchedulerSettingsCard: React.FC<SchedulerSettingsCardProps> = ({
 };
 
 const SettingsPage: React.FC = () => {
-  const { authEnabled, passwordChangeable } = useAuth();
+  const { hasPermission } = useAuth();
   const location = useLocation();
   const { language: uiLanguage, t } = useUiLanguage();
   const [envBackupActionError, setEnvBackupActionError] = useState<ParsedApiError | null>(null);
@@ -893,10 +915,6 @@ const SettingsPage: React.FC = () => {
     'OPENAI_TEMPERATURE',
     'VISION_MODEL',
   ]);
-  const SYSTEM_HIDDEN_KEYS = new Set([
-    'ADMIN_AUTH_ENABLED',
-    ...SCHEDULER_SETTING_KEYS,
-  ]);
   const BASE_HIDDEN_KEYS = new Set([
     'SCREENING_ENABLED',
   ]);
@@ -914,10 +932,10 @@ const SettingsPage: React.FC = () => {
         }
         return true;
       })
-      : activeCategory === 'system'
-        ? rawActiveItems.filter((item) => !SYSTEM_HIDDEN_KEYS.has(item.key))
       : activeCategory === 'agent'
         ? rawActiveItems.filter((item) => !AGENT_HIDDEN_KEYS.has(item.key))
+      : activeCategory === 'system'
+        ? rawActiveItems.filter((item) => !SCHEDULER_SETTING_KEYS.has(item.key))
       : rawActiveItems;
   const promptCacheAdvancedItems = activeCategory === 'ai_model'
     ? activeItems.filter(isPromptCacheAdvancedSetting)
@@ -926,7 +944,7 @@ const SettingsPage: React.FC = () => {
     ? activeItems.filter((item) => !isPromptCacheAdvancedSetting(item))
     : activeItems;
   const hasActiveConfigItems = visibleActiveItems.length > 0 || promptCacheAdvancedItems.length > 0;
-  const isEnvBackupAllowed = isDesktopRuntime || authEnabled;
+  const isEnvBackupAllowed = isDesktopRuntime || hasPermission('system.manage');
   const envBackupActionDisabled = isLoading || isSaving || isExportingEnv || isImportingEnv || !isEnvBackupAllowed;
 
   const downloadEnvBackup = async () => {
@@ -1340,7 +1358,6 @@ const SettingsPage: React.FC = () => {
                 ) : null}
               </SettingsSectionCard>
             ) : null}
-            {activeCategory === 'system' ? <AuthSettingsCard /> : null}
             {activeCategory === 'system' ? (
               <SchedulerSettingsCard
                 items={rawActiveItems}
@@ -1553,9 +1570,6 @@ const SettingsPage: React.FC = () => {
                   disabled={isSaving || isLoading}
                 />
               </SettingsSectionCard>
-            ) : null}
-            {activeCategory === 'system' && passwordChangeable ? (
-              <ChangePasswordCard />
             ) : null}
             {activeCategory === 'notification' ? (
               <SettingsPanelErrorBoundary

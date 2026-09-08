@@ -20,6 +20,7 @@ from src.agent.protocols import AgentContext, StageResult, StageStatus
 from src.agent.runner import run_agent_loop
 from src.agent.stream_events import stream_event
 from src.agent.tools.registry import ToolDefinition, ToolParameter, ToolRegistry
+from src.portfolio_ownership import UNSCOPED_PORTFOLIO_SCOPE
 
 
 def _make_registry() -> ToolRegistry:
@@ -106,6 +107,7 @@ def test_run_agent_loop_emits_paired_stage_and_legacy_progress_events() -> None:
         llm_adapter=adapter,
         max_steps=1,
         progress_callback=events.append,
+        portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
     )
 
     assert result.success is True
@@ -148,6 +150,7 @@ def test_orchestrator_real_agent_path_does_not_emit_nested_agent_loop_stage() ->
         config=SimpleNamespace(agent_orchestrator_timeout_s=0),
     )
     ctx = AgentContext(query="Analyze 600519", stock_code="600519")
+    ctx.meta["portfolio_scope"] = UNSCOPED_PORTFOLIO_SCOPE
     agents = [
         _StreamTestAgent("technical", registry, adapter),
         _StreamTestAgent("decision", registry, adapter),

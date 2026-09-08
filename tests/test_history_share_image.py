@@ -21,9 +21,20 @@ class _FakeHistoryService:
         return self.markdown
 
 
+def _request():
+    """Minimal principal-shaped request so the endpoint can derive its owner."""
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            miniapp_principal=SimpleNamespace(user=SimpleNamespace(id=1)),
+            auth_kind="miniapp",
+        )
+    )
+
+
 def _patch_service(monkeypatch, result, markdown="# 中钨高新 000657 分析报告"):
     service = _FakeHistoryService(result, markdown)
-    monkeypatch.setattr(history_endpoint, "HistoryService", lambda _db: service)
+    # Accept the owner kwarg the endpoint now passes via _history_service_for_request.
+    monkeypatch.setattr(history_endpoint, "HistoryService", lambda _db, **_kwargs: service)
     monkeypatch.setattr(
         history_endpoint,
         "get_config",
@@ -54,7 +65,7 @@ def test_history_share_image_returns_png_with_stock_payload(monkeypatch):
 
     monkeypatch.setattr(history_endpoint, "markdown_to_image", fake_markdown_to_image)
 
-    response = history_endpoint.get_history_share_image("17", db_manager=object())
+    response = history_endpoint.get_history_share_image("17", _request(), db_manager=object())
 
     assert response.status_code == 200
     assert response.media_type == "image/png"
@@ -84,7 +95,7 @@ def test_history_share_image_prefers_market_review_payload(monkeypatch):
 
     monkeypatch.setattr(history_endpoint, "markdown_to_image", fake_markdown_to_image)
 
-    history_endpoint.get_history_share_image("18", db_manager=object())
+    history_endpoint.get_history_share_image("18", _request(), db_manager=object())
 
     assert captured["structured_payload"] is market_payload
 
@@ -113,7 +124,7 @@ def test_history_share_image_html_returns_desktop_poster_with_restrictive_csp(mo
         fake_build_share_image_html,
     )
 
-    response = history_endpoint.get_history_share_image_html("20", db_manager=object())
+    response = history_endpoint.get_history_share_image_html("20", _request(), db_manager=object())
 
     assert response.status_code == 200
     assert response.media_type == "text/html"
@@ -141,7 +152,7 @@ def test_history_share_image_html_rejects_reports_over_configured_limit(monkeypa
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        history_endpoint.get_history_share_image_html("21", db_manager=object())
+        history_endpoint.get_history_share_image_html("21", _request(), db_manager=object())
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail["error"] == "share_image_too_large"
@@ -160,7 +171,7 @@ def test_history_share_image_reports_renderer_unavailable(monkeypatch):
     monkeypatch.setattr(history_endpoint, "markdown_to_image", lambda *_args, **_kwargs: None)
 
     with pytest.raises(HTTPException) as exc_info:
-        history_endpoint.get_history_share_image("19", db_manager=object())
+        history_endpoint.get_history_share_image("19", _request(), db_manager=object())
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["error"] == "share_image_unavailable"
@@ -170,6 +181,6 @@ def test_history_share_image_returns_not_found(monkeypatch):
     _patch_service(monkeypatch, None)
 
     with pytest.raises(HTTPException) as exc_info:
-        history_endpoint.get_history_share_image("missing", db_manager=object())
+        history_endpoint.get_history_share_image("missing", _request(), db_manager=object())
 
     assert exc_info.value.status_code == 404

@@ -17,22 +17,23 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from src.services.task_queue import AnalysisTaskQueue, TaskStatus
 from src.config import Config
-import src.auth as auth
+
 
 @pytest.fixture
 def client():
-    app = create_app()
-    return TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def disable_auth():
-    """Keep analysis integration tests independent from local auth env state."""
-    auth._auth_enabled = None
-    with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
-         patch("src.auth.is_auth_enabled", return_value=False):
-        yield
-    auth._auth_enabled = None
+    principal = MagicMock(
+        user=MagicMock(id=101),
+        roles=("analyst",),
+        permissions=("analysis.read", "analysis.execute"),
+    )
+    with patch(
+        "api.middlewares.auth.WechatMiniappAuthService.authenticate_token",
+        return_value=principal,
+    ):
+        yield TestClient(
+            create_app(),
+            headers={"Authorization": "Bearer analysis-integration-token"},
+        )
 
 @pytest.fixture
 def mock_task_queue():

@@ -42,25 +42,23 @@ class BacktestService:
         self.repo = BacktestRepository(self.db)
         self.stock_repo = StockRepository(self.db)
 
-    def run_backtest(
+    def validate_run_request(
         self,
         *,
         code: Optional[str] = None,
-        force: bool = False,
         eval_window_days: Optional[int] = None,
         min_age_days: Optional[int] = None,
         analysis_date_from: Optional[date] = None,
         analysis_date_to: Optional[date] = None,
         limit: int = 200,
     ) -> Dict[str, Any]:
+        """Validate and normalize a backtest request without reading or writing data."""
         config = get_config()
-
         if analysis_date_from and analysis_date_to and analysis_date_from > analysis_date_to:
             raise ValueError("analysis_date_from cannot be after analysis_date_to")
 
         query_code = self._normalize_code(code)
         diagnostic_code = self._normalize_code_for_display(code)
-
         if eval_window_days is None:
             eval_window_days = getattr(config, "backtest_eval_window_days", 10)
         if (
@@ -72,16 +70,48 @@ class BacktestService:
         if min_age_days is None:
             min_age_days = getattr(config, "backtest_min_age_days", 14)
 
-        engine_version = getattr(config, "backtest_engine_version", "v1")
-        neutral_band_pct = float(getattr(config, "backtest_neutral_band_pct", 2.0))
+        return {
+            "query_code": query_code,
+            "diagnostic_code": diagnostic_code,
+            "eval_window_days": int(eval_window_days),
+            "min_age_days": int(min_age_days),
+            "engine_version": str(getattr(config, "backtest_engine_version", "v1")),
+            "neutral_band_pct": float(getattr(config, "backtest_neutral_band_pct", 2.0)),
+            "limit": int(limit),
+        }
+
+    def run_backtest(
+        self,
+        *,
+        code: Optional[str] = None,
+        force: bool = False,
+        eval_window_days: Optional[int] = None,
+        min_age_days: Optional[int] = None,
+        analysis_date_from: Optional[date] = None,
+        analysis_date_to: Optional[date] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        prepared = self.validate_run_request(
+            code=code,
+            eval_window_days=eval_window_days,
+            min_age_days=min_age_days,
+            analysis_date_from=analysis_date_from,
+            analysis_date_to=analysis_date_to,
+            limit=limit,
+        )
+        query_code = prepared["query_code"]
+        diagnostic_code = prepared["diagnostic_code"]
+        eval_window_days = prepared["eval_window_days"]
+        min_age_days = prepared["min_age_days"]
+        engine_version = prepared["engine_version"]
+        neutral_band_pct = prepared["neutral_band_pct"]
+        limit_int = prepared["limit"]
 
         eval_config = EvaluationConfig(
-            eval_window_days=int(eval_window_days),
+            eval_window_days=eval_window_days,
             neutral_band_pct=neutral_band_pct,
-            engine_version=str(engine_version),
+            engine_version=engine_version,
         )
-
-        limit_int = int(limit)
         candidates = self._get_run_candidates(
             code=query_code,
             min_age_days=int(min_age_days),

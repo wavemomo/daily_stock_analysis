@@ -66,6 +66,7 @@ from src.agent.runner import parse_dashboard_json
 from src.agent.stock_scope import resolve_stock_scope
 from src.agent.stream_events import stream_event
 from src.agent.tools.registry import ToolRegistry
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.config import AGENT_MAX_STEPS_DEFAULT, get_config
 from src.report_language import normalize_report_language
 
@@ -349,7 +350,13 @@ class AgentOrchestrator:
     # Public interface (mirrors AgentExecutor)
     # -----------------------------------------------------------------
 
-    def run(self, task: str, context: Optional[Dict[str, Any]] = None) -> "AgentResult":
+    def run(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
+    ) -> "AgentResult":
         """Run the multi-agent pipeline for a dashboard analysis.
 
         Returns an ``AgentResult`` (same type as ``AgentExecutor.run``).
@@ -358,6 +365,8 @@ class AgentOrchestrator:
 
         ctx = self._build_context(task, context)
         ctx.meta["response_mode"] = "dashboard"
+        ctx.meta["resource_owner_id"] = resource_owner_id
+        ctx.meta["portfolio_scope"] = portfolio_scope
         orch_result = self._execute_pipeline(ctx, parse_dashboard=True)
 
         return AgentResult(
@@ -380,6 +389,8 @@ class AgentOrchestrator:
         progress_callback: Optional[Callable] = None,
         context: Optional[Dict[str, Any]] = None,
         selected_skill_ids: Optional[List[str]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> "AgentResult":
         """Run the pipeline in chat mode (free-form answer, no dashboard parse).
 
@@ -392,6 +403,8 @@ class AgentOrchestrator:
             session_id=session_id,
             context=context,
             selected_skill_ids=selected_skill_ids,
+            resource_owner_id=resource_owner_id,
+            portfolio_scope=portfolio_scope,
         )
         return self.execute_turn(
             turn,
@@ -405,6 +418,8 @@ class AgentOrchestrator:
         session_id: str,
         context: Optional[Dict[str, Any]] = None,
         selected_skill_ids: Optional[List[str]] = None,
+        resource_owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> PreparedOrchestratorChatTurn:
         """Prepare context and persist the user turn before SSE acceptance."""
         from src.agent.conversation import conversation_manager
@@ -413,6 +428,8 @@ class AgentOrchestrator:
         ctx = self._build_context(message, scope_resolution.effective_context)
         ctx.session_id = session_id
         ctx.meta["response_mode"] = "chat"
+        ctx.meta["resource_owner_id"] = resource_owner_id
+        ctx.meta["portfolio_scope"] = portfolio_scope
         if scope_resolution.stock_scope is not None:
             ctx.meta["stock_scope"] = scope_resolution.stock_scope
 

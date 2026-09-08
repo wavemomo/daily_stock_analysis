@@ -57,6 +57,7 @@ from sqlalchemy.orm import (
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.agent.provider_trace import PROVIDER_TRACE_RETENTION_LIMIT
+from src.analysis_ownership import AnalysisOwner
 from src.config import get_config
 from src.schemas.decision_profile import extract_legacy_decision_profile
 from src.utils.sniper_points import extract_sniper_points, parse_sniper_value
@@ -285,16 +286,21 @@ class IntelligenceItem(Base):
 
 
 class FundamentalSnapshot(Base):
-    """
-    基本面上下文快照（P0 write-only）。
-
-    仅用于写入，主链路不依赖读取该表，便于后续回测/画像扩展。
-    """
+    """Owner-scoped persisted fundamental context used by history detail fallbacks."""
     __tablename__ = 'fundamental_snapshot'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     query_id = Column(String(64), nullable=False, index=True)
     code = Column(String(10), nullable=False, index=True)
+    # 与 AnalysisHistory 采用同一 owner 语义：用户行必须精确匹配可信
+    # 用户 ID；global 可读取旧版 NULL/legacy 行。
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     payload = Column(Text, nullable=False)
     source_chain = Column(Text)
     coverage = Column(Text)
@@ -302,6 +308,10 @@ class FundamentalSnapshot(Base):
 
     __table_args__ = (
         Index('ix_fundamental_snapshot_query_code', 'query_id', 'code'),
+        Index(
+            'ix_fundamental_snapshot_owner_query_code_time',
+            'owner_user_id', 'owner_scope', 'query_id', 'code', 'created_at',
+        ),
         Index('ix_fundamental_snapshot_created', 'created_at'),
     )
 
@@ -319,6 +329,13 @@ class ScreeningRun(Base):
     strategy = Column(String(64), nullable=False, index=True)
     market = Column(String(16), nullable=False, index=True)
     snapshot_source = Column(String(64), index=True)
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     snapshot_count = Column(Integer)
     after_filter_count = Column(Integer)
     candidate_count = Column(Integer, nullable=False, default=0)
@@ -332,6 +349,7 @@ class ScreeningRun(Base):
     __table_args__ = (
         Index('ix_screening_run_strategy_created', 'strategy', 'created_at'),
         Index('ix_screening_run_market_created', 'market', 'created_at'),
+        Index('ix_screening_run_owner_time', 'owner_user_id', 'owner_scope', 'created_at'),
     )
 
 
@@ -347,6 +365,16 @@ class AnalysisHistory(Base):
 
     # 关联查询链路
     query_id = Column(String(64), index=True)
+
+    # 资源归属。小程序记录必须同时携带 user 范围和可信用户主键；
+    # Web 管理端与后台任务显式写为 global。既有行保留 NULL，视为 legacy。
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
 
     # 股票信息
     code = Column(String(10), nullable=False, index=True)
@@ -374,6 +402,7 @@ class AnalysisHistory(Base):
 
     __table_args__ = (
         Index('ix_analysis_code_time', 'code', 'created_at'),
+        Index('ix_analysis_history_owner_time', 'owner_user_id', 'created_at'),
     )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -931,13 +960,14 @@ _LLM_PROMPT_CACHE_TELEMETRY_COLUMNS = {
 }
 
 
-class MiniappUserRecord(Base):
-    """微信小程序用户；openid 只在服务端用于唯一识别。"""
+class UserRecord(Base):
+    """统一应用用户；外部身份由 ``auth_identities`` 作为安全真源。"""
 
-    __tablename__ = 'miniapp_users'
+    __tablename__ = 'users'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    openid = Column(String(128), nullable=False, unique=True, index=True)
+    # 保留历史展示列，避免破坏已有小程序数据和只读查询；新身份解析不得依赖这些列。
+    openid = Column(String(128), nullable=True, unique=True, index=True)
     unionid = Column(String(128), nullable=True, unique=True, index=True)
     nickname = Column(String(64), nullable=True)
     avatar_url = Column(String(2048), nullable=True)
@@ -948,13 +978,223 @@ class MiniappUserRecord(Base):
     last_login_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
 
 
+# Backwards-compatible import name for existing repositories.  New code must
+# use UserRecord and resolve external identities through AuthIdentityRecord.
+MiniappUserRecord = UserRecord
+
+
+class AuthIdentityRecord(Base):
+    """受信任的外部身份到统一用户的不可歧义映射。"""
+
+    __tablename__ = 'auth_identities'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    provider = Column(String(64), nullable=False)
+    issuer = Column(String(255), nullable=False)
+    subject = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    last_authenticated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint('provider', 'issuer', 'subject', name='uix_auth_identity_provider_issuer_subject'),
+        Index('ix_auth_identity_user_provider', 'user_id', 'provider'),
+    )
+
+
+class WebWechatLoginTransactionRecord(Base):
+    """网站扫码 OAuth 的服务端 state 与浏览器绑定记录。"""
+
+    __tablename__ = 'web_wechat_login_transactions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    state_hash = Column(String(64), nullable=False, unique=True, index=True)
+    browser_binding_hash = Column(String(64), nullable=False)
+    redirect_uri = Column(String(2048), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    consumed_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_web_wechat_login_transaction_binding', 'state_hash', 'browser_binding_hash'),
+    )
+
+
+class IdentityBindTransactionRecord(Base):
+    """由一个已认证端显式批准的跨端身份绑定挑战。"""
+
+    __tablename__ = 'identity_bind_transactions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    challenge_hash = Column(String(64), nullable=False, unique=True, index=True)
+    requested_user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    approved_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    approved_at = Column(DateTime, nullable=True, index=True)
+    consumed_at = Column(DateTime, nullable=True, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_identity_bind_transaction_pending', 'expires_at', 'approved_at', 'consumed_at'),
+    )
+
+
+class FeatureQuotaPolicyRecord(Base):
+    """每项受控高成本功能的普通用户每日额度策略。"""
+
+    __tablename__ = 'feature_quota_policies'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    feature_code = Column(String(96), nullable=False, unique=True, index=True)
+    daily_limit = Column(Integer, nullable=False)
+    updated_by_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint('daily_limit >= 0', name='ck_feature_quota_policy_daily_limit_nonnegative'),
+    )
+
+
+class FeatureQuotaPlanRecord(Base):
+    """可分配给小程序用户的功能额度套餐。"""
+
+    __tablename__ = 'feature_quota_plans'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(96), nullable=False)
+    description = Column(String(255), nullable=False, default='')
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+
+class FeatureQuotaPlanLimitRecord(Base):
+    """套餐对单项功能的每日额度；缺失时回退到全局策略。"""
+
+    __tablename__ = 'feature_quota_plan_limits'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id = Column(Integer, ForeignKey('feature_quota_plans.id', ondelete='CASCADE'), nullable=False, index=True)
+    feature_code = Column(String(96), nullable=False, index=True)
+    daily_limit = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('plan_id', 'feature_code', name='uix_feature_quota_plan_limit'),
+        CheckConstraint('daily_limit >= 0', name='ck_feature_quota_plan_limit_nonnegative'),
+    )
+
+
+class FeatureQuotaUserPlanAssignmentRecord(Base):
+    """用户套餐分配历史；仅未撤销且处于有效期内的最新记录生效。"""
+
+    __tablename__ = 'feature_quota_user_plan_assignments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    plan_id = Column(Integer, ForeignKey('feature_quota_plans.id', ondelete='RESTRICT'), nullable=False, index=True)
+    effective_from = Column(Date, nullable=False, index=True)
+    effective_until = Column(Date, nullable=True, index=True)
+    assigned_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            'effective_until IS NULL OR effective_until >= effective_from',
+            name='ck_feature_quota_plan_assignment_window',
+        ),
+        Index('ix_feature_quota_plan_assignment_user_active', 'user_id', 'revoked_at', 'effective_from'),
+    )
+
+
+class FeatureQuotaUserOverrideRecord(Base):
+    """按用户和功能覆盖默认/套餐额度的可审计规则。"""
+
+    __tablename__ = 'feature_quota_user_overrides'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    feature_code = Column(String(96), nullable=False, index=True)
+    daily_limit = Column(Integer, nullable=False)
+    effective_from = Column(Date, nullable=False, index=True)
+    effective_until = Column(Date, nullable=True, index=True)
+    reason = Column(String(255), nullable=False, default='')
+    assigned_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint('daily_limit >= 0', name='ck_feature_quota_user_override_nonnegative'),
+        CheckConstraint(
+            'effective_until IS NULL OR effective_until >= effective_from',
+            name='ck_feature_quota_user_override_window',
+        ),
+        Index('ix_feature_quota_user_override_active', 'user_id', 'feature_code', 'revoked_at', 'effective_from'),
+    )
+
+
+class FeatureQuotaWhitelistRecord(Base):
+    """可按全部或单项功能授予无限额的白名单规则。"""
+
+    __tablename__ = 'feature_quota_whitelist_entries'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    feature_code = Column(String(96), nullable=True, index=True)
+    effective_from = Column(Date, nullable=False, index=True)
+    effective_until = Column(Date, nullable=True, index=True)
+    reason = Column(String(255), nullable=False, default='')
+    granted_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            'effective_until IS NULL OR effective_until >= effective_from',
+            name='ck_feature_quota_whitelist_window',
+        ),
+        Index('ix_feature_quota_whitelist_active', 'user_id', 'feature_code', 'revoked_at', 'effective_from'),
+    )
+
+
+class FeatureQuotaUsageRecord(Base):
+    """按用户、功能和自然日累加的不可为负额度账本。"""
+
+    __tablename__ = 'feature_quota_usages'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    feature_code = Column(String(96), nullable=False, index=True)
+    period_start = Column(Date, nullable=False, index=True)
+    used_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'feature_code', 'period_start', name='uix_feature_quota_usage_daily'),
+        CheckConstraint('used_count >= 0', name='ck_feature_quota_usage_nonnegative'),
+        Index('ix_feature_quota_usage_user_period', 'user_id', 'period_start'),
+    )
+
+
 class MiniappSessionRecord(Base):
     """小程序本地会话；仅保存随机 Bearer token 的 SHA-256 摘要。"""
 
     __tablename__ = 'miniapp_sessions'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     token_hash = Column(String(64), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
@@ -962,6 +1202,23 @@ class MiniappSessionRecord(Base):
 
     __table_args__ = (
         Index('ix_miniapp_session_user_expiry', 'user_id', 'expires_at'),
+    )
+
+
+class WebUserSessionRecord(Base):
+    """普通 Web 用户会话；与小程序 Bearer、管理员 Cookie 完全独立。"""
+
+    __tablename__ = 'web_user_sessions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_web_user_session_user_expiry', 'user_id', 'expires_at'),
     )
 
 
@@ -1012,9 +1269,9 @@ class MiniappUserRoleRecord(Base):
     __tablename__ = 'miniapp_user_roles'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     role_id = Column(Integer, ForeignKey('rbac_roles.id', ondelete='CASCADE'), nullable=False, index=True)
-    assigned_by_user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='SET NULL'), nullable=True)
+    assigned_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     created_at = Column(DateTime, default=utc_naive_now, nullable=False)
 
     __table_args__ = (
@@ -1033,7 +1290,7 @@ class RbacAuditEventRecord(Base):
     target_id = Column(String(128), nullable=False, index=True)
     actor_user_id = Column(
         Integer,
-        ForeignKey('miniapp_users.id', ondelete='SET NULL'),
+        ForeignKey('users.id', ondelete='SET NULL'),
         nullable=True,
         index=True,
     )
@@ -1051,7 +1308,7 @@ class DailyReflectionRecord(Base):
     __tablename__ = 'daily_reflections'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     reflection_date = Column(Date, nullable=False, index=True)
     title = Column(String(80), nullable=False, default='')
     content = Column(Text, nullable=False)
@@ -1064,6 +1321,27 @@ class DailyReflectionRecord(Base):
     )
 
 
+class MiniappWatchlistRecord(Base):
+    """按用户维度的个人自选股；与全局 STOCK_LIST 部署配置相互独立。"""
+
+    __tablename__ = 'miniapp_watchlist'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    # stock_code 保存用户录入/规范化后的展示用代码；match_key 是去重与增删匹配用的等价键
+    # （与 stocks 全局自选的 _watchlist_match_key 保持一致，例如 HK 5 位裸码归一到 HKxxxxx）。
+    stock_code = Column(String(32), nullable=False)
+    match_key = Column(String(32), nullable=False)
+    stock_name = Column(String(64), nullable=False, default='')
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'match_key', name='uix_miniapp_watchlist_user_key'),
+        Index('ix_miniapp_watchlist_user_created', 'user_id', 'created_at'),
+    )
+
+
 class AlertRuleRecord(Base):
     """Persisted alert rule managed through the Alert API."""
 
@@ -1073,7 +1351,7 @@ class AlertRuleRecord(Base):
     # user_id identifies a miniapp owner. owner_scope distinguishes explicit
     # administrator-global rules from pre-migration NULL rows, which must never
     # silently expand across every tenant in the background worker.
-    user_id = Column(Integer, ForeignKey('miniapp_users.id', ondelete='CASCADE'), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=True, index=True)
     owner_scope = Column(String(16), nullable=True)
     name = Column(String(64), nullable=False)
     target_scope = Column(String(32), nullable=False, default='single_symbol', index=True)
@@ -1515,10 +1793,20 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 autoflush=False,
             )
 
+            # Migrate the legacy parent table before metadata creates a new empty
+            # ``users`` table.  Relying on create_all first would strand every
+            # existing foreign key on miniapp_users.
+            self._migrate_legacy_users_table()
+
             # 创建所有表
             Base.metadata.create_all(self._engine)
+            self._ensure_users_accept_web_identities()
+            self._backfill_legacy_user_identities()
             self._ensure_miniapp_user_profile_columns()
             self._ensure_miniapp_resource_owner_columns()
+            self._ensure_analysis_history_owner_columns()
+            self._ensure_fundamental_snapshot_owner_columns()
+            self._ensure_screening_run_owner_columns()
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
             self._ensure_stock_daily_canonical_id()
@@ -1542,6 +1830,144 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._SessionLocal = None
             self.__class__._instance = None
             raise
+
+    def _migrate_legacy_users_table(self) -> None:
+        """Rename the only supported legacy user table before metadata creation.
+
+        User IDs intentionally stay stable, so existing owner columns, RBAC
+        assignments and sessions keep referring to the same logical account.
+        An automatic merge when both tables exist would make ownership and
+        identities ambiguous, therefore it is intentionally fail-closed.
+        """
+        inspector = inspect(self._engine)
+        legacy_exists = inspector.has_table('miniapp_users')
+        users_exists = inspector.has_table(UserRecord.__tablename__)
+        if not legacy_exists:
+            return
+        if users_exists:
+            with self._engine.connect() as connection:
+                legacy_count = int(
+                    connection.execute(text('SELECT COUNT(*) FROM miniapp_users')).scalar_one()
+                )
+            if legacy_count:
+                raise RuntimeError(
+                    '检测到 miniapp_users 与 users 同时存在且旧表包含数据；'
+                    '拒绝自动合并身份数据，请先执行受控迁移。'
+                )
+            raise RuntimeError(
+                '检测到 miniapp_users 与 users 同时存在；拒绝猜测外键归属或删除旧表。'
+            )
+
+        with self._engine.begin() as connection:
+            connection.execute(text('ALTER TABLE miniapp_users RENAME TO users'))
+        if not inspect(self._engine).has_table(UserRecord.__tablename__):
+            raise RuntimeError('miniapp_users 迁移到 users 失败')
+        if self._is_sqlite_engine:
+            with self._engine.connect() as connection:
+                violations = connection.exec_driver_sql('PRAGMA foreign_key_check').fetchall()
+            if violations:
+                raise RuntimeError('miniapp_users 迁移后检测到外键完整性错误')
+
+    def _ensure_users_accept_web_identities(self) -> None:
+        """Make the retired OpenID cache nullable for Web-only user records."""
+        inspector = inspect(self._engine)
+        table_name = UserRecord.__tablename__
+        if not inspector.has_table(table_name):
+            return
+        columns = {column['name']: column for column in inspector.get_columns(table_name)}
+        openid = columns.get('openid')
+        if openid is None:
+            raise RuntimeError('users 表缺少历史 openid 列，拒绝继续启动')
+        if bool(openid.get('nullable')):
+            return
+        if not self._is_sqlite_engine:
+            with self._engine.begin() as connection:
+                connection.execute(text('ALTER TABLE users ALTER COLUMN openid DROP NOT NULL'))
+            return
+
+        # SQLite cannot drop NOT NULL in place.  Child foreign keys keep their
+        # stable integer IDs and point back to the replacement users table.
+        with self._engine.connect().execution_options(isolation_level='AUTOCOMMIT') as connection:
+            connection.exec_driver_sql('PRAGMA foreign_keys=OFF')
+            try:
+                connection.exec_driver_sql(
+                    'CREATE TABLE users__identity_migration ('
+                    'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+                    'openid VARCHAR(128) UNIQUE, '
+                    'unionid VARCHAR(128) UNIQUE, '
+                    'nickname VARCHAR(64), '
+                    'avatar_url VARCHAR(2048), '
+                    'profile_updated_at DATETIME, '
+                    'is_active BOOLEAN NOT NULL DEFAULT 1, '
+                    'created_at DATETIME NOT NULL, '
+                    'updated_at DATETIME NOT NULL, '
+                    'last_login_at DATETIME NOT NULL'
+                    ')'
+                )
+                connection.exec_driver_sql(
+                    'INSERT INTO users__identity_migration ('
+                    'id, openid, unionid, nickname, avatar_url, profile_updated_at, '
+                    'is_active, created_at, updated_at, last_login_at'
+                    ') SELECT id, openid, unionid, nickname, avatar_url, profile_updated_at, '
+                    'is_active, created_at, updated_at, last_login_at FROM users'
+                )
+                connection.exec_driver_sql('DROP TABLE users')
+                connection.exec_driver_sql('ALTER TABLE users__identity_migration RENAME TO users')
+                connection.exec_driver_sql('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_openid ON users (openid)')
+                connection.exec_driver_sql('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_unionid ON users (unionid)')
+                connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_users_is_active ON users (is_active)')
+                connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at)')
+                connection.exec_driver_sql('CREATE INDEX IF NOT EXISTS ix_users_last_login_at ON users (last_login_at)')
+            finally:
+                connection.exec_driver_sql('PRAGMA foreign_keys=ON')
+            violations = connection.exec_driver_sql('PRAGMA foreign_key_check').fetchall()
+        if violations:
+            raise RuntimeError('users 表兼容迁移后检测到外键完整性错误')
+
+    def _backfill_legacy_user_identities(self) -> None:
+        """Backfill only identities whose issuer can be proven from configuration."""
+        issuer = (get_config().wechat_miniapp_app_id or '').strip()
+        if not issuer:
+            logger.warning('未配置 WECHAT_MINIAPP_APP_ID，跳过 miniapp_users 身份回填')
+            return
+        now = utc_naive_now()
+        session = self._SessionLocal()
+        try:
+            users = list(session.execute(
+                select(UserRecord).where(UserRecord.openid.is_not(None))
+            ).scalars())
+            for user in users:
+                identities = [('wechat_miniapp', issuer, user.openid)]
+                if user.unionid:
+                    identities.append(('wechat_unionid', 'wechat', user.unionid))
+                for provider, identity_issuer, subject in identities:
+                    existing = session.execute(
+                        select(AuthIdentityRecord).where(
+                            AuthIdentityRecord.provider == provider,
+                            AuthIdentityRecord.issuer == identity_issuer,
+                            AuthIdentityRecord.subject == subject,
+                        ).limit(1)
+                    ).scalar_one_or_none()
+                    if existing is not None and existing.user_id != user.id:
+                        raise RuntimeError(
+                            '历史用户身份回填发现同一可信身份属于多个 users 记录；拒绝自动合并。'
+                        )
+                    if existing is None:
+                        session.add(AuthIdentityRecord(
+                            user_id=user.id,
+                            provider=provider,
+                            issuer=identity_issuer,
+                            subject=subject,
+                            created_at=now,
+                            updated_at=now,
+                            last_authenticated_at=now,
+                        ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def _ensure_schema_migration_record(self) -> None:
         session = self._SessionLocal()
@@ -1669,6 +2095,162 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         ):
             raise RuntimeError(
                 "miniapp resource owner migration verification failed: "
+                f"columns={sorted(verified_columns)} "
+                f"index={verified_indexes.get(index_name)}"
+            )
+
+    def _ensure_analysis_history_owner_columns(self) -> None:
+        """Add owner columns to existing SQLite analysis history without backfilling.
+
+        Existing records remain NULL/legacy and are intentionally not exposed to
+        miniapp users. New API writes explicitly set ``user`` or ``global``.
+        """
+        if not self._is_sqlite_engine:
+            return
+        table_name = AnalysisHistory.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        expected = {
+            "owner_user_id": "INTEGER",
+            "owner_scope": "VARCHAR(16)",
+        }
+        for column_name, column_type in expected.items():
+            if column_name in columns:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+        index_name = "ix_analysis_history_owner_time"
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} (owner_user_id, created_at)"
+            )
+        verified = inspect(self._engine)
+        verified_columns = {column["name"] for column in verified.get_columns(table_name)}
+        verified_indexes = {
+            index["name"]: index["column_names"]
+            for index in verified.get_indexes(table_name)
+        }
+        if (
+            not set(expected).issubset(verified_columns)
+            or verified_indexes.get(index_name) != ["owner_user_id", "created_at"]
+        ):
+            raise RuntimeError(
+                "analysis history owner migration verification failed: "
+                f"columns={sorted(verified_columns)} "
+                f"index={verified_indexes.get(index_name)}"
+            )
+
+    def _ensure_fundamental_snapshot_owner_columns(self) -> None:
+        """Add and verify owner columns for existing SQLite fundamental snapshots."""
+        if not self._is_sqlite_engine:
+            return
+        table_name = FundamentalSnapshot.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        expected = {
+            "owner_user_id": "INTEGER",
+            "owner_scope": "VARCHAR(16)",
+        }
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, column_type in expected.items():
+            if column_name in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+
+        index_name = "ix_fundamental_snapshot_owner_query_code_time"
+        index_columns = [
+            "owner_user_id", "owner_scope", "query_id", "code", "created_at",
+        ]
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} ({', '.join(index_columns)})"
+            )
+
+        verified = inspect(self._engine)
+        verified_columns = {column["name"] for column in verified.get_columns(table_name)}
+        verified_indexes = {
+            index["name"]: index["column_names"]
+            for index in verified.get_indexes(table_name)
+        }
+        if (
+            not set(expected).issubset(verified_columns)
+            or verified_indexes.get(index_name) != index_columns
+        ):
+            raise RuntimeError(
+                "fundamental snapshot owner migration verification failed: "
+                f"columns={sorted(verified_columns)} "
+                f"index={verified_indexes.get(index_name)}"
+            )
+
+    def _ensure_screening_run_owner_columns(self) -> None:
+        """Add and verify strict owner columns for existing SQLite screening runs.
+
+        Legacy rows deliberately retain NULL ownership and stay invisible to all
+        owner-scoped reads; no startup migration may infer a user or global owner.
+        """
+        if not self._is_sqlite_engine:
+            return
+        table_name = ScreeningRun.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        expected = {
+            "owner_user_id": "INTEGER",
+            "owner_scope": "VARCHAR(16)",
+        }
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, column_type in expected.items():
+            if column_name in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+
+        index_name = "ix_screening_run_owner_time"
+        index_columns = ["owner_user_id", "owner_scope", "created_at"]
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} ({', '.join(index_columns)})"
+            )
+
+        verified = inspect(self._engine)
+        verified_columns = {column["name"] for column in verified.get_columns(table_name)}
+        verified_indexes = {
+            index["name"]: index["column_names"]
+            for index in verified.get_indexes(table_name)
+        }
+        if (
+            not set(expected).issubset(verified_columns)
+            or verified_indexes.get(index_name) != index_columns
+        ):
+            raise RuntimeError(
+                "screening run owner migration verification failed: "
                 f"columns={sorted(verified_columns)} "
                 f"index={verified_indexes.get(index_name)}"
             )
@@ -2431,6 +3013,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
             cursor = dbapi_connection.cursor()
             try:
+                cursor.execute('PRAGMA foreign_keys=ON')
                 cursor.execute(f"PRAGMA busy_timeout={int(self._sqlite_busy_timeout_ms)}")
                 if self._sqlite_file_db and self._sqlite_wal_enabled:
                     cursor.execute("PRAGMA journal_mode=WAL")
@@ -2738,6 +3321,32 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
         return saved_count
 
+    @staticmethod
+    def _fundamental_snapshot_owner_conditions(
+        owner_scope: Optional[str],
+        owner_user_id: Optional[int],
+    ) -> List[Any]:
+        """Return snapshot predicates with the same owner policy as history."""
+        if owner_scope is None:
+            return []
+        try:
+            owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+        except ValueError:
+            return [FundamentalSnapshot.id.is_(None)]
+        if owner is None:
+            return []
+        if owner.scope == "user":
+            return [
+                FundamentalSnapshot.owner_scope == "user",
+                FundamentalSnapshot.owner_user_id == owner.user_id,
+            ]
+        return [
+            or_(
+                FundamentalSnapshot.owner_scope == "global",
+                FundamentalSnapshot.owner_scope.is_(None),
+            )
+        ]
+
     def save_fundamental_snapshot(
         self,
         query_id: str,
@@ -2745,12 +3354,15 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         payload: Optional[Dict[str, Any]],
         source_chain: Optional[Any] = None,
         coverage: Optional[Any] = None,
+        *,
+        owner_scope: str = "global",
+        owner_user_id: Optional[int] = None,
     ) -> int:
-        """
-        保存基本面快照（P0 write-only）。失败不抛异常，返回写入条数 0/1。
-        """
+        """Persist a fundamental snapshot under an explicit trusted owner."""
         if not query_id or not code or payload is None:
             return 0
+        owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+        assert owner is not None
 
         try:
             def _write(session: Session) -> int:
@@ -2761,6 +3373,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         payload=self._safe_json_dumps(payload),
                         source_chain=self._safe_json_dumps(source_chain or []),
                         coverage=self._safe_json_dumps(coverage or {}),
+                        **owner.storage_kwargs,
                     )
                 )
                 return 1
@@ -2781,26 +3394,34 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         self,
         query_id: str,
         code: str,
+        *,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """
-        获取指定 query_id + code 的最新基本面快照 payload。
+        """Return the latest snapshot visible to the supplied owner context.
 
-        读取失败或不存在时返回 None（fail-open）。
+        ``owner_scope=None`` is retained only for direct internal compatibility
+        calls. Authenticated API paths must pass a trusted owner context.
         """
         if not query_id or not code:
             return None
 
         with self.get_session() as session:
             try:
+                conditions = [
+                    FundamentalSnapshot.query_id == query_id,
+                    FundamentalSnapshot.code == code,
+                ]
+                conditions.extend(
+                    self._fundamental_snapshot_owner_conditions(
+                        owner_scope,
+                        owner_user_id,
+                    )
+                )
                 row = session.execute(
                     select(FundamentalSnapshot)
-                    .where(
-                        and_(
-                            FundamentalSnapshot.query_id == query_id,
-                            FundamentalSnapshot.code == code,
-                        )
-                    )
-                    .order_by(desc(FundamentalSnapshot.created_at))
+                    .where(and_(*conditions))
+                    .order_by(desc(FundamentalSnapshot.created_at), desc(FundamentalSnapshot.id))
                     .limit(1)
                 ).scalar_one_or_none()
             except Exception as e:
@@ -2820,8 +3441,37 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             except Exception:
                 return None
 
-    def save_screening_run(self, payload: Dict[str, Any]) -> int:
-        """Persist one completed screening response without blocking screening on DB errors."""
+    @staticmethod
+    def _require_screening_run_owner(owner: AnalysisOwner) -> AnalysisOwner:
+        """Validate the trusted owner required for screening-run persistence."""
+        if not isinstance(owner, AnalysisOwner):
+            raise TypeError("owner must be an AnalysisOwner")
+        return owner
+
+    @classmethod
+    def _screening_run_owner_conditions(cls, owner: AnalysisOwner) -> List[Any]:
+        """Return strict predicates; legacy NULL rows are never owner-visible."""
+        effective_owner = cls._require_screening_run_owner(owner)
+        if effective_owner.scope == "user":
+            return [
+                ScreeningRun.owner_scope == "user",
+                ScreeningRun.owner_user_id == effective_owner.user_id,
+            ]
+        return [ScreeningRun.owner_scope == "global"]
+
+    def save_screening_run(
+        self,
+        payload: Dict[str, Any],
+        *,
+        owner: AnalysisOwner,
+    ) -> int:
+        """Persist a completed screening response under one explicit owner.
+
+        ``run_id`` remains globally unique in the existing SQLite schema. A
+        collision owned by another scope is rejected rather than updating or
+        exposing that row.
+        """
+        effective_owner = self._require_screening_run_owner(owner)
         run_id = str(payload.get("run_id") or "").strip()
         if not run_id:
             return 0
@@ -2841,24 +3491,38 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             "source_errors_json": self._safe_json_dumps(normalized_payload.get("source_errors") or []),
             "warnings_json": self._safe_json_dumps(warnings),
             "result_json": self._safe_json_dumps(normalized_payload),
+            **effective_owner.storage_kwargs,
         }
 
         try:
             def _write(session: Session) -> int:
-                row = session.execute(
+                existing = session.execute(
                     select(ScreeningRun).where(ScreeningRun.run_id == run_id)
                 ).scalar_one_or_none()
-                if row is None:
+                if existing is None:
                     session.add(ScreeningRun(run_id=run_id, **values))
-                else:
-                    for key, value in values.items():
-                        setattr(row, key, value)
+                    return 1
+
+                owned = session.execute(
+                    select(ScreeningRun).where(
+                        and_(
+                            ScreeningRun.run_id == run_id,
+                            *self._screening_run_owner_conditions(effective_owner),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if owned is None:
+                    raise ValueError("screening run_id belongs to a different owner")
+                for key, value in values.items():
+                    setattr(owned, key, value)
                 return 1
 
             return self._run_write_transaction(
                 f"save_screening_run[{run_id}]",
                 _write,
             )
+        except ValueError:
+            raise
         except Exception as exc:
             logger.warning(
                 "选股运行历史写入失败（fail-open）: run_id=%s err=%s",
@@ -2870,34 +3534,50 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
     def list_screening_runs(
         self,
         *,
+        owner: AnalysisOwner,
         limit: int = 20,
         strategy: Optional[str] = None,
         market: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List recent screening runs as compact summaries."""
+        """List compact summaries belonging only to the required owner."""
+        effective_owner = self._require_screening_run_owner(owner)
         normalized_limit = max(0, min(int(limit), 100))
         if normalized_limit <= 0:
             return []
 
         with self.get_session() as session:
-            statement = select(ScreeningRun)
+            conditions = self._screening_run_owner_conditions(effective_owner)
             if strategy:
-                statement = statement.where(ScreeningRun.strategy == str(strategy).strip())
+                conditions.append(ScreeningRun.strategy == str(strategy).strip())
             if market:
-                statement = statement.where(ScreeningRun.market == str(market).strip())
+                conditions.append(ScreeningRun.market == str(market).strip())
             rows = session.execute(
-                statement.order_by(desc(ScreeningRun.created_at), desc(ScreeningRun.id)).limit(normalized_limit)
+                select(ScreeningRun)
+                .where(and_(*conditions))
+                .order_by(desc(ScreeningRun.created_at), desc(ScreeningRun.id))
+                .limit(normalized_limit)
             ).scalars().all()
             return [self._screening_run_to_dict(row, include_result=False) for row in rows]
 
-    def get_screening_run(self, run_id: str) -> Optional[Dict[str, Any]]:
-        """Load a completed screening run by its stable run id."""
+    def get_screening_run(
+        self,
+        run_id: str,
+        *,
+        owner: AnalysisOwner,
+    ) -> Optional[Dict[str, Any]]:
+        """Load a completed screening run only when it belongs to the owner."""
+        effective_owner = self._require_screening_run_owner(owner)
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             return None
         with self.get_session() as session:
             row = session.execute(
-                select(ScreeningRun).where(ScreeningRun.run_id == normalized_run_id)
+                select(ScreeningRun).where(
+                    and_(
+                        ScreeningRun.run_id == normalized_run_id,
+                        *self._screening_run_owner_conditions(effective_owner),
+                    )
+                )
             ).scalar_one_or_none()
             if row is None:
                 return None
@@ -3035,6 +3715,30 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
             return list(results)
 
+    @staticmethod
+    def _analysis_history_owner_conditions(
+        owner_scope: Optional[str],
+        owner_user_id: Optional[int],
+    ) -> List[Any]:
+        """Return fail-closed ownership predicates for user-facing history reads."""
+        if owner_scope is None:
+            return []
+        if owner_scope == "user":
+            if not isinstance(owner_user_id, int) or isinstance(owner_user_id, bool) or owner_user_id <= 0:
+                return [AnalysisHistory.id.is_(None)]
+            return [
+                AnalysisHistory.owner_scope == "user",
+                AnalysisHistory.owner_user_id == owner_user_id,
+            ]
+        if owner_scope == "global":
+            return [
+                or_(
+                    AnalysisHistory.owner_scope == "global",
+                    AnalysisHistory.owner_scope.is_(None),
+                )
+            ]
+        return [AnalysisHistory.id.is_(None)]
+
     def save_analysis_history(
         self,
         result: Any,
@@ -3042,7 +3746,10 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         report_type: str,
         news_content: Optional[str],
         context_snapshot: Optional[Dict[str, Any]] = None,
-        save_snapshot: bool = True
+        save_snapshot: bool = True,
+        *,
+        owner_scope: str = "global",
+        owner_user_id: Optional[int] = None,
     ) -> int:
         """
         保存分析结果历史记录。
@@ -3052,6 +3759,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         """
         if result is None:
             return 0
+        if owner_scope == "user":
+            if not isinstance(owner_user_id, int) or isinstance(owner_user_id, bool) or owner_user_id <= 0:
+                raise ValueError("user-scoped analysis history requires a positive owner_user_id")
+        elif owner_scope == "global":
+            owner_user_id = None
+        else:
+            raise ValueError(f"unsupported analysis history owner_scope: {owner_scope}")
 
         sniper_points = self._extract_sniper_points(result)
         raw_result = self._build_raw_result(result)
@@ -3063,6 +3777,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             def _write(session: Session) -> int:
                 history = AnalysisHistory(
                     query_id=query_id,
+                    owner_scope=owner_scope,
+                    owner_user_id=owner_user_id,
                     code=result.code,
                     name=result.name,
                     report_type=report_type,
@@ -3097,6 +3813,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         code: Optional[str] = None,
         diagnostics: Optional[Dict[str, Any]] = None,
         notification_runs: Optional[List[Dict[str, Any]]] = None,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> int:
         """
         更新已保存分析历史的运行诊断快照。
@@ -3112,6 +3830,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 conditions = [AnalysisHistory.query_id == query_id]
                 if code:
                     conditions.append(AnalysisHistory.code == code)
+                conditions.extend(
+                    self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+                )
 
                 row = session.execute(
                     select(AnalysisHistory)
@@ -3176,6 +3897,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         days: int = 30,
         limit: int = 50,
         exclude_query_id: Optional[str] = None,
+        *,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> List[AnalysisHistory]:
         """
         Query analysis history records.
@@ -3201,6 +3925,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # exclude_query_id only applies when not doing exact lookup (query_id is None)
             if exclude_query_id and not query_id:
                 conditions.append(AnalysisHistory.query_id != exclude_query_id)
+            conditions.extend(
+                self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+            )
 
             results = session.execute(
                 select(AnalysisHistory)
@@ -3217,6 +3944,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         query_id: str,
         code: str,
         report_type: str,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> Optional[int]:
         """Return the latest matching history id for read-only lookups.
 
@@ -3228,13 +3957,17 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             return None
 
         with self.get_session() as session:
+            conditions = [
+                AnalysisHistory.query_id == query_id,
+                AnalysisHistory.code == code,
+                AnalysisHistory.report_type == report_type,
+            ]
+            conditions.extend(
+                self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+            )
             return session.execute(
                 select(AnalysisHistory.id)
-                .where(
-                    AnalysisHistory.query_id == query_id,
-                    AnalysisHistory.code == code,
-                    AnalysisHistory.report_type == report_type,
-                )
+                .where(and_(*conditions))
                 .order_by(desc(AnalysisHistory.created_at), desc(AnalysisHistory.id))
                 .limit(1)
             ).scalar_one_or_none()
@@ -3246,7 +3979,10 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         offset: int = 0,
-        limit: int = 20
+        limit: int = 20,
+        *,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> Tuple[List[AnalysisHistory], int]:
         """
         分页查询分析历史记录（带总数）
@@ -3282,6 +4018,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             if end_date:
                 # created_at < end_date+1 00:00:00 (即 <= end_date 23:59:59)
                 conditions.append(AnalysisHistory.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time()))
+            conditions.extend(
+                self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+            )
             
             # 构建 where 子句
             where_clause = and_(*conditions) if conditions else True
@@ -3302,7 +4041,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             
             return list(results), total
     
-    def get_analysis_history_by_id(self, record_id: int) -> Optional[AnalysisHistory]:
+    def get_analysis_history_by_id(
+        self,
+        record_id: int,
+        *,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
+    ) -> Optional[AnalysisHistory]:
         """
         根据数据库主键 ID 查询单条分析历史记录
         
@@ -3316,12 +4061,22 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             AnalysisHistory 对象，不存在返回 None
         """
         with self.get_session() as session:
+            conditions = [AnalysisHistory.id == record_id]
+            conditions.extend(
+                self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+            )
             result = session.execute(
-                select(AnalysisHistory).where(AnalysisHistory.id == record_id)
+                select(AnalysisHistory).where(and_(*conditions))
             ).scalars().first()
             return result
 
-    def delete_analysis_history_records(self, record_ids: List[int]) -> int:
+    def delete_analysis_history_records(
+        self,
+        record_ids: List[int],
+        *,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
+    ) -> int:
         """
         删除指定的分析历史记录。
 
@@ -3340,9 +4095,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             return 0
 
         def _write(session: Session) -> int:
+            existing_conditions = [AnalysisHistory.id.in_(ids)]
+            existing_conditions.extend(
+                self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+            )
             existing_ids = sorted(
                 session.execute(
-                    select(AnalysisHistory.id).where(AnalysisHistory.id.in_(ids))
+                    select(AnalysisHistory.id).where(and_(*existing_conditions))
                 ).scalars().all()
             )
             if not existing_ids:
@@ -3411,6 +4170,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         end_date: Optional[date] = None,
         limit: int = 200,
         include_market_review: bool = False,
+        *,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> List[AnalysisHistory]:
         """
         获取历史记录中的不重复股票列表，每只股票取最新一条记录。
@@ -3452,6 +4214,12 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         ),
                     )
                 )
+            owner_conditions = self._analysis_history_owner_conditions(
+                owner_scope,
+                owner_user_id,
+            )
+            if owner_conditions:
+                subq = subq.where(and_(*owner_conditions))
             subq = subq.group_by(AnalysisHistory.code).subquery()
 
             results = (
@@ -3474,6 +4242,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         *,
         code: Optional[str] = None,
         report_type: Optional[str] = None,
+        owner_scope: Optional[str] = None,
+        owner_user_id: Optional[int] = None,
     ) -> Optional[AnalysisHistory]:
         """
         根据 query_id 查询最新一条分析历史记录
@@ -3494,6 +4264,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 conditions.append(AnalysisHistory.code == code)
             if report_type:
                 conditions.append(AnalysisHistory.report_type == report_type)
+            conditions.extend(
+                self._analysis_history_owner_conditions(owner_scope, owner_user_id)
+            )
 
             result = session.execute(
                 select(AnalysisHistory)

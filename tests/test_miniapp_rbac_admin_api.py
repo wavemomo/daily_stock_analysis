@@ -48,9 +48,9 @@ class MiniappRbacAdminApiTestCase(unittest.TestCase):
         self.db = DatabaseManager.get_instance()
         self.user_repo = MiniappUserRepository(self.db)
         self.rbac = RbacService()
-        self.admin = self.user_repo.upsert_user(openid='admin-openid')
-        self.member = self.user_repo.upsert_user(openid='member-openid')
-        self.target = self.user_repo.upsert_user(openid='target-openid')
+        self.admin = self.user_repo.upsert_user(openid='admin-openid', issuer='miniapp-rbac-api-test')
+        self.member = self.user_repo.upsert_user(openid='member-openid', issuer='miniapp-rbac-api-test')
+        self.target = self.user_repo.upsert_user(openid='target-openid', issuer='miniapp-rbac-api-test')
         self.rbac.repository.ensure_role(self.admin.id, 'admin')
         self.rbac.repository.ensure_role(self.member.id, 'member')
         self.rbac.repository.ensure_role(self.target.id, 'member')
@@ -202,7 +202,9 @@ class MiniappRbacAdminApiTestCase(unittest.TestCase):
         self.assertEqual(cannot_remove_self.status_code, 400, cannot_remove_self.text)
         self.assertEqual(cannot_disable_self.status_code, 400, cannot_disable_self.text)
 
-        second_admin = self.user_repo.upsert_user(openid='second-admin-openid')
+        second_admin = self.user_repo.upsert_user(
+            openid='second-admin-openid', issuer='miniapp-rbac-api-test'
+        )
         self.rbac.repository.ensure_role(second_admin.id, 'admin')
         demoted = self.client.put(
             f'/api/v1/miniapp/rbac/users/{second_admin.id}/roles',
@@ -263,31 +265,19 @@ class MiniappRbacAdminApiTestCase(unittest.TestCase):
         self.assertEqual(cannot_remove_last_management_role.status_code, 400, cannot_remove_last_management_role.text)
         self.assertIn('rbac.manage', cannot_remove_last_management_role.text)
 
-    def test_bootstrap_grant_is_audited_without_recording_openid(self) -> None:
-        bootstrap_user = self.user_repo.upsert_user(openid='bootstrap-audit-openid')
-        bootstrap_rbac = RbacService(
-            repository=self.rbac.repository,
-            config=SimpleNamespace(rbac_bootstrap_admin_openids=frozenset({'bootstrap-audit-openid'})),
+    def test_openid_never_auto_grants_admin_role(self) -> None:
+        user = self.user_repo.upsert_user(
+            openid='former-bootstrap-openid', issuer='miniapp-rbac-api-test'
         )
-        access = bootstrap_rbac.ensure_user_access(bootstrap_user, assign_default=True)
-        self.assertIn('admin', access['roles'])
-        first_audit = self.rbac.repository.list_audit_events(page=1, page_size=100)
-        bootstrap_events = [
-            event for event in first_audit['items']
-            if event['action'] == 'user.bootstrap_admin_granted'
-        ]
-        self.assertEqual(len(bootstrap_events), 1)
-        self.assertEqual(bootstrap_events[0]['metadata'], {
-            'role': 'admin',
-            'source': 'bootstrap_openid',
-        })
-        self.assertNotIn('bootstrap-audit-openid', str(bootstrap_events))
 
-        bootstrap_rbac.ensure_user_access(bootstrap_user)
-        second_audit = self.rbac.repository.list_audit_events(page=1, page_size=100)
+        access = self.rbac.ensure_user_access(user, assign_default=True)
+
+        self.assertNotIn('admin', access['roles'])
+        self.assertIn('member', access['roles'])
+        audit = self.rbac.repository.list_audit_events(page=1, page_size=100)
         self.assertEqual(
-            len([event for event in second_audit['items'] if event['action'] == 'user.bootstrap_admin_granted']),
-            1,
+            [event for event in audit['items'] if event['action'] == 'user.bootstrap_admin_granted'],
+            [],
         )
 
 

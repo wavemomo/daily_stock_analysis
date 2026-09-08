@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from api.v1.endpoints import alerts as alert_endpoints
 from api.v1.schemas.alerts import AlertRuleUpdateRequest
 from src.config import Config
+from src.portfolio_ownership import LEGACY_GLOBAL_PORTFOLIO_SCOPE, PortfolioScope
 from src.repositories.portfolio_repo import PortfolioRepository
 from src.services.alert_service import AlertNotFoundError, AlertService, AlertServiceError
 from src.services.portfolio_service import PortfolioService
@@ -104,19 +105,21 @@ class AlertOwnershipTestCase(unittest.TestCase):
         )
         return int(trigger.id), int(notification.id)
 
-    def test_request_owner_converts_miniapp_id_and_preserves_admin_global_scope(self) -> None:
+    def test_request_owner_requires_canonical_authenticated_principal(self) -> None:
         miniapp_request = SimpleNamespace(
             state=SimpleNamespace(
                 miniapp_principal=SimpleNamespace(user=SimpleNamespace(id=self.owner_a)),
                 auth_kind="miniapp",
             )
         )
-        admin_request = SimpleNamespace(
-            state=SimpleNamespace(miniapp_principal=None, auth_kind="admin")
+        unauthenticated_request = SimpleNamespace(
+            state=SimpleNamespace(miniapp_principal=None)
         )
 
         self.assertEqual(alert_endpoints._request_user_id(miniapp_request), self.owner_a)
-        self.assertIsNone(alert_endpoints._request_user_id(admin_request))
+        with self.assertRaises(HTTPException) as context:
+            alert_endpoints._request_user_id(unauthenticated_request)
+        self.assertEqual(context.exception.status_code, 401)
 
     def test_create_forces_trusted_owner_and_rule_lists_hide_foreign_and_legacy_rows(self) -> None:
         payload = self._payload("Owner A rule", "600519")
@@ -155,25 +158,28 @@ class AlertOwnershipTestCase(unittest.TestCase):
 
     def test_portfolio_alert_targets_and_runtime_payloads_are_owner_scoped(self) -> None:
         portfolio_service = PortfolioService(repo=PortfolioRepository(self.db))
+        owner_a_scope = PortfolioScope.user(str(self.owner_a))
+        owner_b_scope = PortfolioScope.user(str(self.owner_b))
         owner_a_account = portfolio_service.create_account(
             name="Owner A portfolio",
             broker="Demo",
             market="cn",
             base_currency="CNY",
-            owner_id=str(self.owner_a),
+            portfolio_scope=owner_a_scope,
         )
         owner_b_account = portfolio_service.create_account(
             name="Owner B portfolio",
             broker="Demo",
             market="cn",
             base_currency="CNY",
-            owner_id=str(self.owner_b),
+            portfolio_scope=owner_b_scope,
         )
         legacy_account = portfolio_service.create_account(
             name="Legacy portfolio",
             broker="Demo",
             market="cn",
             base_currency="CNY",
+            portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE,
         )
 
         def payload(target: str) -> dict:
@@ -205,12 +211,15 @@ class AlertOwnershipTestCase(unittest.TestCase):
         all_rule = self.service.create_rule(payload("all"), user_id=self.owner_a)
         all_row = self.service.repo.get_rule(all_rule["id"], user_id=self.owner_a)
         runtime_payload = self.service.build_runtime_payloads(all_row)[0]
-        self.assertEqual(runtime_payload.rule.owner_id, str(self.owner_a))
+        self.assertEqual(runtime_payload.rule.portfolio_scope, owner_a_scope)
 
         admin_rule = self.service.create_rule(
-            payload(str(owner_b_account["id"])),
+            payload(str(legacy_account["id"])),
             user_id=None,
         )
+        admin_row = self.service.repo.get_rule(admin_rule["id"], user_id=None)
+        admin_payload = self.service.build_runtime_payloads(admin_row)[0]
+        self.assertEqual(admin_payload.rule.portfolio_scope, LEGACY_GLOBAL_PORTFOLIO_SCOPE)
         self.assertIsNotNone(admin_rule["id"])
         self.assertIsNotNone(own_rule["id"])
 

@@ -38,6 +38,7 @@ from src.agent.llm_adapter import LLMResponse, ToolCall
 from src.agent.runner import parse_dashboard_json, run_agent_loop, serialize_tool_result
 from src.agent.stock_scope import StockScope, resolve_stock_scope
 from src.agent.tools.registry import ToolRegistry, ToolDefinition, ToolParameter
+from src.portfolio_ownership import UNSCOPED_PORTFOLIO_SCOPE
 from src.analysis_context_pack_prompt import format_analysis_context_pack_prompt_section
 from src.config import Config
 from src.llm.usage import normalize_litellm_usage
@@ -253,6 +254,7 @@ class TestAgentExecutor(unittest.TestCase):
             messages=[{"role": "user", "content": "请查行情"}],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=2,
         )
 
@@ -269,7 +271,7 @@ class TestAgentExecutor(unittest.TestCase):
         executor = AgentExecutor(registry, adapter, max_steps=2)
         captured = {}
 
-        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None):
+        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None, resource_owner_id=None, portfolio_scope=None):
             captured["messages"] = messages
             captured["stock_scope"] = stock_scope
             return AgentResult(success=True, content="assistant reply")
@@ -326,7 +328,7 @@ class TestAgentExecutor(unittest.TestCase):
         executor = AgentExecutor(registry, adapter, max_steps=2)
         captured = {}
 
-        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None):
+        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None, resource_owner_id=None, portfolio_scope=None):
             captured["messages"] = messages
             captured["stock_scope"] = stock_scope
             return AgentResult(success=True, content="assistant reply")
@@ -379,7 +381,7 @@ class TestAgentExecutor(unittest.TestCase):
         executor = AgentExecutor(registry, adapter, max_steps=2)
         captured = {}
 
-        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None):
+        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None, resource_owner_id=None, portfolio_scope=None):
             captured["messages"] = messages
             captured["stock_scope"] = stock_scope
             return AgentResult(success=True, content="assistant reply")
@@ -411,7 +413,7 @@ class TestAgentExecutor(unittest.TestCase):
         executor = AgentExecutor(registry, adapter, max_steps=2)
         captured = {}
 
-        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None):
+        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None, resource_owner_id=None, portfolio_scope=None):
             captured["stock_scope"] = stock_scope
             return AgentResult(success=True, content=json.dumps(SAMPLE_DASHBOARD, ensure_ascii=False))
 
@@ -653,6 +655,7 @@ class TestAgentExecutor(unittest.TestCase):
                 messages=[{"role": "user", "content": "Analyze"}],
                 tool_registry=registry,
                 llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                 max_steps=1,
             )
 
@@ -679,6 +682,7 @@ class TestAgentExecutor(unittest.TestCase):
                 messages=[{"role": "user", "content": "Analyze"}],
                 tool_registry=registry,
                 llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                 max_steps=1,
             )
 
@@ -703,6 +707,7 @@ class TestAgentExecutor(unittest.TestCase):
                 messages=[{"role": "user", "content": "Analyze"}],
                 tool_registry=registry,
                 llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                 max_steps=1,
             )
 
@@ -728,6 +733,7 @@ class TestAgentExecutor(unittest.TestCase):
                 messages=[{"role": "user", "content": "Analyze"}],
                 tool_registry=registry,
                 llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                 max_steps=1,
             )
 
@@ -764,6 +770,7 @@ class TestAgentExecutor(unittest.TestCase):
             messages=messages,
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=StockScope(expected_stock_code="600519", allowed_stock_codes={"600519"}),
         )
@@ -809,6 +816,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=StockScope(expected_stock_code="600519", allowed_stock_codes={"600519"}),
         )
@@ -849,6 +857,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=StockScope(
                 expected_stock_code="600519",
@@ -891,6 +900,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=scope,
         )
@@ -931,6 +941,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=scope,
         )
@@ -972,6 +983,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=scope,
         )
@@ -1035,6 +1047,7 @@ class TestAgentExecutor(unittest.TestCase):
                     ],
                     tool_registry=registry,
                     llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                     max_steps=3,
                     stock_scope=scope,
                 )
@@ -1089,6 +1102,7 @@ class TestAgentExecutor(unittest.TestCase):
                     ],
                     tool_registry=registry,
                     llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                     max_steps=3,
                     stock_scope=scope,
                 )
@@ -1148,6 +1162,7 @@ class TestAgentExecutor(unittest.TestCase):
                     ],
                     tool_registry=registry,
                     llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                     max_steps=3,
                     stock_scope=scope,
                 )
@@ -1192,6 +1207,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=StockScope(expected_stock_code="600519", allowed_stock_codes={"600519"}),
         )
@@ -1235,6 +1251,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             stock_scope=StockScope(expected_stock_code="600519", allowed_stock_codes={"600519"}),
         )
@@ -1254,7 +1271,7 @@ class TestAgentExecutor(unittest.TestCase):
         executor = AgentExecutor(registry, adapter, max_steps=2)
         captured = {}
 
-        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None):
+        def fake_run_loop(messages, tool_decls, parse_dashboard, progress_callback=None, stock_scope=None, resource_owner_id=None, portfolio_scope=None):
             captured["messages"] = messages
             return AgentResult(success=True, content="assistant reply")
 
@@ -1309,7 +1326,7 @@ class TestAgentExecutor(unittest.TestCase):
             default_skill_policy="",
             max_steps=2,
         )
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         prompt = adapter.call_with_tools.call_args.args[0][0]["content"]
@@ -1336,7 +1353,7 @@ class TestAgentExecutor(unittest.TestCase):
             use_legacy_default_prompt=True,
             max_steps=2,
         )
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         prompt = adapter.call_with_tools.call_args.args[0][0]["content"]
@@ -1359,7 +1376,7 @@ class TestAgentExecutor(unittest.TestCase):
         )
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertIsNotNone(result.dashboard)
@@ -1392,7 +1409,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.side_effect = [step1_response, step2_response]
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertEqual(result.total_steps, 2)
@@ -1434,6 +1451,7 @@ class TestAgentExecutor(unittest.TestCase):
             messages=[{"role": "user", "content": "Analyze"}],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=2,
         )
 
@@ -1496,8 +1514,8 @@ class TestAgentExecutor(unittest.TestCase):
 
         executor = AgentExecutor(registry, adapter, max_steps=3)
 
-        first = executor.chat("first question", "executor-trace")
-        second = executor.chat("second question", "executor-trace")
+        first = executor.chat("first question", "executor-trace", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
+        second = executor.chat("second question", "executor-trace", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(first.success)
         self.assertTrue(second.success)
@@ -1567,7 +1585,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.side_effect = [step1, step2]
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertEqual(len(result.tool_calls_log), 2)
@@ -1589,7 +1607,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.return_value = tool_response
 
         executor = AgentExecutor(registry, adapter, max_steps=3)
-        result = executor.run("Analyze loop")
+        result = executor.run("Analyze loop", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertFalse(result.success)
         self.assertIn("max steps", result.error.lower())
@@ -1627,7 +1645,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.side_effect = [step1, step2]
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Test error handling")
+        result = executor.run("Test error handling", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         # Should still succeed overall (agent handles tool errors gracefully)
         self.assertTrue(result.success)
@@ -1657,7 +1675,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.side_effect = [step1, step2]
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Test unknown tool")
+        result = executor.run("Test unknown tool", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertEqual(len(result.tool_calls_log), 1)
@@ -1715,7 +1733,7 @@ class TestAgentExecutor(unittest.TestCase):
         ]
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Analyze HK01810")
+        result = executor.run("Analyze HK01810", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertEqual(calls, ["hk01810"])
@@ -1752,7 +1770,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.side_effect = [step1, step2, step3]
 
         executor = AgentExecutor(registry, adapter, max_steps=5)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertEqual(result.model, "gemini/gemini-2.0-flash, openai/gpt-4o-mini")
@@ -1770,7 +1788,7 @@ class TestAgentExecutor(unittest.TestCase):
         )
 
         executor = AgentExecutor(registry, adapter, max_steps=2)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertFalse(result.success)
         self.assertEqual(result.model, "")
@@ -1788,7 +1806,7 @@ class TestAgentExecutor(unittest.TestCase):
         )
 
         executor = AgentExecutor(registry, adapter, max_steps=2)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertFalse(result.success)
         self.assertEqual(result.content, "")
@@ -1817,7 +1835,7 @@ class TestAgentExecutor(unittest.TestCase):
         adapter.call_with_tools.side_effect = _slow_llm
 
         executor = AgentExecutor(registry, adapter, max_steps=2, timeout_seconds=0.01)
-        result = executor.run("Analyze 600519")
+        result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertFalse(result.success)
         self.assertIn("timed out", (result.error or "").lower())
@@ -1867,6 +1885,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             tool_call_timeout_seconds=0.01,
         )
@@ -1918,6 +1937,7 @@ class TestAgentExecutor(unittest.TestCase):
             ],
             tool_registry=registry,
             llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             max_steps=3,
             tool_call_timeout_seconds=0.01,
         )
@@ -1946,7 +1966,7 @@ class TestAgentExecutor(unittest.TestCase):
 
         executor = AgentExecutor(registry, adapter, max_steps=2, timeout_seconds=1.0)
         with patch("src.agent.runner.time.time", return_value=1000.0):
-            result = executor.run("Analyze 600519")
+            result = executor.run("Analyze 600519", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
         self.assertTrue(result.success)
         self.assertIsNotNone(captured.get("timeout"))
@@ -1975,6 +1995,7 @@ class TestAgentExecutor(unittest.TestCase):
                 ],
                 tool_registry=registry,
                 llm_adapter=adapter,
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
                 max_steps=3,
                 max_wall_clock_seconds=10.0,
             )

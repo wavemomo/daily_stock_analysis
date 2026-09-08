@@ -8,6 +8,7 @@ import {
   StandaloneRouteBoundary,
 } from './components/layout/RouteBoundary';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { FeatureQuotaProvider } from './contexts/FeatureQuotaContext';
 import { UiLanguageProvider, useUiLanguage } from './contexts/UiLanguageContext';
 import { useAgentChatStore } from './stores/agentChatStore';
 import './App.css';
@@ -22,11 +23,13 @@ const PortfolioPage = lazy(() => import('./pages/PortfolioPage'));
 const DecisionSignalsPage = lazy(() => import('./pages/DecisionSignalsPage'));
 const AlertsPage = lazy(() => import('./pages/AlertsPage'));
 const TokenUsagePage = lazy(() => import('./pages/TokenUsagePage'));
+const FeatureQuotasPage = lazy(() => import('./pages/FeatureQuotasPage'));
 const StockScreeningPage = lazy(() => import('./pages/StockScreeningPage'));
+const AccessControlPage = lazy(() => import('./pages/AccessControlPage'));
 
 const AppContent: React.FC = () => {
   const location = useLocation();
-  const { authEnabled, loggedIn, isLoading, loadError, refreshStatus } = useAuth();
+  const { actor, hasPermission, isLoading, loadError, refreshStatus } = useAuth();
   const { t } = useUiLanguage();
 
   useEffect(() => {
@@ -54,13 +57,9 @@ const AppContent: React.FC = () => {
     );
   }
 
-  if (authEnabled && !loggedIn) {
+  if (actor === 'anonymous') {
     if (location.pathname === '/login') {
-      return (
-        <StandaloneRouteBoundary>
-          <LoginPage />
-        </StandaloneRouteBoundary>
-      );
+      return <StandaloneRouteBoundary><LoginPage /></StandaloneRouteBoundary>;
     }
     const redirect = encodeURIComponent(location.pathname + location.search);
     return <Navigate to={`/login?redirect=${redirect}`} replace />;
@@ -69,6 +68,9 @@ const AppContent: React.FC = () => {
   if (location.pathname === '/login') {
     return <Navigate to="/" replace />;
   }
+
+  const canManageSystem = hasPermission('system.manage');
+  const canManageRbac = hasPermission('rbac.manage');
 
   return (
     <Routes>
@@ -87,7 +89,9 @@ const AppContent: React.FC = () => {
         <Route path="/backtest" element={<BacktestPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/usage" element={<TokenUsagePage />} />
-        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/feature-quotas" element={<FeatureQuotasPage />} />
+        <Route path="/settings" element={canManageSystem ? <SettingsPage /> : <Navigate to="/" replace />} />
+        <Route path="/access-control" element={canManageRbac ? <AccessControlPage /> : <Navigate to="/" replace />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
@@ -99,7 +103,9 @@ const App: React.FC = () => {
     <UiLanguageProvider>
       <Router>
         <AuthProvider>
-          <AppContent />
+          <FeatureQuotaProvider>
+            <AppContent />
+          </FeatureQuotaProvider>
         </AuthProvider>
       </Router>
     </UiLanguageProvider>

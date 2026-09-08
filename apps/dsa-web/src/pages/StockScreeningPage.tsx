@@ -71,6 +71,10 @@ type PersistedScreenTask = {
   maxResults: number;
 };
 
+type ScreenTaskContext = Readonly<PersistedScreenTask>;
+
+const createScreenTaskContext = (task: PersistedScreenTask): ScreenTaskContext => Object.freeze({ ...task });
+
 const formatRunCreatedAt = (value: string | null | undefined) => {
   if (!value) {
     return '时间未知';
@@ -849,6 +853,9 @@ const StockScreeningPage: React.FC = () => {
   const hotspotDetailRequestIdRef = useRef(0);
   const hotspotDetailsByTopicRef = useRef<Record<string, ScreeningHotspotDetail>>({});
   const historyRunRequestIdRef = useRef(0);
+  const screenTaskContextsRef = useRef<Record<string, ScreenTaskContext>>(
+    restoredTask ? { [restoredTask.taskId]: createScreenTaskContext(restoredTask) } : {},
+  );
   const [hotspotDetail, setHotspotDetail] = useState<ScreeningHotspotDetail | null>(null);
   const [loadingHotspotDetail, setLoadingHotspotDetail] = useState(false);
   const [searchingHotspotNews, setSearchingHotspotNews] = useState(false);
@@ -922,6 +929,7 @@ const StockScreeningPage: React.FC = () => {
     const isCurrentRequest = () => historyRunRequestIdRef.current === requestId;
     // 与运行中的选股任务互斥：手动选择历史记录后，暂停/取消后台任务轮询，
     // 避免任务完成后把当前任务的候选结果回写到历史上下文中。
+    screenTaskContextsRef.current = {};
     setActiveTaskId(null);
     setHistoryError('');
     setLoading(true);
@@ -1204,7 +1212,7 @@ const StockScreeningPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [loadHotspots, loadStrategies]);
+  }, [loadHistory, loadHotspots, loadStrategies]);
 
   // 刷新后优先从 history API 按 run_id 恢复结果；恢复失败再回退到 task 轮询
   useEffect(() => {
@@ -1274,6 +1282,24 @@ const StockScreeningPage: React.FC = () => {
     let active = true;
     let timer: ReturnType<typeof window.setTimeout> | undefined;
 
+    const resolveTaskContext = (): ScreenTaskContext | null => {
+      const activeContext = screenTaskContextsRef.current[pollingTaskId];
+      if (activeContext) {
+        return activeContext;
+      }
+      const persistedTask = readPersistedScreenTask();
+      if (!persistedTask || persistedTask.taskId !== pollingTaskId) {
+        return null;
+      }
+      const restoredContext = createScreenTaskContext(persistedTask);
+      screenTaskContextsRef.current[pollingTaskId] = restoredContext;
+      return restoredContext;
+    };
+
+    const discardTaskContext = () => {
+      delete screenTaskContextsRef.current[pollingTaskId];
+    };
+
     function finishTask() {
       setActiveTaskId(null);
       setLoading(false);
@@ -1288,22 +1314,22 @@ const StockScreeningPage: React.FC = () => {
         if (task.result) {
           applyScreenResult(task.result);
           setError('');
-          // 持久化 runId：刷新后优先从 history API 恢复结果，而非依赖内存 task
-          const completedRunId = task.result.runId || screenMeta?.runId;
-          if (completedRunId) {
-            persistScreenTask({
-              taskId: pollingTaskId,
+          // 任务恢复元数据必须使用提交时冻结的上下文，不能使用页面筛选状态。
+          const taskContext = resolveTaskContext();
+          const completedRunId = task.result.runId ?? taskContext?.runId;
+          if (taskContext && completedRunId) {
+            persistScreenTask(createScreenTaskContext({
+              ...taskContext,
               runId: completedRunId,
-              market,
-              strategy,
-              maxResults,
-            });
+            }));
           }
         } else {
           setError('选股任务已完成，但服务端未返回候选结果。');
           setCandidates([]);
           setScreenMeta(null);
+          clearPersistedScreenTask();
         }
+        discardTaskContext();
         finishTask();
         return;
       }
@@ -1314,6 +1340,7 @@ const StockScreeningPage: React.FC = () => {
         setExpandedCode(null);
         setError(formatScreenTaskFailure(task.error || task.message));
         clearPersistedScreenTask();
+        discardTaskContext();
         finishTask();
         return;
       }
@@ -1326,6 +1353,7 @@ const StockScreeningPage: React.FC = () => {
 
       setError(`选股任务返回未知状态：${task.status || 'unknown'}`);
       clearPersistedScreenTask();
+      discardTaskContext();
       finishTask();
     }
 
@@ -1346,6 +1374,7 @@ const StockScreeningPage: React.FC = () => {
           setCandidates([]);
           setScreenMeta(null);
           clearPersistedScreenTask();
+          discardTaskContext();
           finishTask();
           return;
         }
@@ -1420,14 +1449,23 @@ const StockScreeningPage: React.FC = () => {
     setScreenMeta(null);
     setTaskProgress(0);
     setTaskMessage('正在提交选股任务...');
+    const submittedMarket = market;
+    const submittedStrategy = strategy;
+    const submittedMaxResults = maxResults;
     try {
-      const task = await screeningApi.startScreen({ market, strategy, maxResults });
-      persistScreenTask({
-        taskId: task.taskId,
-        market,
-        strategy,
-        maxResults,
+      const task = await screeningApi.startScreen({
+        market: submittedMarket,
+        strategy: submittedStrategy,
+        maxResults: submittedMaxResults,
       });
+      const taskContext = createScreenTaskContext({
+        taskId: task.taskId,
+        market: task.market || submittedMarket,
+        strategy: task.strategy || submittedStrategy,
+        maxResults: Number.isFinite(task.maxResults) ? task.maxResults : submittedMaxResults,
+      });
+      screenTaskContextsRef.current[task.taskId] = taskContext;
+      persistScreenTask(taskContext);
       setActiveTaskId(task.taskId);
       setTaskProgress(0);
       setTaskMessage(task.message || '选股任务已提交');

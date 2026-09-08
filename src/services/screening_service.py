@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from src.analysis_ownership import AnalysisOwner
 from src.config import Config, get_configured_llm_models, normalize_llm_channel_api_surface
 from src.services.screening import REFERENCE_PROJECT, REFERENCE_REVISION, __version__ as SCREENING_VERSION
 from src.services.screening import hotspot as screening_hotspot
@@ -883,6 +884,11 @@ class ScreeningService:
         self.config = config
         self.db_manager = db_manager
 
+    def _require_owner(self, owner: AnalysisOwner) -> AnalysisOwner:
+        if not isinstance(owner, AnalysisOwner):
+            raise TypeError("owner must be an AnalysisOwner")
+        return owner
+
     def status(self) -> Dict[str, Any]:
         engine_status, available, diagnostics = _get_screening_status_snapshot()
         payload = {
@@ -915,13 +921,16 @@ class ScreeningService:
     def history(
         self,
         *,
+        owner: AnalysisOwner,
         limit: int = 20,
         strategy: str = "",
         market: str = "",
     ) -> Dict[str, Any]:
         _ensure_screening_enabled(self.config)
+        effective_owner = self._require_owner(owner)
         db_manager = self._require_history_database()
         runs = db_manager.list_screening_runs(
+            owner=effective_owner,
             limit=limit,
             strategy=_env_text(strategy) or None,
             market=_env_text(market) or None,
@@ -932,10 +941,16 @@ class ScreeningService:
             "run_count": len(runs),
         }
 
-    def history_detail(self, run_id: str) -> Dict[str, Any]:
+    def history_detail(
+        self,
+        run_id: str,
+        *,
+        owner: AnalysisOwner,
+    ) -> Dict[str, Any]:
         _ensure_screening_enabled(self.config)
+        effective_owner = self._require_owner(owner)
         db_manager = self._require_history_database()
-        run = db_manager.get_screening_run(run_id)
+        run = db_manager.get_screening_run(run_id, owner=effective_owner)
         if run is None:
             raise HTTPException(
                 status_code=404,
@@ -946,10 +961,16 @@ class ScreeningService:
             )
         return {"enabled": True, **run}
 
-    def source_history(self, *, limit: int = 100) -> Dict[str, Any]:
+    def source_history(
+        self,
+        *,
+        owner: AnalysisOwner,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
         _ensure_screening_enabled(self.config)
+        effective_owner = self._require_owner(owner)
         db_manager = self._require_history_database()
-        runs = db_manager.list_screening_runs(limit=limit)
+        runs = db_manager.list_screening_runs(owner=effective_owner, limit=limit)
         return _summarize_screening_source_history(runs)
 
     def _require_history_database(self) -> DatabaseManager:
@@ -1213,9 +1234,11 @@ class ScreeningService:
         strategy: str,
         market: str,
         max_results: int,
+        owner: AnalysisOwner,
         selection_seed: str = "",
         progress_callback: Callable[[int, str], None] | None = None,
     ) -> Dict[str, Any]:
+        effective_owner = self._require_owner(owner)
         _ensure_screening_enabled(self.config)
         _ensure_screening_available_for_use()
         _ensure_supported_market(market)
@@ -1300,7 +1323,7 @@ class ScreeningService:
             "result_variant_rotated_slots": raw_data.get("result_variant_rotated_slots") or 0,
         }
         if self.db_manager is not None:
-            self.db_manager.save_screening_run(response)
+            self.db_manager.save_screening_run(response, owner=effective_owner)
         return response
 
 

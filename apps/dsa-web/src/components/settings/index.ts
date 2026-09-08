@@ -1,6 +1,5 @@
 export * from './LLMChannelEditor';
 export * from './SettingsAlert';
-export * from './ChangePasswordCard';
 export * from './IntelligentImport';
 export * from './NotificationTestPanel';
 export * from './SettingsField';
@@ -9,6 +8,5 @@ export * from './SettingsLoading';
 export * from './SettingsPanelErrorBoundary';
 export * from './SettingsSectionCard';
 export * from './SettingsCategoryNav';
-export * from './AuthSettingsCard';
 export * from './GenerationBackendStatusPanel';
 export * from './AgentBackendStatusPanel';

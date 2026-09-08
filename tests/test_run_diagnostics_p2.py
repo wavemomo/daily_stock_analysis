@@ -15,6 +15,7 @@ from fastapi import HTTPException
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from api.v1.endpoints.history import get_history_diagnostics
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
 from src.services.history_service import HistoryService
 from src.services.run_diagnostics import build_run_diagnostic_summary, sanitize_diagnostic_text
 
@@ -142,22 +143,32 @@ def _analysis_context_overview(*, blocks: list[dict]) -> dict:
     }
 
 
+def _history_request() -> SimpleNamespace:
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            miniapp_principal=SimpleNamespace(
+                user=SimpleNamespace(id=1),
+            ),
+        ),
+    )
+
+
 class _FakeHistoryDb:
     def __init__(self, record: SimpleNamespace | None):
         self.record = record
 
-    def get_analysis_history_by_id(self, record_id: int):
+    def get_analysis_history_by_id(self, record_id: int, **_kwargs):
         return self.record if record_id == 1 else None
 
-    def get_latest_analysis_by_query_id(self, query_id: str):
+    def get_latest_analysis_by_query_id(self, query_id: str, **_kwargs):
         return self.record if query_id == "query-p2" else None
 
 
 class _FailingHistoryDb:
-    def get_analysis_history_by_id(self, record_id: int):
+    def get_analysis_history_by_id(self, record_id: int, **_kwargs):
         raise RuntimeError("database unavailable")
 
-    def get_latest_analysis_by_query_id(self, query_id: str):
+    def get_latest_analysis_by_query_id(self, query_id: str, **_kwargs):
         raise RuntimeError("database unavailable")
 
 
@@ -501,8 +512,8 @@ class RunDiagnosticsP2TestCase(unittest.TestCase):
         }
         db = _FakeHistoryDb(_history_record(context_snapshot=context_snapshot))
 
-        service_summary = HistoryService(db).resolve_and_get_diagnostics("1")
-        endpoint_summary = get_history_diagnostics("1", db_manager=db)
+        service_summary = HistoryService(db, owner=GLOBAL_ANALYSIS_OWNER).resolve_and_get_diagnostics("1")
+        endpoint_summary = get_history_diagnostics("1", http_request=_history_request(), db_manager=db)
 
         self.assertIsNotNone(service_summary)
         self.assertEqual(service_summary["trace_id"], "trace-p2")
@@ -512,7 +523,7 @@ class RunDiagnosticsP2TestCase(unittest.TestCase):
     def test_history_service_returns_unknown_for_legacy_record(self) -> None:
         db = _FakeHistoryDb(_history_record(context_snapshot=None))
 
-        summary = HistoryService(db).resolve_and_get_diagnostics("1")
+        summary = HistoryService(db, owner=GLOBAL_ANALYSIS_OWNER).resolve_and_get_diagnostics("1")
 
         self.assertIsNotNone(summary)
         self.assertEqual(summary["status"], "unknown")
@@ -520,7 +531,11 @@ class RunDiagnosticsP2TestCase(unittest.TestCase):
 
     def test_history_diagnostics_endpoint_surfaces_lookup_errors(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
-            get_history_diagnostics("1", db_manager=_FailingHistoryDb())
+            get_history_diagnostics(
+                "1",
+                http_request=_history_request(),
+                db_manager=_FailingHistoryDb(),
+            )
 
         self.assertEqual(ctx.exception.status_code, 500)
 
@@ -530,9 +545,9 @@ class RunDiagnosticsP2TestCase(unittest.TestCase):
         db = _FakeHistoryDb(record)
 
         with self.assertRaises(ValueError):
-            HistoryService(db).resolve_and_get_diagnostics("1")
+            HistoryService(db, owner=GLOBAL_ANALYSIS_OWNER).resolve_and_get_diagnostics("1")
         with self.assertRaises(HTTPException) as ctx:
-            get_history_diagnostics("1", db_manager=db)
+            get_history_diagnostics("1", http_request=_history_request(), db_manager=db)
 
         self.assertEqual(ctx.exception.status_code, 500)
 

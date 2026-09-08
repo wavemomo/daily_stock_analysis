@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from data_provider.base import canonical_stock_code
+from src.portfolio_ownership import PortfolioScope, UNSET_PORTFOLIO_SCOPE
 from src.repositories.portfolio_repo import PortfolioRepository
 from src.services.portfolio_service import (
     PortfolioBusyError,
@@ -186,12 +187,12 @@ class PortfolioImportService:
         broker: str,
         records: List[Dict[str, Any]],
         dry_run: bool = False,
-        owner_id: Optional[str] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> Dict[str, Any]:
         broker_norm = self._normalize_broker(broker)
         self.portfolio_service._require_active_account(
             account_id,
-            owner_id=owner_id,
+            portfolio_scope=portfolio_scope,
         )
 
         inserted_count = 0
@@ -250,7 +251,7 @@ class PortfolioImportService:
                     trade_uid=trade_uid,
                     dedup_hash=dedup_hash_to_use,
                     note=(record.get("note") or "").strip() or f"csv_import:{broker_norm}",
-                    owner_id=owner_id,
+                    portfolio_scope=portfolio_scope,
                 )
                 inserted_count += 1
             except PortfolioConflictError:

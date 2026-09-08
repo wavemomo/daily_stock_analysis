@@ -385,16 +385,27 @@ class AgentSkillsEndpointTestCase(unittest.TestCase):
                 future.set_result(func())
                 return future
 
+        http_request = SimpleNamespace(
+            state=SimpleNamespace(
+                miniapp_principal=SimpleNamespace(user=SimpleNamespace(id=101)),
+                auth_kind="miniapp",
+            )
+        )
+
         with patch("api.v1.endpoints.agent.get_config", return_value=config), patch(
             "api.v1.endpoints.agent._build_executor",
             return_value=executor,
         ) as mock_build_executor, patch(
             "api.v1.endpoints.agent.asyncio.get_running_loop",
             side_effect=lambda: _ImmediateLoop(real_get_running_loop()),
+        ), patch(
+            "api.v1.endpoints.agent.FeatureQuotaService.reserve_for_request",
+            return_value=None,
         ):
             payload = asyncio.run(
                 agent.agent_chat(
                     request,
+                    http_request,
                     session_service=agent.AgentChatSessionService(),
                 )
             ).model_dump()

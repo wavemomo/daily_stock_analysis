@@ -35,6 +35,17 @@ class MiniappProfileUpdateRequest(BaseModel):
     nickname: Optional[str] = Field(None, max_length=64)
 
 
+class MiniappIdentityBindApproveRequest(BaseModel):
+    """小程序当前用户批准一个 Web 端发起的显式身份绑定挑战。"""
+
+    challenge: str = Field(..., min_length=1, max_length=512)
+
+
+class MiniappIdentityBindApproveResponse(BaseModel):
+    status: str
+    expires_at: str
+
+
 class DailyReflectionUpsertRequest(BaseModel):
     reflection_date: date
     title: str = Field("", max_length=80)
@@ -59,6 +70,36 @@ class DailyReflectionListResponse(BaseModel):
 
 class DailyReflectionDeleteResponse(BaseModel):
     deleted: int
+
+
+class DailyReflectionStatsResponse(BaseModel):
+    total: int
+    current_streak: int
+    longest_streak: int
+    today_done: bool
+    month: str
+    month_count: int
+    month_days: List[int] = Field(default_factory=list)
+
+
+class MiniappWatchlistItem(BaseModel):
+    id: int
+    stock_code: str
+    stock_name: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class MiniappWatchlistMutateRequest(BaseModel):
+    stock_code: str = Field(..., min_length=1, max_length=32)
+    stock_name: str = Field("", max_length=64)
+
+
+class MiniappWatchlistListResponse(BaseModel):
+    items: List[MiniappWatchlistItem] = Field(default_factory=list)
+    # stock_codes 便于客户端沿用既有自选渲染逻辑（与全局自选返回形状对齐）。
+    stock_codes: List[str] = Field(default_factory=list)
+    total: int
 
 
 class MiniappRoleAssignmentRequest(BaseModel):

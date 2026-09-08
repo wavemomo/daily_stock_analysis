@@ -18,6 +18,7 @@ from src.agent.events import (
     _read_quote_float,
     validate_event_alert_rule,
 )
+from src.portfolio_ownership import LEGACY_GLOBAL_PORTFOLIO_SCOPE, PortfolioScope
 from src.repositories.alert_repo import AlertRepository
 from src.services.alert_indicators import (
     TECHNICAL_ALERT_TYPES,
@@ -80,6 +81,13 @@ SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
 NULLABLE_RULE_UPDATE_FIELDS = frozenset({"cooldown_policy", "notification_policy"})
 
 logger = logging.getLogger(__name__)
+
+
+def _portfolio_scope_for_user(user_id: Optional[int]) -> PortfolioScope:
+    """Map persisted alert ownership to the matching trusted Portfolio scope."""
+    if user_id is None:
+        return LEGACY_GLOBAL_PORTFOLIO_SCOPE
+    return PortfolioScope.user(str(user_id))
 
 
 class AlertServiceError(ValueError):
@@ -987,7 +995,7 @@ class AlertService:
             if target_scope in {"portfolio_holdings", "portfolio_account"}:
                 ensure_active_portfolio_account(
                     normalized,
-                    owner_id=str(user_id) if user_id is not None else None,
+                    portfolio_scope=_portfolio_scope_for_user(user_id),
                 )
             return normalized
         except ValueError as exc:
@@ -1065,7 +1073,7 @@ class AlertService:
                 make_portfolio_risk_payload(
                     parent_key=parent_key,
                     data=data,
-                    owner_id=str(row.user_id) if row.user_id is not None else None,
+                    portfolio_scope=_portfolio_scope_for_user(row.user_id),
                 )
             ]
 
@@ -1082,7 +1090,7 @@ class AlertService:
                     target_scope=data["target_scope"],
                     target=data["target"],
                     config=config,
-                    owner_id=str(row.user_id) if row.user_id is not None else None,
+                    portfolio_scope=_portfolio_scope_for_user(row.user_id),
                 )
             except Exception as exc:
                 return [

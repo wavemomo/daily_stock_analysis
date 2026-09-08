@@ -15,7 +15,7 @@ import copy
 import uuid
 from typing import Optional, Dict, Any, Callable, List
 
-from src.repositories.analysis_repo import AnalysisRepository
+from src.analysis_ownership import AnalysisOwner
 from src.report_language import (
     get_sentiment_label,
     get_localized_stock_name,
@@ -62,6 +62,28 @@ def asset_type_from_canonical_code(code: Any) -> Optional[str]:
     return None
 
 
+def _resolve_analysis_owner(
+    *,
+    owner: Optional[AnalysisOwner] = None,
+    owner_scope: Optional[str] = "global",
+    owner_user_id: Optional[int] = None,
+) -> AnalysisOwner:
+    """Normalize legacy owner inputs once before entering the pipeline."""
+    if owner is not None:
+        if not isinstance(owner, AnalysisOwner):
+            raise TypeError("owner must be an AnalysisOwner")
+        if owner_user_id is not None or (
+            owner_scope is not None and owner_scope != "global"
+        ):
+            legacy_owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+            if legacy_owner != owner:
+                raise ValueError("owner conflicts with owner_scope/owner_user_id")
+        return owner
+    resolved = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+    assert resolved is not None
+    return resolved
+
+
 class AnalysisService:
     """
     分析服务
@@ -71,7 +93,6 @@ class AnalysisService:
     
     def __init__(self):
         """初始化分析服务"""
-        self.repo = AnalysisRepository()
         self.last_error: Optional[str] = None
     
     def analyze_stock(
@@ -89,6 +110,9 @@ class AnalysisService:
         portfolio_context: Optional[Dict[str, Any]] = None,
         report_language: Optional[str] = None,
         analysis_target: Optional[Any] = None,
+        owner: Optional[AnalysisOwner] = None,
+        owner_scope: Optional[str] = "global",
+        owner_user_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         执行股票分析
@@ -136,6 +160,12 @@ class AnalysisService:
                 config = copy.copy(config)
                 config.report_language = normalized_report_language
             
+            effective_owner = _resolve_analysis_owner(
+                owner=owner,
+                owner_scope=owner_scope,
+                owner_user_id=owner_user_id,
+            )
+
             # 创建分析流水线
             pipeline = StockAnalysisPipeline(
                 config=config,
@@ -146,6 +176,7 @@ class AnalysisService:
                 analysis_skills=skills,
                 analysis_phase=analysis_phase,
                 portfolio_context=portfolio_context,
+                owner=effective_owner,
             )
             
             # 确定报告类型 (API: simple/detailed/full/brief -> ReportType)

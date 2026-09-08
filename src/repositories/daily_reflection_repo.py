@@ -64,6 +64,16 @@ class DailyReflectionRepository:
                 .limit(1)
             ).scalar_one_or_none()
 
+    def list_dates(self, *, user_id: int) -> List[date]:
+        """返回当前用户全部心得日期（升序），仅取 date 列用于连续打卡与月度统计。"""
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(DailyReflectionRecord.reflection_date)
+                .where(DailyReflectionRecord.user_id == user_id)
+                .order_by(DailyReflectionRecord.reflection_date.asc())
+            ).scalars().all()
+            return [row for row in rows]
+
     def get_by_date(
         self,
         *,

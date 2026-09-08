@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 import uuid
 
+from src.analysis_ownership import AnalysisOwner
+from src.repositories.analysis_repo import AnalysisRepository
 from src.config import get_config
 from src.notification import NotificationService
 from src.market_analyzer import MarketAnalyzer
@@ -59,17 +61,51 @@ class MarketReviewRunResult:
     market_review_payload: Dict[str, Any] = field(default_factory=dict)
 
 
-def _refresh_market_review_history_diagnostics(*, query_id: str) -> None:
+def _resolve_market_review_owner(
+    *,
+    owner: Optional[AnalysisOwner] = None,
+    owner_scope: Optional[str] = "global",
+    owner_user_id: Optional[int] = None,
+) -> AnalysisOwner:
+    """Normalize legacy inputs once before market-review persistence work."""
+    if owner is not None:
+        if not isinstance(owner, AnalysisOwner):
+            raise TypeError("owner must be an AnalysisOwner")
+        if owner_user_id is not None or (
+            owner_scope is not None and owner_scope != "global"
+        ):
+            legacy_owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+            if legacy_owner != owner:
+                raise ValueError("owner conflicts with owner_scope/owner_user_id")
+        return owner
+    resolved_owner = AnalysisOwner.from_legacy(owner_scope, owner_user_id)
+    assert resolved_owner is not None
+    return resolved_owner
+
+
+def _refresh_market_review_history_diagnostics(
+    *,
+    query_id: str,
+    owner: Optional[AnalysisOwner] = None,
+    owner_scope: Optional[str] = "global",
+    owner_user_id: Optional[int] = None,
+) -> None:
     """Refresh persisted market-review diagnostics after late flow events are recorded."""
     diagnostic_snapshot = current_diagnostic_snapshot()
     if diagnostic_snapshot is None:
         return
 
+    effective_owner = _resolve_market_review_owner(
+        owner=owner,
+        owner_scope=owner_scope,
+        owner_user_id=owner_user_id,
+    )
+
     try:
         from src.storage import DatabaseManager
 
         db = DatabaseManager.get_instance()
-        updater = getattr(db, "update_analysis_history_diagnostics", None)
+        updater = getattr(AnalysisRepository(db, owner=effective_owner), "update_diagnostics", None)
         if callable(updater):
             updater(
                 query_id=query_id,
@@ -88,7 +124,15 @@ def _record_market_review_notification_run(
     success: bool,
     attempts: int = 1,
     error_message: Optional[Any] = None,
+    owner: Optional[AnalysisOwner] = None,
+    owner_scope: Optional[str] = "global",
+    owner_user_id: Optional[int] = None,
 ) -> None:
+    effective_owner = _resolve_market_review_owner(
+        owner=owner,
+        owner_scope=owner_scope,
+        owner_user_id=owner_user_id,
+    )
     record_notification_run(
         channel=channel,
         status=status,
@@ -96,7 +140,10 @@ def _record_market_review_notification_run(
         attempts=attempts,
         error_message=error_message,
     )
-    _refresh_market_review_history_diagnostics(query_id=query_id)
+    _refresh_market_review_history_diagnostics(
+        query_id=query_id,
+        owner=effective_owner,
+    )
 
 
 def _collect_market_light_snapshot(
@@ -184,6 +231,9 @@ def run_market_review(
     save_report_file: bool = True,
     persist_history: bool = True,
     trigger_source: str = "cli",
+    owner: Optional[AnalysisOwner] = None,
+    owner_scope: Optional[str] = "global",
+    owner_user_id: Optional[int] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -205,6 +255,11 @@ def run_market_review(
         复盘报告文本
     """
     runtime_config = config or get_config()
+    effective_owner = _resolve_market_review_owner(
+        owner=owner,
+        owner_scope=owner_scope,
+        owner_user_id=owner_user_id,
+    )
     history_query_id = query_id or f"market_review_{uuid.uuid4().hex}"
     review_text = _get_market_review_text(getattr(runtime_config, "report_language", "zh"))
     raw_region = (
@@ -340,6 +395,7 @@ def run_market_review(
                     query_id=history_query_id,
                     market_light_snapshots=market_light_snapshots,
                     market_review_payload=market_review_payload,
+                    owner=effective_owner,
                 )
             
             # 推送通知（合并模式下跳过，由 main 层统一发送）
@@ -357,6 +413,7 @@ def run_market_review(
                     status="skipped",
                     success=False,
                     attempts=0,
+                    owner=effective_owner,
                 )
             elif send_notification and notifier.is_available():
                 # 添加标题
@@ -383,6 +440,7 @@ def run_market_review(
                     channel="report",
                     status="success" if success else "failed",
                     success=success,
+                    owner=effective_owner,
                 )
                 if success:
                     logger.info(
@@ -414,6 +472,7 @@ def run_market_review(
                     status="skipped",
                     success=False,
                     attempts=0,
+                    owner=effective_owner,
                 )
             else:
                 logger.info(
@@ -429,6 +488,7 @@ def run_market_review(
                     status="not_configured",
                     success=False,
                     attempts=0,
+                    owner=effective_owner,
                 )
             
             if return_structured:
@@ -787,8 +847,16 @@ def _persist_market_review_history(
     query_id: Optional[str] = None,
     market_light_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
     market_review_payload: Optional[Dict[str, Any]] = None,
+    owner: Optional[AnalysisOwner] = None,
+    owner_scope: Optional[str] = "global",
+    owner_user_id: Optional[int] = None,
 ) -> int:
     """Persist market review output into the existing analysis history table."""
+    effective_owner = _resolve_market_review_owner(
+        owner=owner,
+        owner_scope=owner_scope,
+        owner_user_id=owner_user_id,
+    )
     try:
         from src.storage import DatabaseManager
 
@@ -840,7 +908,7 @@ def _persist_market_review_history(
         )
 
         db = DatabaseManager.get_instance()
-        saved_history_id = db.save_analysis_history(
+        saved_history_id = AnalysisRepository(db, owner=effective_owner).save(
             result=result,
             query_id=history_query_id,
             report_type=MARKET_REVIEW_REPORT_TYPE,
@@ -862,7 +930,10 @@ def _persist_market_review_history(
             metadata_saved=bool(saved_history_id),
             analysis_history_id=valid_saved_history_id,
         )
-        _refresh_market_review_history_diagnostics(query_id=history_query_id)
+        _refresh_market_review_history_diagnostics(
+            query_id=history_query_id,
+            owner=effective_owner,
+        )
         if saved_history_id:
             logger.info("大盘复盘历史记录已保存: query_id=%s", history_query_id)
         else:

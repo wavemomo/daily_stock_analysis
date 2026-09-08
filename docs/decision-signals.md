@@ -77,7 +77,7 @@ Web 展示必须把这些 wire value 映射为当前 UI 语言的用户可读标
 - `GET/PUT /api/v1/decision-signals/{signal_id}/feedback`：查询或写入 useful / not useful 反馈。
 - `POST /api/v1/decision-signals/reassess`：基于来源历史报告快照重新计算不同决策风格下的信号；`persist=false` 只预览，`persist=true` 由服务端重算并保存通过 guardrail 的结果。
 
-这些接口继承现有 `/api/v1/*` 管理员鉴权；`ADMIN_AUTH_ENABLED=true` 时需要有效管理员会话 Cookie。
+这些接口遵循当前 `/api/v1/*` 的 RBAC 策略：Web 使用微信 OAuth 建立的 Cookie，会话写操作还需精确 `Origin` 与 `X-CSRF-Token`；小程序使用微信登录签发的 Bearer token。两种有效凭据同时出现时请求会以 `400 authentication_conflict` fail closed；权限不足返回 `403`。
 
 ## 决策风格历史表现
 

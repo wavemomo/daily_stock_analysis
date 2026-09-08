@@ -80,6 +80,15 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     "PROXY_HOST",
     "PROXY_PORT",
     "SEARXNG_TIMEOUT_SECONDS",
+    # 认证发行方与凭据只能由部署环境管理，绝不暴露给通用设置 UI。
+    "WECHAT_MINIAPP_APP_ID",
+    "WECHAT_MINIAPP_APP_SECRET",
+    "WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS",
+    "WECHAT_MINIAPP_SESSION_TTL_HOURS",
+    "WECHAT_OPEN_WEB_APP_ID",
+    "WECHAT_OPEN_WEB_APP_SECRET",
+    "WECHAT_OPEN_WEB_REDIRECT_URI",
+    "WECHAT_OPEN_WEB_STATE_TTL_SECONDS",
 }
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
@@ -3369,36 +3378,6 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             },
         ],
         "warning_codes": ["restart_required"],
-    },
-    "ADMIN_AUTH_ENABLED": {
-        "title": "Admin Auth Enabled",
-        "description": "Enable password protection for Web UI. The first visit initializes the admin password.",
-        "category": "system",
-        "data_type": "boolean",
-        "ui_control": "switch",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": False,
-        "default_value": "false",
-        "options": [],
-        "validation": {},
-        "display_order": 41,
-        "help_key": "settings.system.ADMIN_AUTH_ENABLED",
-        "examples": [
-            "ADMIN_AUTH_ENABLED=true",
-            "python -m src.auth reset_password",
-        ],
-        "docs": [
-            {
-                "label": "完整指南：其他配置",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#其他配置",
-            },
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-        ],
-        "warning_codes": ["public_webui_requires_auth", "auth_settings_endpoint_required"],
     },
     "TRUST_X_FORWARDED_FOR": {
         "title": "Trust X-Forwarded-For",

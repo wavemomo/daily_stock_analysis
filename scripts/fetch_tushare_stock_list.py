@@ -48,7 +48,9 @@ except ImportError:
 
 
 # 配置
-load_dotenv()
+# 遵循 ENV_FILE（测试通过 conftest 指向空文件，避免导入本模块时把真实 .env
+# 泄漏进 os.environ）；CLI 场景 ENV_FILE 未设置时仍加载仓库根 .env。
+load_dotenv(os.environ.get("ENV_FILE") or None)
 
 TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN')
 OUTPUT_DIR = Path(__file__).parent.parent / "data"

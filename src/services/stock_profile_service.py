@@ -432,7 +432,11 @@ class StockProfileService:
 
     def _history_service(self) -> HistoryService:
         if self.history_service is None:
-            self.history_service = HistoryService()
+            # This fallback is only used by internal profile composition. It is
+            # intentionally explicit rather than an unscoped HistoryService.
+            from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
+
+            self.history_service = HistoryService(owner=GLOBAL_ANALYSIS_OWNER)
         return self.history_service
 
     def _intelligence_service(self) -> IntelligenceService:

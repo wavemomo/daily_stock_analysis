@@ -17,6 +17,7 @@ ensure_litellm_stub()
 
 from api.v1.endpoints.analysis import get_task_run_flow
 from api.v1.endpoints.history import get_history_run_flow
+from src.analysis_ownership import AnalysisOwner, GLOBAL_ANALYSIS_OWNER
 from src.services.run_flow import (
     build_history_run_flow_snapshot,
     build_task_run_flow_snapshot,
@@ -192,10 +193,17 @@ class _FakeHistoryDb:
     def __init__(self, record: SimpleNamespace | None):
         self.record = record
 
-    def get_analysis_history_by_id(self, record_id: int):
+    def get_analysis_history_by_id(self, record_id: int, **kwargs):
         return self.record if self.record is not None and record_id == self.record.id else None
 
-    def get_latest_analysis_by_query_id(self, query_id: str, *, code: str | None = None, report_type: str | None = None):
+    def get_latest_analysis_by_query_id(
+        self,
+        query_id: str,
+        *,
+        code: str | None = None,
+        report_type: str | None = None,
+        **kwargs,
+    ):
         if self.record is None or query_id != self.record.query_id:
             return None
         if code is not None and self.record.code != code:
@@ -209,31 +217,63 @@ class _FakeMarketReviewDb:
     def __init__(self, save_result):
         self.save_result = save_result
         self.saved_context_snapshot = None
+        self.saved_owner_kwargs = None
         self.updated_diagnostics = None
+        self.updated_owner_kwargs = None
 
     def save_analysis_history(self, **kwargs):
         self.saved_context_snapshot = kwargs.get("context_snapshot")
+        self.saved_owner_kwargs = {
+            "owner_scope": kwargs.get("owner_scope"),
+            "owner_user_id": kwargs.get("owner_user_id"),
+        }
         return self.save_result
 
-    def get_latest_analysis_by_query_id(self, query_id: str, *, code: str | None = None, report_type: str | None = None):
-        _ = (query_id, code, report_type)
+    def get_latest_analysis_by_query_id(
+        self,
+        query_id: str,
+        *,
+        code: str | None = None,
+        report_type: str | None = None,
+        **kwargs,
+    ):
+        _ = (query_id, code, report_type, kwargs)
         return SimpleNamespace(id=42)
 
-    def update_analysis_history_diagnostics(self, *, query_id: str, code: str, diagnostics: dict) -> None:
-        _ = (query_id, code)
+    def update_analysis_history_diagnostics(
+        self,
+        *,
+        query_id: str,
+        code: str,
+        diagnostics: dict | None = None,
+        notification_runs: list[dict] | None = None,
+        owner_scope: str | None = None,
+        owner_user_id: int | None = None,
+    ) -> None:
+        _ = (query_id, code, notification_runs)
         self.updated_diagnostics = diagnostics
+        self.updated_owner_kwargs = {
+            "owner_scope": owner_scope,
+            "owner_user_id": owner_user_id,
+        }
 
 
 class RunFlowTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._original_queue = AnalysisTaskQueue._instance
         AnalysisTaskQueue._instance = None
+        self.http_request = SimpleNamespace(
+            state=SimpleNamespace(
+                miniapp_principal=SimpleNamespace(user=SimpleNamespace(id=1))
+            )
+        )
 
     def tearDown(self) -> None:
         AnalysisTaskQueue._instance = self._original_queue
 
     def test_active_task_missing_diagnostics_returns_skeleton_flow(self) -> None:
         task = TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
             task_id="task-active",
             trace_id="trace-active",
             stock_code="600519",
@@ -255,6 +295,7 @@ class RunFlowTestCase(unittest.TestCase):
 
     def test_active_task_snapshot_includes_recent_flow_events_without_faking_missing_diagnostics(self) -> None:
         task = TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
             task_id="task-active",
             trace_id="trace-active",
             stock_code="600519",
@@ -296,6 +337,7 @@ class RunFlowTestCase(unittest.TestCase):
 
     def test_active_provider_events_only_link_fallbacks_within_same_data_type(self) -> None:
         task = TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
             task_id="task-active-providers",
             trace_id="trace-active-providers",
             stock_code="600519",
@@ -394,6 +436,7 @@ class RunFlowTestCase(unittest.TestCase):
         self.assertIsNotNone(diagnostics)
         active_snapshot = build_task_run_flow_snapshot(
             TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
                 task_id="task-provider-contract",
                 trace_id="trace-provider-contract",
                 stock_code="600519",
@@ -469,6 +512,7 @@ class RunFlowTestCase(unittest.TestCase):
 
         snapshot = build_task_run_flow_snapshot(
             TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
                 task_id="task-started",
                 trace_id="trace-started",
                 stock_code="600519",
@@ -531,6 +575,7 @@ class RunFlowTestCase(unittest.TestCase):
 
         snapshot = build_task_run_flow_snapshot(
             TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
                 task_id="task-chip-started",
                 trace_id="trace-chip-started",
                 stock_code="600519",
@@ -575,6 +620,7 @@ class RunFlowTestCase(unittest.TestCase):
 
         snapshot = build_task_run_flow_snapshot(
             TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
                 task_id="task-llm-alias",
                 trace_id="trace-llm-alias",
                 stock_code="600519",
@@ -620,6 +666,7 @@ class RunFlowTestCase(unittest.TestCase):
 
         snapshot = build_task_run_flow_snapshot(
             TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
                 task_id="task-completed-live",
                 trace_id="trace-completed-live",
                 stock_code="600519",
@@ -641,6 +688,7 @@ class RunFlowTestCase(unittest.TestCase):
         queue = AnalysisTaskQueue(max_workers=1)
         queue._max_flow_events_per_task = 2
         task = TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
             task_id="task-flow",
             stock_code="600519",
             status=TaskStatus.PROCESSING,
@@ -653,7 +701,7 @@ class RunFlowTestCase(unittest.TestCase):
         queue.append_task_flow_event("task-flow", {"id": "evt-2", "type": "llm_run"})
         queue.append_task_flow_event("task-flow", {"id": "evt-3", "type": "history_run"})
 
-        self.assertEqual([event["id"] for event in queue.get_task_flow_events("task-flow")], ["evt-2", "evt-3"])
+        self.assertEqual([event["id"] for event in queue.get_task_flow_events("task-flow", owner=GLOBAL_ANALYSIS_OWNER)], ["evt-2", "evt-3"])
         self.assertEqual(events[-1][0], "task_progress")
         self.assertEqual(events[-1][1]["flow_event"]["id"], "evt-3")
 
@@ -1200,26 +1248,66 @@ class RunFlowTestCase(unittest.TestCase):
         self.assertIn("diagnostics", fake_db.saved_context_snapshot)
         self.assertIn("analysis_context_pack_overview", fake_db.saved_context_snapshot)
         self.assertIsNotNone(fake_db.updated_diagnostics)
+        self.assertEqual(
+            fake_db.saved_owner_kwargs,
+            {"owner_scope": "global", "owner_user_id": None},
+        )
+        self.assertEqual(
+            fake_db.updated_owner_kwargs,
+            {"owner_scope": "global", "owner_user_id": None},
+        )
         history_runs = fake_db.updated_diagnostics["history_runs"]
         self.assertTrue(history_runs)
         self.assertEqual(history_runs[-1].get("analysis_history_id"), 42)
 
+    def test_market_review_diagnostic_update_is_bound_to_explicit_owner(self) -> None:
+        from src.core.market_review import _refresh_market_review_history_diagnostics
+
+        fake_db = _FakeMarketReviewDb(save_result=42)
+        owner = AnalysisOwner.user(701)
+        token = activate_run_diagnostic_context(
+            trace_id="trace-market-owner",
+            task_id="task-market-owner",
+            query_id="query-market-owner",
+            stock_code="MARKET",
+            trigger_source="api",
+        )
+        try:
+            with patch("src.storage.DatabaseManager.get_instance", return_value=fake_db):
+                _refresh_market_review_history_diagnostics(
+                    query_id="query-market-owner",
+                    owner=owner,
+                )
+        finally:
+            reset_run_diagnostic_context(token)
+
+        self.assertIsNotNone(fake_db.updated_diagnostics)
+        self.assertEqual(
+            fake_db.updated_owner_kwargs,
+            {"owner_scope": "user", "owner_user_id": 701},
+        )
+
     def test_flow_endpoints_return_404_for_missing_records(self) -> None:
         with self.assertRaises(HTTPException) as history_ctx:
-            get_history_run_flow("404", db_manager=_FakeHistoryDb(None))
+            get_history_run_flow(
+                "404",
+                http_request=self.http_request,
+                db_manager=_FakeHistoryDb(None),
+            )
         self.assertEqual(history_ctx.exception.status_code, 404)
 
-        queue = SimpleNamespace(get_task=lambda task_id: None)
+        queue = SimpleNamespace(get_task=lambda task_id, **kwargs: None)
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue), patch(
             "api.v1.endpoints.analysis._load_history_run_flow_by_query_id",
             return_value=None,
         ):
             with self.assertRaises(HTTPException) as task_ctx:
-                get_task_run_flow("missing-task")
+                get_task_run_flow("missing-task", http_request=self.http_request)
         self.assertEqual(task_ctx.exception.status_code, 404)
 
     def test_completed_task_flow_refresh_uses_persisted_history_report_type_alias(self) -> None:
         task = TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
             task_id="query-flow",
             trace_id="trace-flow",
             stock_code="600519",
@@ -1227,13 +1315,13 @@ class RunFlowTestCase(unittest.TestCase):
             status=TaskStatus.COMPLETED,
             report_type="detailed",
         )
-        queue = SimpleNamespace(get_task=lambda task_id: task)
+        queue = SimpleNamespace(get_task=lambda task_id, **kwargs: task)
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue), patch(
             "api.v1.endpoints.analysis._load_history_run_flow_by_query_id",
             return_value=None,
         ) as load_history:
-            snapshot = get_task_run_flow("query-flow")
+            snapshot = get_task_run_flow("query-flow", http_request=self.http_request)
 
         self.assertEqual(snapshot.task_id, "query-flow")
         load_history.assert_called_once_with(
@@ -1241,10 +1329,12 @@ class RunFlowTestCase(unittest.TestCase):
             code="600519",
             report_type="full",
             fail_open=True,
+            owner=AnalysisOwner.user(1),
         )
 
     def test_completed_market_review_task_flow_uses_market_history_filters(self) -> None:
         task = TaskInfo(
+            owner=GLOBAL_ANALYSIS_OWNER,
             task_id="market-query-flow",
             trace_id="trace-market-flow",
             stock_code="cn",
@@ -1252,13 +1342,13 @@ class RunFlowTestCase(unittest.TestCase):
             status=TaskStatus.COMPLETED,
             report_type="market-review",
         )
-        queue = SimpleNamespace(get_task=lambda task_id: task)
+        queue = SimpleNamespace(get_task=lambda task_id, **kwargs: task)
 
         with patch("api.v1.endpoints.analysis.get_task_queue", return_value=queue), patch(
             "api.v1.endpoints.analysis._load_history_run_flow_by_query_id",
             return_value=None,
         ) as load_history:
-            snapshot = get_task_run_flow("market-query-flow")
+            snapshot = get_task_run_flow("market-query-flow", http_request=self.http_request)
 
         self.assertEqual(snapshot.task_id, "market-query-flow")
         load_history.assert_called_once_with(
@@ -1266,6 +1356,7 @@ class RunFlowTestCase(unittest.TestCase):
             code="MARKET",
             report_type="market_review",
             fail_open=True,
+            owner=AnalysisOwner.user(1),
         )
 
     def test_run_flow_payload_redacts_errors_metadata_and_sensitive_paths(self) -> None:

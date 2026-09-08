@@ -122,8 +122,6 @@ vi.mock('../../utils/constants', async () => {
 });
 
 vi.mock('../../components/settings', () => ({
-  AuthSettingsCard: () => <div>认证与登录保护</div>,
-  ChangePasswordCard: () => <div>修改密码</div>,
   IntelligentImport: ({ onMerged }: { onMerged: (value: string) => void }) => (
     <button type="button" onClick={() => onMerged('SZ000001,SZ000002')}>
       merge stock list
@@ -347,15 +345,15 @@ function buildSystemConfigState(overrides: ConfigOverride = {}) {
     itemsByCategory: {
       system: [
         {
-          key: 'ADMIN_AUTH_ENABLED',
-          value: 'true',
+          key: 'WEBUI_HOST',
+          value: '127.0.0.1',
           rawValueExists: true,
           isMasked: false,
           schema: {
-            key: 'ADMIN_AUTH_ENABLED',
+            key: 'WEBUI_HOST',
             category: 'system',
-            dataType: 'boolean',
-            uiControl: 'switch',
+            dataType: 'string',
+            uiControl: 'input',
             isSensitive: false,
             isRequired: false,
             isEditable: true,
@@ -646,8 +644,7 @@ describe('SettingsPage', () => {
     desktopOpenReleasePage.mockResolvedValue(true);
     desktopOnUpdateStateChange.mockImplementation(() => () => undefined);
     useAuthMock.mockReturnValue({
-      authEnabled: true,
-      passwordChangeable: true,
+      hasPermission: (permission: string) => permission === 'system.manage',
       refreshStatus,
     });
     useSystemConfigMock.mockReturnValue(buildSystemConfigState());
@@ -662,12 +659,12 @@ describe('SettingsPage', () => {
     resetSharedDesktopUpdateState();
   });
 
-  it('renders category navigation and auth settings modules', async () => {
+  it('renders category navigation without legacy credential controls', async () => {
     renderSettingsPage();
 
-    expect(await screen.findByRole('heading', { name: '系统设置' })).toBeInTheDocument();
-    expect(screen.getByText('认证与登录保护')).toBeInTheDocument();
-    expect(screen.getByText('修改密码')).toBeInTheDocument();
+    expect((await screen.findAllByRole('heading', { name: '系统设置' })).length).toBeGreaterThan(0);
+    expect(screen.queryByText('认证与登录保护')).not.toBeInTheDocument();
+    expect(screen.queryByText('修改密码')).not.toBeInTheDocument();
     expect(load).toHaveBeenCalled();
   });
 
@@ -1713,6 +1710,10 @@ describe('SettingsPage', () => {
     expect(screen.queryByTestId('settings-field-SCHEDULE_TIMES')).not.toBeInTheDocument();
     expect(screen.queryByTestId('settings-field-SCHEDULE_RUN_IMMEDIATELY')).not.toBeInTheDocument();
     expect(screen.getByTestId('settings-field-LOG_LEVEL')).toBeInTheDocument();
+    expect(screen.getByText('启动时立即执行一次')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('scheduler-run-on-start-checkbox'));
+    expect(setDraftValue).toHaveBeenCalledWith('SCHEDULE_RUN_IMMEDIATELY', 'true');
 
     fireEvent.change(screen.getByTestId('scheduler-time-input-0'), {
       target: { value: '10:30' },
@@ -2424,39 +2425,37 @@ describe('SettingsPage', () => {
     expect(screen.getByText(/Docker 部署中/)).toHaveTextContent('ENV_FILE');
   });
 
-  it('disables env backup actions when web auth is not enabled', () => {
+  it('disables env backup actions without system.manage permission', () => {
     useAuthMock.mockReturnValue({
-      authEnabled: false,
-      passwordChangeable: false,
+      hasPermission: () => false,
       refreshStatus,
     });
 
     renderSettingsPage();
 
-    expect(screen.getByText(/当前 Web 端未开启管理员鉴权/)).toBeInTheDocument();
+    expect(screen.getByText(/缺少系统管理权限/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导出 .env' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '导入 .env' })).toBeDisabled();
   });
 
-  it('uses live auth state for env backup availability instead of loaded config items', () => {
+  it('uses the current system.manage permission for env backup availability', () => {
     const configState = buildSystemConfigState();
     useSystemConfigMock.mockReturnValue(buildSystemConfigState({
       itemsByCategory: {
         ...configState.itemsByCategory,
         system: configState.itemsByCategory.system.map((item) => (
-          item.key === 'ADMIN_AUTH_ENABLED' ? { ...item, value: 'false' } : item
+          item.key === 'WEBUI_HOST' ? { ...item, value: '0.0.0.0' } : item
         )),
       },
     }));
     useAuthMock.mockReturnValue({
-      authEnabled: true,
-      passwordChangeable: true,
+      hasPermission: (permission: string) => permission === 'system.manage',
       refreshStatus,
     });
 
     renderSettingsPage();
 
-    expect(screen.queryByText(/当前 Web 端未开启管理员鉴权/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/缺少系统管理权限/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导出 .env' })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: '导入 .env' })).not.toBeDisabled();
   });

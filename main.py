@@ -104,14 +104,10 @@ def _warn_if_public_webui_without_auth(host: str) -> None:
     if not _is_public_bind_host(host):
         return
 
-    from src.auth import is_auth_enabled
-
-    if is_auth_enabled():
-        return
     logger.warning(
-        "WEBUI_HOST=%s binds the Web UI to a public interface while "
-        "ADMIN_AUTH_ENABLED=false. Keep this service behind a trusted network "
-        "boundary or enable admin authentication before exposing it.",
+        "WEBUI_HOST=%s binds the Web UI to a public interface. "
+        "Use a trusted HTTPS reverse proxy and configure WeChat Open Platform OAuth "
+        "before exposing this service.",
         host,
     )
 

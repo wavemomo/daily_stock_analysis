@@ -8,31 +8,57 @@ from api.v1.endpoints import (
     alerts,
     screening,
     analysis,
-    auth,
     backtest,
     daily_reflections,
     data,
     decision_signals,
+    feature_quotas,
     health,
     history,
     intelligence,
     miniapp_auth,
     miniapp_rbac,
+    miniapp_system_config,
+    miniapp_watchlist,
     portfolio,
+    rbac,
     stocks,
     system_config,
     usage,
+    web_auth,
 )
 
 router = APIRouter()
 
-router.include_router(auth.router, prefix="/auth", tags=["Auth"])
+router.include_router(web_auth.router, prefix="/web-auth", tags=["WebAuth"])
 router.include_router(miniapp_auth.router, prefix="/miniapp/auth", tags=["MiniappAuth"])
 router.include_router(miniapp_rbac.router, prefix="/miniapp/rbac", tags=["MiniappRbac"])
+router.include_router(
+    miniapp_system_config.router,
+    prefix="/miniapp/system",
+    tags=["MiniappSystemConfig"],
+)
+router.include_router(
+    feature_quotas.miniapp_rbac_router,
+    prefix="/miniapp/rbac/feature-quotas",
+    tags=["MiniappRbac"],
+)
+router.include_router(rbac.router, prefix="/rbac", tags=["Rbac"])
+router.include_router(
+    feature_quotas.miniapp_rbac_router,
+    prefix="/rbac/feature-quotas",
+    tags=["Rbac"],
+)
+router.include_router(feature_quotas.router, prefix="/feature-quotas", tags=["FeatureQuotas"])
 router.include_router(
     daily_reflections.router,
     prefix="/miniapp/daily-reflections",
     tags=["DailyReflections"],
+)
+router.include_router(
+    miniapp_watchlist.router,
+    prefix="/miniapp/watchlist",
+    tags=["MiniappWatchlist"],
 )
 router.include_router(agent.router, prefix="/agent", tags=["Agent"])
 router.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])

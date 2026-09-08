@@ -27,6 +27,7 @@ from src.agent.protocols import (
 from src.agent.runner import RunLoopResult, run_agent_loop
 from src.agent.skills.defaults import extract_skill_id
 from src.agent.tools.registry import ToolRegistry
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 from src.report_language import normalize_report_language
@@ -129,6 +130,8 @@ class BaseAgent(ABC):
                 max_wall_clock_seconds=timeout_seconds,
                 stock_scope=ctx.meta.get("stock_scope"),
                 emit_stage_events=False,
+                resource_owner_id=ctx.meta.get("resource_owner_id"),
+                portfolio_scope=ctx.meta.get("portfolio_scope", UNSET_PORTFOLIO_SCOPE),
             )
 
             result.tokens_used = loop_result.total_tokens

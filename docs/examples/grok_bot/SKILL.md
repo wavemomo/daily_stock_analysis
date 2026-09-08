@@ -56,4 +56,4 @@ description: 调用 daily_stock_analysis API 做股票分析。当用户说「�
 | 409 | 该股正在分析，查已有 `existing_task_id` 的 status；不要另开一条分析 |
 | 500 | 看 DSA 日志；确认 `LITELLM_MODEL` 与对应 Key（含可选 `XAI_API_KEY`） |
 
-若 `ADMIN_AUTH_ENABLED=true`，当前 API 只认 Cookie，不认 Bearer。不要把 `XAI_API_KEY` 当作 DSA API 密钥。
+DSA 业务 API 不接受 `XAI_API_KEY`、其他 LLM provider key、service principal 或 bot token 作为用户凭据。外部 Grok bot 不能用 provider key 直接调用受保护 DSA API；需要触发用户资源时，必须经由用户已认证的 Web 会话或小程序 Bearer 的受控交互边界，并遵守对应的 RBAC 与 owner scope。

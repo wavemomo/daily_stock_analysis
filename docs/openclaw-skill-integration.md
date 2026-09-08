@@ -180,4 +180,6 @@ curl -X POST {DSA_BASE_URL}/api/v1/agent/chat \
 
 ## 认证说明
 
-普通 `/api/v1/*` 业务 API 现在始终要求认证。OpenClaw 应启用 `ADMIN_AUTH_ENABLED=true`，先调用管理员登录接口并在后续请求携带会话 Cookie；微信小程序 Bearer 仅签发给微信用户且受 RBAC 限制，不能用 `XAI_API_KEY` 或其他第三方密钥替代。若 OpenClaw 的 HTTP 工具无法维持 Cookie，会无法直接调用这些业务 API，需要在受控网关中完成管理员会话集成。
+普通 `/api/v1/*` 业务 API 按 RBAC 策略要求用户主体：Web 使用微信开放平台 OAuth 建立的 `dsa_user_session` Cookie，小程序使用微信登录签发的 Bearer token。当前不提供服务主体、API key 或 bot token 的交换接口；OpenClaw 无法自行完成交互式微信扫码 OAuth，因此不能直接获得受保护业务 API 的长期访问权。
+
+`XAI_API_KEY`、LLM provider key 及其他第三方密钥都不是 DSA 身份凭据，不能代替 Cookie 或 Bearer token。若需要自动化集成，应在受控、用户可审计的集成边界中代表已授权用户完成调用；在该边界落地前，Skill 仅应使用健康检查或其他明确匿名开放的接口。

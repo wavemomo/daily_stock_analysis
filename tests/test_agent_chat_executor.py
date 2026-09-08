@@ -10,6 +10,7 @@ from unittest.mock import patch
 from src.agent.agent_backend import AgentRunResult
 from src.agent.chat_executor import AgentChatExecutor
 from src.agent.executor import PreparedAgentChat
+from src.portfolio_ownership import UNSCOPED_PORTFOLIO_SCOPE
 
 
 class _Backend:
@@ -75,6 +76,7 @@ def test_runtime_owned_backend_uses_visible_history_and_forwards_cancellation() 
             "session",
             cancel_event=cancel_event,
             selected_skill_ids=[],
+            portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
         )
 
     assert result.success is True
@@ -101,7 +103,7 @@ def test_dsa_owned_backend_keeps_provider_trace_roundtrip() -> None:
          patch("src.agent.chat_executor.conversation_manager.add_user_message", return_value=11), \
          patch("src.agent.chat_executor.conversation_manager.add_message", return_value=12), \
          patch("src.agent.chat_executor.persist_provider_trace_turns") as persist_trace:
-        result = _executor(backend).chat("question", "session")
+        result = _executor(backend).chat("question", "session", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
     assert result.backend == "litellm"
     assert prepare.call_args.kwargs["include_provider_trace"] is True
@@ -127,7 +129,7 @@ def test_cancelled_codex_turn_is_not_persisted_as_analysis_failure() -> None:
          patch("src.agent.chat_executor.conversation_manager.get_or_create"), \
          patch("src.agent.chat_executor.conversation_manager.add_user_message", return_value=1), \
          patch("src.agent.chat_executor.conversation_manager.add_message", return_value=2) as add_message:
-        result = _executor(backend).chat("question", "session", cancel_event=threading.Event())
+        result = _executor(backend).chat("question", "session", cancel_event=threading.Event(), portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
     assert result.error_code == "cancelled"
     assert add_message.call_args_list[-1].args == (
@@ -152,7 +154,7 @@ def test_timed_out_codex_turn_uses_codex_terminal_note() -> None:
          patch("src.agent.chat_executor.conversation_manager.get_or_create"), \
          patch("src.agent.chat_executor.conversation_manager.add_user_message", return_value=1), \
          patch("src.agent.chat_executor.conversation_manager.add_message", return_value=2) as add_message:
-        result = _executor(backend).chat("question", "session")
+        result = _executor(backend).chat("question", "session", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
     assert result.error_code == "timeout"
     assert add_message.call_args_list[-1].args == (
@@ -177,7 +179,7 @@ def test_timed_out_litellm_turn_keeps_existing_analysis_failure_note() -> None:
          patch("src.agent.chat_executor.conversation_manager.get_or_create"), \
          patch("src.agent.chat_executor.conversation_manager.add_user_message", return_value=1), \
          patch("src.agent.chat_executor.conversation_manager.add_message", return_value=2) as add_message:
-        result = _executor(backend).chat("question", "session")
+        result = _executor(backend).chat("question", "session", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
     assert result.error_code == "timeout"
     assert add_message.call_args_list[-1].args == (
@@ -202,7 +204,7 @@ def test_failed_litellm_turn_keeps_existing_analysis_failure_note() -> None:
          patch("src.agent.chat_executor.conversation_manager.get_or_create"), \
          patch("src.agent.chat_executor.conversation_manager.add_user_message", return_value=1), \
          patch("src.agent.chat_executor.conversation_manager.add_message", return_value=2) as add_message:
-        result = _executor(backend).chat("question", "session")
+        result = _executor(backend).chat("question", "session", portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)
 
     assert result.error_code == "unknown_backend_error"
     assert add_message.call_args_list[-1].args == (
@@ -221,7 +223,11 @@ def test_context_preparation_failure_does_not_persist_or_start_backend() -> None
         "src.agent.chat_executor.conversation_manager.add_user_message"
     ) as add_user_message:
         try:
-            _executor(backend).prepare_turn(message="question", session_id="session")
+            _executor(backend).prepare_turn(
+                message="question",
+                session_id="session",
+                portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
+            )
         except RuntimeError as exc:
             assert str(exc) == "context preparation failed"
         else:
@@ -245,7 +251,11 @@ def test_user_message_persistence_failure_does_not_start_backend() -> None:
         side_effect=RuntimeError("database write failed"),
     ):
         try:
-            _executor(backend).prepare_turn(message="question", session_id="session")
+            _executor(backend).prepare_turn(
+                message="question",
+                session_id="session",
+                portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
+            )
         except RuntimeError as exc:
             assert str(exc) == "database write failed"
         else:

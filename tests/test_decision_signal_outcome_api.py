@@ -7,7 +7,8 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,18 +18,10 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-import src.auth as auth
 from api.app import create_app
 from src.config import Config
+from src.services.identity_service import IdentityService
 from src.storage import DatabaseManager, StockDaily
-
-
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
 
 
 @pytest.fixture()
@@ -44,7 +37,6 @@ def client_and_db(tmp_path):
             [
                 "STOCK_LIST=600519",
                 "GEMINI_API_KEY=test",
-                "ADMIN_AUTH_ENABLED=false",
                 f"DATABASE_PATH={db_path}",
             ]
         )
@@ -53,18 +45,37 @@ def client_and_db(tmp_path):
     )
     os.environ["ENV_FILE"] = str(env_path)
     os.environ["DATABASE_PATH"] = str(db_path)
-    _reset_auth_globals()
     Config.reset_instance()
     DatabaseManager.reset_instance()
+    db = DatabaseManager.get_instance()
+    user, _created = IdentityService().resolve_miniapp_user(
+        app_id="decision-signal-test-app",
+        openid="decision-signal-test-user",
+        unionid=None,
+    )
+    principal = SimpleNamespace(
+        user=user,
+        roles=("admin",),
+        permissions=(
+            "decision_signals.read",
+            "decision_signals.execute",
+            "decision_signals.manage",
+        ),
+    )
+    miniapp_auth_patch = patch(
+        "api.middlewares.auth.WechatMiniappAuthService.authenticate_token",
+        return_value=principal,
+    )
+    miniapp_auth_patch.start()
     app = create_app(static_dir=Path(static_dir))
-    client = TestClient(app)
+    client = TestClient(app, headers={"Authorization": "Bearer decision-signal-test-token"})
     db = DatabaseManager.get_instance()
     try:
         yield client, db
     finally:
+        miniapp_auth_patch.stop()
         DatabaseManager.reset_instance()
         Config.reset_instance()
-        _reset_auth_globals()
         if old_env_file is None:
             os.environ.pop("ENV_FILE", None)
         else:
@@ -219,11 +230,15 @@ def test_outcome_run_list_stats_signal_outcomes_and_feedback(client_and_db) -> N
 def test_outcome_api_rejects_invalid_params_and_returns_404(client_and_db) -> None:
     client, _db = client_and_db
 
-    missing_run_resp = client.post(
-        "/api/v1/decision-signals/outcomes/run",
-        json={"signal_id": 999999},
-    )
+    with patch(
+        'api.v1.endpoints.decision_signals.FeatureQuotaService.reserve_for_request'
+    ) as reserve_for_request:
+        missing_run_resp = client.post(
+            "/api/v1/decision-signals/outcomes/run",
+            json={"signal_id": 999999},
+        )
     assert missing_run_resp.status_code == 404
+    reserve_for_request.assert_not_called()
 
     invalid_run_resp = client.post(
         "/api/v1/decision-signals/outcomes/run",

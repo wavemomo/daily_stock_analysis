@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from api.v1.endpoints import agent as agent_endpoint
+from src.portfolio_ownership import PortfolioScope
 from src.services.agent_chat_session_service import AgentChatSessionService
 
 
@@ -30,11 +31,14 @@ def _http_request(owner_id: str | None) -> Request:
         }
     )
     if owner_id is None:
+        # No canonical principal: the unified-identity middleware only produces
+        # authenticated ``miniapp`` / ``web_user`` principals, so a principal-less
+        # request is unauthenticated and must fail closed (401).
         request.state.auth_kind = "admin"
     else:
         request.state.auth_kind = "miniapp"
         request.state.miniapp_principal = SimpleNamespace(
-            user=SimpleNamespace(id=owner_id)
+            user=SimpleNamespace(id=int(owner_id))
         )
     return request
 
@@ -144,6 +148,94 @@ class AgentChatOwnershipTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_sync_chat_uses_authenticated_owner_and_discards_client_owner(self) -> None:
+        session_service = MagicMock(spec=AgentChatSessionService)
+        session_service.resolve_skill_selection.return_value = _skill_selection()
+        executor = _executor()
+        executor.chat.return_value = SimpleNamespace(
+            success=True,
+            content="ok",
+            error=None,
+        )
+
+        async def exercise() -> None:
+            with patch(
+                "api.v1.endpoints.agent.get_config",
+                return_value=_config(),
+            ), patch(
+                "api.v1.endpoints.agent._select_agent_chat_backend",
+                return_value="litellm",
+            ), patch(
+                "api.v1.endpoints.agent._build_executor",
+                return_value=executor,
+            ), patch(
+                "api.v1.endpoints.agent.FeatureQuotaService.reserve_for_request",
+                return_value=None,
+            ):
+                response = await agent_endpoint.agent_chat(
+                    agent_endpoint.ChatRequest(
+                        message="sync",
+                        session_id="miniapp:17:session",
+                        context={
+                            "stock_code": "600519",
+                            "resource_owner_id": "attacker",
+                        },
+                    ),
+                    _http_request("17"),
+                    session_service,
+                )
+
+            self.assertTrue(response.success)
+            kwargs = executor.chat.call_args.kwargs
+            self.assertEqual(kwargs["resource_owner_id"], "17")
+            self.assertEqual(kwargs["portfolio_scope"], PortfolioScope.user("17"))
+            self.assertNotIn("resource_owner_id", kwargs["context"])
+            self.assertEqual(kwargs["context"]["stock_code"], "600519")
+
+        asyncio.run(exercise())
+
+    def test_principal_less_request_fails_closed_for_sync_and_stream(self) -> None:
+        # Unified identity no longer exposes a principal-less "admin" domain:
+        # every authenticated request carries a canonical principal, so a
+        # principal-less request must fail closed (401) instead of receiving a
+        # legacy global portfolio scope.
+        session_service = MagicMock(spec=AgentChatSessionService)
+        session_service.resolve_skill_selection.return_value = _skill_selection()
+        executor = _executor()
+
+        async def exercise() -> None:
+            with patch("api.v1.endpoints.agent.get_config", return_value=_config()), \
+                 patch(
+                     "api.v1.endpoints.agent._select_agent_chat_backend",
+                     return_value="litellm",
+                 ), \
+                 patch(
+                     "api.v1.endpoints.agent._build_executor",
+                     return_value=executor,
+                 ):
+                with self.assertRaises(HTTPException) as sync_caught:
+                    await agent_endpoint.agent_chat(
+                        agent_endpoint.ChatRequest(message="legacy sync"),
+                        _http_request(None),
+                        session_service,
+                    )
+                self.assertEqual(sync_caught.exception.status_code, 401)
+
+                with self.assertRaises(HTTPException) as stream_caught:
+                    await agent_endpoint.agent_chat_stream(
+                        agent_endpoint.ChatRequest(
+                            message="legacy stream",
+                            request_id="legacy-scope-stream",
+                        ),
+                        _http_request(None),
+                        session_service,
+                    )
+                self.assertEqual(stream_caught.exception.status_code, 401)
+
+        asyncio.run(exercise())
+        executor.chat.assert_not_called()
+        executor.prepare_turn.assert_not_called()
+
     def test_session_endpoints_apply_owner_scope_and_hide_foreign_ids(self) -> None:
         session_service = MagicMock(spec=AgentChatSessionService)
         session_service.list_sessions.return_value = []
@@ -161,23 +253,19 @@ class AgentChatOwnershipTests(unittest.TestCase):
             )
             session_service.list_sessions.assert_called_once_with(20, "miniapp:41:")
 
+            # A principal-less request is unauthenticated and must fail closed
+            # rather than receive a global (owner=None) session listing.
             session_service.list_sessions.reset_mock()
-            await agent_endpoint.list_chat_sessions(
-                _http_request(None),
-                20,
-                session_service,
-            )
-            session_service.list_sessions.assert_called_once_with(20, None)
+            with self.assertRaises(HTTPException) as anon_caught:
+                await agent_endpoint.list_chat_sessions(
+                    _http_request(None),
+                    20,
+                    session_service,
+                )
+            self.assertEqual(anon_caught.exception.status_code, 401)
+            session_service.list_sessions.assert_not_called()
 
-            session_service.list_sessions.reset_mock()
-            await agent_endpoint.list_chat_sessions(
-                _http_request(None),
-                20,
-                session_service,
-                user_id="telegram_12345",
-            )
-            session_service.list_sessions.assert_called_once_with(20, "telegram_12345")
-
+            # A client-supplied user_id cannot widen an authenticated owner's scope.
             session_service.list_sessions.reset_mock()
             await agent_endpoint.list_chat_sessions(
                 _http_request("41"),
@@ -229,7 +317,7 @@ class AgentChatOwnershipTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_cancel_requires_same_owner_while_admin_remains_global(self) -> None:
+    def test_cancel_requires_same_owner_and_rejects_principal_less(self) -> None:
         owner_event = threading.Event()
         admin_event = threading.Event()
         with agent_endpoint._ACTIVE_CODEX_STREAMS_LOCK:
@@ -275,19 +363,18 @@ class AgentChatOwnershipTests(unittest.TestCase):
             self.assert_not_found(foreign_caught.exception)
             self.assertFalse(owner_event.is_set())
 
-            response = await agent_endpoint.cancel_agent_chat_stream(
-                "owner-request",
-                _http_request(None),
-            )
-            self.assertTrue(response["accepted"])
-            self.assertTrue(owner_event.is_set())
-
-            response = await agent_endpoint.cancel_agent_chat_stream(
-                "admin-request",
-                _http_request(None),
-            )
-            self.assertTrue(response["accepted"])
-            self.assertTrue(admin_event.is_set())
+            # A principal-less request cannot cancel any stream; it fails closed
+            # (401) instead of acting as a global administrator.
+            owner_event.clear()
+            admin_event.clear()
+            with self.assertRaises(HTTPException) as anon_caught:
+                await agent_endpoint.cancel_agent_chat_stream(
+                    "owner-request",
+                    _http_request(None),
+                )
+            self.assertEqual(anon_caught.exception.status_code, 401)
+            self.assertFalse(owner_event.is_set())
+            self.assertFalse(admin_event.is_set())
 
         asyncio.run(exercise())
 
@@ -375,6 +462,9 @@ class AgentChatOwnershipTests(unittest.TestCase):
             ), patch(
                 "api.v1.endpoints.agent._build_executor",
                 return_value=executor,
+            ), patch(
+                "api.v1.endpoints.agent.FeatureQuotaService.reserve_for_request",
+                return_value=None,
             ):
                 response = await agent_endpoint.agent_chat_stream(
                     agent_endpoint.ChatRequest(
@@ -395,6 +485,14 @@ class AgentChatOwnershipTests(unittest.TestCase):
                         "shared-request-id"
                     ]
                     self.assertEqual(active.owner_id, "9")
+                self.assertEqual(
+                    executor.prepare_turn.call_args.kwargs["resource_owner_id"],
+                    "9",
+                )
+                self.assertEqual(
+                    executor.prepare_turn.call_args.kwargs["portfolio_scope"],
+                    PortfolioScope.user("9"),
+                )
 
                 with self.assertRaises(HTTPException) as conflict_caught:
                     await agent_endpoint.agent_chat_stream(

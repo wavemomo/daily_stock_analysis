@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 
 from src.agent.tools.registry import ToolDefinition, ToolRegistry
+from src.portfolio_ownership import UNSCOPED_PORTFOLIO_SCOPE
 from src.services.history_loader import (
     get_frozen_target_date,
     reset_frozen_target_date,
@@ -60,6 +61,7 @@ class ExecuteToolsFrozenContextTestCase(unittest.TestCase):
                 progress_callback=None,
                 tool_calls_log=[],
                 tool_wait_timeout_seconds=5.0,
+                portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             )
         finally:
             reset_frozen_target_date(token)
@@ -102,6 +104,7 @@ class ExecuteToolsFrozenContextTestCase(unittest.TestCase):
                 progress_callback=None,
                 tool_calls_log=[],
                 tool_wait_timeout_seconds=10.0,
+                portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
             )
         finally:
             reset_frozen_target_date(token)

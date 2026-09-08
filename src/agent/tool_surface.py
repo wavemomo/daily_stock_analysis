@@ -186,10 +186,7 @@ class ToolSurface:
             )
 
         try:
-            if controlled_execution:
-                result = _execute_with_control(tool_def, arguments, ctx)
-            else:
-                result = tool_def.handler(**arguments)
+            result = _execute_with_control(tool_def, arguments, ctx)
         except ToolExecutionCancelled:
             return self._error_result(
                 tool_name=tool_name,

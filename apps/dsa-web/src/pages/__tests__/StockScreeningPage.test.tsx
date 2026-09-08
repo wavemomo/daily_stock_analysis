@@ -1268,6 +1268,68 @@ describe('StockScreeningPage', () => {
     expect(screen.getByText('历史记录')).toBeInTheDocument();
   });
 
+  it('persists the submitted task snapshot after filters change during polling', async () => {
+    getScreeningStatus.mockResolvedValue({
+      enabled: true,
+      available: true,
+    });
+    startScreenTask.mockResolvedValueOnce({
+      taskId: 'task-1',
+      traceId: 'task-1',
+      status: 'pending',
+      message: '选股任务已提交',
+      strategy: 'dual_low',
+      market: 'cn',
+      maxResults: 3,
+    });
+    getScreenTask
+      .mockResolvedValueOnce({
+        taskId: 'task-1',
+        traceId: 'task-1',
+        status: 'processing',
+        progress: 40,
+        message: '正在执行选股',
+        result: null,
+      })
+      .mockResolvedValueOnce({
+        taskId: 'task-1',
+        traceId: 'task-1',
+        status: 'completed',
+        progress: 100,
+        message: '选股完成',
+        result: {
+          enabled: true,
+          runId: 'run-1',
+          candidates: [],
+          candidateCount: 0,
+        },
+      });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+    await waitFor(() => expect(getScreenTask).toHaveBeenCalledTimes(1));
+
+    // 即使运行期间有后续表单状态变更，已提交任务的恢复快照也必须保持不变。
+    const maxResultsInput = screen.getByRole('spinbutton', { name: /返回数量/ });
+    fireEvent.change(maxResultsInput, { target: { value: '5' } });
+    expect(maxResultsInput).toHaveValue(5);
+
+    await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+    await waitFor(() => expect(getScreenTask).toHaveBeenCalledTimes(2));
+
+    expect(JSON.parse(
+      window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1') || '{}',
+    )).toMatchObject({
+      taskId: 'task-1',
+      runId: 'run-1',
+      market: 'cn',
+      strategy: 'dual_low',
+      maxResults: 3,
+    });
+  });
+
   it('shows the screening conditions on each history entry', async () => {
     getScreeningStatus.mockResolvedValue({
       enabled: true,

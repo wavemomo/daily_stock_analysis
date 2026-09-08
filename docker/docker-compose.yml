@@ -52,7 +52,7 @@ x-common: &common
   deploy:
     resources:
       limits:
-        memory: 1G
+        memory: 3G
       reservations:
         memory: 512M
 

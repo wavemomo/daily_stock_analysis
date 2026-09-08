@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from asyncio import Queue as AsyncQueue
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
+from src.analysis_ownership import AnalysisOwner
 from src.services.run_diagnostics import (
     activate_run_diagnostic_context,
     get_current_diagnostic_context,
@@ -52,21 +53,19 @@ def _dedupe_stock_code_key(stock_code: str) -> str:
 def _dedupe_task_key(
     stock_code: str,
     analysis_target: Optional[Any] = None,
+    *,
+    owner: AnalysisOwner,
 ) -> str:
-    """
-    Build the duplicate-detection key for a submitted task.
-
-    Index targets dedupe by their canonical id (``sh000016`` / ``csi930955``),
-    so an index never collapses with a same-digit stock (``000016``) and
-    registered CSI aliases converge to one key. Stock targets keep the legacy
-    code-based key, preserving existing dedup semantics for
-    ``600519``/``600519.SH`` and friends.
-    """
+    """Build the owner-partitioned duplicate-detection key for a task."""
     from src.services.stock_list_parser import ParseStatus
 
+    if not isinstance(owner, AnalysisOwner):
+        raise TypeError("owner must be an AnalysisOwner")
+    owner_key = owner.key
+
     if analysis_target is not None and analysis_target.asset_type == ParseStatus.INDEX:
-        return analysis_target.canonical_id
-    return _dedupe_stock_code_key(stock_code)
+        return f"{owner_key}:{analysis_target.canonical_id}"
+    return f"{owner_key}:{_dedupe_stock_code_key(stock_code)}"
 
 
 def asset_type_from_analysis_target(analysis_target: Optional[Any]) -> Optional[str]:
@@ -136,7 +135,18 @@ class TaskInfo:
     # parser 来源的可选资产类型（``index``/``stock``/``None``）；SSE 与任务列表
     # 从这里透传，不得在消费端重新猜测。
     asset_type: Optional[str] = None
-    
+    # 请求可信身份派生的 owner，不得在 API 序列化中暴露。
+    owner_scope: str = "global"
+    owner_user_id: Optional[int] = None
+    owner: Optional[AnalysisOwner] = None
+
+    def __post_init__(self) -> None:
+        """Reject tasks without an explicit trusted owner context."""
+        if not isinstance(self.owner, AnalysisOwner):
+            raise ValueError("task owner must be an AnalysisOwner")
+        self.owner_scope = self.owner.scope
+        self.owner_user_id = self.owner.user_id
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert task info into an API-friendly dictionary."""
         payload = {
@@ -191,6 +201,9 @@ class TaskInfo:
             dedupe_key=self.dedupe_key,
             analysis_target=self.analysis_target,
             asset_type=self.asset_type,
+            owner_scope=self.owner_scope,
+            owner_user_id=self.owner_user_id,
+            owner=self.owner,
         )
 
 
@@ -242,8 +255,8 @@ class AnalysisTaskQueue:
         self._analyzing_stocks: Dict[str, str] = {}     # dedupe_key -> task_id
         self._futures: Dict[str, Future] = {}           # task_id -> Future
         
-        # SSE 订阅者列表（asyncio.Queue 实例）
-        self._subscribers: List['AsyncQueue'] = []
+        # SSE 订阅者及其可信 owner 上下文。
+        self._subscribers: List[Tuple['AsyncQueue', AnalysisOwner]] = []
         self._subscribers_lock = threading.Lock()
         
         # 主事件循环引用（用于跨线程广播）
@@ -258,6 +271,20 @@ class AnalysisTaskQueue:
         
         self._initialized = True
         logger.info(f"[TaskQueue] 初始化完成，最大并发: {max_workers}")
+
+    @staticmethod
+    def _require_owner(owner: AnalysisOwner) -> AnalysisOwner:
+        """Validate that a public queue operation received a trusted owner."""
+        if not isinstance(owner, AnalysisOwner):
+            raise TypeError("owner must be an AnalysisOwner")
+        return owner
+
+    @staticmethod
+    def _task_matches_owner(
+        task: TaskInfo,
+        owner: AnalysisOwner,
+    ) -> bool:
+        return task.owner is not None and task.owner.matches(owner)
     
     @property
     def executor(self) -> ThreadPoolExecutor:
@@ -333,31 +360,27 @@ class AnalysisTaskQueue:
     
     # ========== 任务提交与查询 ==========
     
-    def is_analyzing(self, stock_code: str) -> bool:
-        """
-        检查股票是否正在分析中
-        
-        Args:
-            stock_code: 股票代码
-            
-        Returns:
-            True 表示正在分析中
-        """
-        dedupe_key = _dedupe_stock_code_key(stock_code)
+    def is_analyzing(
+        self,
+        stock_code: str,
+        *,
+        owner: AnalysisOwner,
+    ) -> bool:
+        """Check whether a trusted owner already has an in-flight analysis."""
+        effective_owner = self._require_owner(owner)
+        dedupe_key = _dedupe_task_key(stock_code, owner=effective_owner)
         with self._data_lock:
             return dedupe_key in self._analyzing_stocks
     
-    def get_analyzing_task_id(self, stock_code: str) -> Optional[str]:
-        """
-        获取正在分析该股票的任务 ID
-        
-        Args:
-            stock_code: 股票代码
-            
-        Returns:
-            任务 ID，如果没有则返回 None
-        """
-        dedupe_key = _dedupe_stock_code_key(stock_code)
+    def get_analyzing_task_id(
+        self,
+        stock_code: str,
+        *,
+        owner: AnalysisOwner,
+    ) -> Optional[str]:
+        """Return a trusted owner's in-flight task ID for a stock."""
+        effective_owner = self._require_owner(owner)
+        dedupe_key = _dedupe_task_key(stock_code, owner=effective_owner)
         with self._data_lock:
             return self._analyzing_stocks.get(dedupe_key)
 
@@ -391,6 +414,8 @@ class AnalysisTaskQueue:
         skills: Optional[List[str]] = None,
         report_language: Optional[str] = None,
         analysis_target: Optional[Any] = None,
+        *,
+        owner: AnalysisOwner,
     ) -> TaskInfo:
         """
         Submit a single analysis task.
@@ -429,6 +454,7 @@ class AnalysisTaskQueue:
             skills=skills,
             report_language=report_language,
             analysis_targets=([analysis_target] if analysis_target is not None else None),
+            owner=owner,
         )
         if duplicates:
             raise duplicates[0]
@@ -449,17 +475,22 @@ class AnalysisTaskQueue:
         skills: Optional[List[str]] = None,
         report_language: Optional[str] = None,
         analysis_targets: Optional[List[Any]] = None,
+        before_submit: Optional[Callable[[List[str]], None]] = None,
+        on_submit_failure: Optional[Callable[[List[str]], None]] = None,
+        *,
+        owner: AnalysisOwner,
     ) -> Tuple[List[TaskInfo], List[DuplicateTaskError]]:
         """
         Submit analysis tasks in batch.
 
         - Duplicate stocks are skipped and recorded in duplicates.
-        - If executor submission fails, the current batch is rolled back.
+        - If executor submission fails, only the failed candidate's local state is rolled back; tasks already accepted by the executor remain tracked.
         - ``analysis_targets`` is an optional per-code structured target list.
           Index targets dedupe by ``canonical_id`` (never collapsing with a
           same-digit stock); stock targets keep the legacy code-based key.
         """
         self.validate_selection_source(selection_source)
+        effective_owner = self._require_owner(owner)
 
         accepted: List[TaskInfo] = []
         duplicates: List[DuplicateTaskError] = []
@@ -490,14 +521,36 @@ class AnalysisTaskQueue:
                     canonical_codes.append(normalized)
 
         with self._data_lock:
+            candidates: List[Tuple[str, Optional[Any], str]] = []
+            pending_dedupe_keys = set()
             for idx, stock_code in enumerate(canonical_codes):
                 analysis_target = targets_by_index.get(idx)
-                dedupe_key = _dedupe_task_key(stock_code, analysis_target)
-                if dedupe_key in self._analyzing_stocks:
-                    existing_task_id = self._analyzing_stocks[dedupe_key]
+                dedupe_key = _dedupe_task_key(
+                    stock_code,
+                    analysis_target,
+                    owner=effective_owner,
+                )
+                existing_task_id = self._analyzing_stocks.get(dedupe_key)
+                if existing_task_id is not None:
                     duplicates.append(DuplicateTaskError(stock_code, existing_task_id))
                     continue
+                if dedupe_key in pending_dedupe_keys:
+                    # Preserve existing duplicate response semantics for the
+                    # same code repeated inside one batch before it is queued.
+                    duplicates.append(DuplicateTaskError(stock_code, "pending_batch"))
+                    continue
+                pending_dedupe_keys.add(dedupe_key)
+                candidates.append((stock_code, analysis_target, dedupe_key))
 
+            # The callback runs after this queue has made the accepted/duplicate
+            # decision under its lock and before workers may be submitted. A
+            # failure (for example HTTP 429) leaves no task state behind.
+            reservation_created = False
+            if candidates and before_submit is not None:
+                before_submit([stock_code for stock_code, _, _ in candidates])
+                reservation_created = True
+
+            for candidate_index, (stock_code, analysis_target, dedupe_key) in enumerate(candidates):
                 task_id = uuid.uuid4().hex
                 task_skills = list(skills) if skills is not None else None
                 task_info = TaskInfo(
@@ -518,6 +571,7 @@ class AnalysisTaskQueue:
                     dedupe_key=dedupe_key,
                     analysis_target=analysis_target,
                     asset_type=asset_type_from_analysis_target(analysis_target),
+                    owner=effective_owner,
                 )
                 self._tasks[task_id] = task_info
                 self._analyzing_stocks[dedupe_key] = task_id
@@ -535,8 +589,29 @@ class AnalysisTaskQueue:
                         analysis_target,
                     )
                 except Exception:
-                    # Roll back the current batch to avoid partial submission.
-                    self._rollback_submitted_tasks_locked(created_task_ids + [task_id])
+                    # Earlier submissions were accepted by the executor and may
+                    # already be running. Their quota remains consumed; only the
+                    # failed candidate and candidates not yet submitted are released.
+                    # Do not remove earlier futures: each was already accepted by
+                    # the executor and may be running. Dropping their task state
+                    # would make a charged analysis invisible and turn queued work
+                    # into a no-op. Only the failing candidate has provisional
+                    # local state to roll back.
+                    self._rollback_submitted_tasks_locked([task_id])
+                    for accepted_task in accepted:
+                        self._broadcast_event("task_created", accepted_task.to_dict())
+                    if reservation_created and on_submit_failure is not None:
+                        try:
+                            on_submit_failure(
+                                [
+                                    candidate_stock_code
+                                    for candidate_stock_code, _, _ in candidates[candidate_index:]
+                                ]
+                            )
+                        except Exception:
+                            logger.exception(
+                                "[TaskQueue] executor submission compensation failed"
+                            )
                     raise
 
                 self._futures[task_id] = future
@@ -563,6 +638,7 @@ class AnalysisTaskQueue:
         task_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         region: Optional[str] = None,
+        owner: AnalysisOwner,
     ) -> TaskInfo:
         """
         Submit a generic background callable with task lifecycle tracking.
@@ -571,6 +647,7 @@ class AnalysisTaskQueue:
         map to standard per-stock async analysis flow.
         """
         task_id = task_id or uuid.uuid4().hex
+        effective_owner = self._require_owner(owner)
         task_info = TaskInfo(
             task_id=task_id,
             trace_id=trace_id or task_id,
@@ -580,6 +657,7 @@ class AnalysisTaskQueue:
             message=message,
             report_type=report_type,
             region=region,
+            owner=effective_owner,
         )
 
         with self._data_lock:
@@ -598,7 +676,7 @@ class AnalysisTaskQueue:
         return task_info.copy()
 
     def _rollback_submitted_tasks_locked(self, task_ids: List[str]) -> None:
-        """回滚当前批次已创建但尚未稳定返回给调用方的任务。"""
+        """移除 executor 提交失败前仅在内存中创建的临时任务。"""
         for task_id in task_ids:
             future = self._futures.pop(task_id, None)
             if future is not None:
@@ -611,23 +689,22 @@ class AnalysisTaskQueue:
                 dedupe_key = task.dedupe_key or _dedupe_task_key(
                     task.stock_code,
                     getattr(task, "analysis_target", None),
+                    owner=task.owner,
                 )
                 if self._analyzing_stocks.get(dedupe_key) == task_id:
                     del self._analyzing_stocks[dedupe_key]
     
-    def get_task(self, task_id: str) -> Optional[TaskInfo]:
-        """
-        获取任务信息
-        
-        Args:
-            task_id: 任务 ID
-            
-        Returns:
-            TaskInfo 或 None
-        """
+    def get_task(
+        self,
+        task_id: str,
+        *,
+        owner: AnalysisOwner,
+    ) -> Optional[TaskInfo]:
+        """Return a task only when it belongs to the required owner."""
+        effective_owner = self._require_owner(owner)
         with self._data_lock:
             task = self._tasks.get(task_id)
-            return task.copy() if task else None
+            return task.copy() if task and self._task_matches_owner(task, effective_owner) else None
 
     def append_task_flow_event(
         self,
@@ -659,61 +736,64 @@ class AnalysisTaskQueue:
         self._broadcast_event("task_progress", payload)
         return event_payload
 
-    def get_task_flow_events(self, task_id: str) -> List[Dict[str, Any]]:
-        """Return a copy of the recent run-flow events for a task."""
+    def get_task_flow_events(
+        self,
+        task_id: str,
+        *,
+        owner: AnalysisOwner,
+    ) -> List[Dict[str, Any]]:
+        """Return recent flow events visible to the required owner."""
+        effective_owner = self._require_owner(owner)
         with self._data_lock:
             task = self._tasks.get(task_id)
-            if not task:
+            if not task or not self._task_matches_owner(task, effective_owner):
                 return []
             return copy.deepcopy(task.flow_events)
     
-    def list_pending_tasks(self) -> List[TaskInfo]:
-        """
-        获取所有进行中的任务（pending + processing）
-        
-        Returns:
-            任务列表（副本）
-        """
+    def list_pending_tasks(
+        self,
+        *,
+        owner: AnalysisOwner,
+    ) -> List[TaskInfo]:
+        """List in-flight tasks visible to the required owner."""
+        effective_owner = self._require_owner(owner)
         with self._data_lock:
             return [
                 task.copy() for task in self._tasks.values()
                 if task.status in (TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.CANCEL_REQUESTED)
+                and self._task_matches_owner(task, effective_owner)
             ]
     
-    def list_all_tasks(self, limit: int = 50) -> List[TaskInfo]:
-        """
-        获取所有任务（按创建时间倒序）
-        
-        Args:
-            limit: 返回数量限制
-            
-        Returns:
-            任务列表（副本）
-        """
+    def list_all_tasks(
+        self,
+        limit: int = 50,
+        *,
+        owner: AnalysisOwner,
+    ) -> List[TaskInfo]:
+        """List tasks visible to the required owner by newest first."""
+        effective_owner = self._require_owner(owner)
         with self._data_lock:
             tasks = sorted(
-                self._tasks.values(),
-                key=lambda t: t.created_at,
-                reverse=True
+                (task for task in self._tasks.values() if self._task_matches_owner(task, effective_owner)),
+                key=lambda task: task.created_at,
+                reverse=True,
             )
-            return [t.copy() for t in tasks[:limit]]
+            return [task.copy() for task in tasks[:limit]]
     
-    def get_task_stats(self) -> Dict[str, int]:
-        """
-        获取任务统计信息
-        
-        Returns:
-            统计信息字典
-        """
+    def get_task_stats(
+        self,
+        *,
+        owner: AnalysisOwner,
+    ) -> Dict[str, int]:
+        """Return queue statistics visible to the required owner."""
+        effective_owner = self._require_owner(owner)
         with self._data_lock:
-            stats = {
-                "total": len(self._tasks),
-                "pending": 0,
-                "processing": 0,
-                "completed": 0,
-                "failed": 0,
-            }
-            for task in self._tasks.values():
+            visible_tasks = [
+                task for task in self._tasks.values()
+                if self._task_matches_owner(task, effective_owner)
+            ]
+            stats = {"total": len(visible_tasks), "pending": 0, "processing": 0, "completed": 0, "failed": 0}
+            for task in visible_tasks:
                 stats[task.status.value] = stats.get(task.status.value, 0) + 1
             return stats
 
@@ -788,6 +868,7 @@ class AnalysisTaskQueue:
             analysis_phase = task.analysis_phase
             query_source = task.query_source or "api"
             portfolio_context = dict(task.portfolio_context) if isinstance(task.portfolio_context, dict) else None
+            owner = task.owner
             task.status = TaskStatus.PROCESSING
             task.started_at = datetime.now()
             task.message = "正在分析中..."
@@ -829,6 +910,7 @@ class AnalysisTaskQueue:
                 portfolio_context=portfolio_context,
                 report_language=report_language,
                 analysis_target=analysis_target,
+                owner=owner,
             )
             reset_run_diagnostic_context(diag_token)
             diag_token = None
@@ -849,6 +931,7 @@ class AnalysisTaskQueue:
                         dedupe_key = task.dedupe_key or _dedupe_task_key(
                             task.stock_code,
                             getattr(task, "analysis_target", None),
+                            owner=task.owner,
                         )
                         if dedupe_key in self._analyzing_stocks:
                             del self._analyzing_stocks[dedupe_key]
@@ -882,6 +965,7 @@ class AnalysisTaskQueue:
                     dedupe_key = task.dedupe_key or _dedupe_task_key(
                         task.stock_code,
                         getattr(task, "analysis_target", None),
+                        owner=task.owner,
                     )
                     if dedupe_key in self._analyzing_stocks:
                         del self._analyzing_stocks[dedupe_key]
@@ -1009,15 +1093,16 @@ class AnalysisTaskQueue:
     
     # ========== SSE 事件广播 ==========
     
-    def subscribe(self, queue: 'AsyncQueue') -> None:
-        """
-        订阅任务事件
-        
-        Args:
-            queue: asyncio.Queue 实例，用于接收事件
-        """
+    def subscribe(
+        self,
+        queue: 'AsyncQueue',
+        *,
+        owner: AnalysisOwner,
+    ) -> None:
+        """Subscribe to lifecycle events visible to the required owner."""
+        effective_owner = self._require_owner(owner)
         with self._subscribers_lock:
-            self._subscribers.append(queue)
+            self._subscribers.append((queue, effective_owner))
             # 捕获当前事件循环（应在主线程的 async 上下文中调用）
             try:
                 self._main_loop = asyncio.get_running_loop()
@@ -1028,49 +1113,47 @@ class AnalysisTaskQueue:
                 except RuntimeError:
                     pass
             logger.debug(f"[TaskQueue] 新订阅者加入，当前订阅者数: {len(self._subscribers)}")
-    
+
     def unsubscribe(self, queue: 'AsyncQueue') -> None:
-        """
-        取消订阅任务事件
-        
-        Args:
-            queue: 要取消订阅的 asyncio.Queue 实例
-        """
+        """Remove all subscriptions associated with an asyncio queue."""
         with self._subscribers_lock:
-            if queue in self._subscribers:
-                self._subscribers.remove(queue)
+            before = len(self._subscribers)
+            self._subscribers = [
+                subscription
+                for subscription in self._subscribers
+                if subscription[0] is not queue
+            ]
+            if len(self._subscribers) != before:
                 logger.debug(f"[TaskQueue] 订阅者离开，当前订阅者数: {len(self._subscribers)}")
-    
+
     def _broadcast_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        """
-        广播事件到所有订阅者
-        
-        使用 call_soon_threadsafe 确保跨线程安全
-        
-        Args:
-            event_type: 事件类型
-            data: 事件数据
-        """
+        """Broadcast a task event only to the task's owner subscriptions."""
+        task_id = data.get("task_id")
+        with self._data_lock:
+            task = self._tasks.get(task_id) if task_id else None
+            task_owner = task.owner if task else None
+        if task_owner is None:
+            return
+
         event = {"type": event_type, "data": data}
-        
         with self._subscribers_lock:
-            subscribers = self._subscribers.copy()
+            subscribers = [
+                queue
+                for queue, subscriber_owner in self._subscribers
+                if task_owner.matches(subscriber_owner)
+            ]
             loop = self._main_loop
-        
+
         if not subscribers:
             return
-        
         if loop is None:
             logger.warning("[TaskQueue] 无法广播事件：主事件循环未设置")
             return
-        
+
         for queue in subscribers:
             try:
-                # 使用 call_soon_threadsafe 将事件放入 asyncio 队列
-                # 这是从工作线程向主事件循环发送消息的安全方式
                 loop.call_soon_threadsafe(queue.put_nowait, event)
             except RuntimeError as e:
-                # 事件循环已关闭
                 logger.debug(f"[TaskQueue] 广播事件跳过（循环已关闭）: {e}")
             except Exception as e:
                 logger.warning(f"[TaskQueue] 广播事件失败: {e}")

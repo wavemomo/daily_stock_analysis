@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(currentDir, '../..');
-const shouldRunWebSmoke = !!process.env.DSA_WEB_SMOKE_PASSWORD;
+const shouldRunWebSmoke = process.env.DSA_WEB_SMOKE_OAUTH === 'true';
+const controlledOAuthStorageState = process.env.DSA_WEB_SMOKE_OAUTH_STORAGE_STATE;
 
 function resolveBackendCommand() {
   if (process.env.DSA_WEB_SMOKE_BACKEND_CMD) {
@@ -42,7 +43,7 @@ export default defineConfig({
         {
           command: resolveBackendCommand(),
           cwd: repoRoot,
-          url: 'http://127.0.0.1:8000/api/v1/auth/status',
+          url: 'http://127.0.0.1:8000/health',
           reuseExistingServer: !process.env.CI,
           timeout: 120_000,
         },
@@ -58,7 +59,10 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        ...(controlledOAuthStorageState ? { storageState: controlledOAuthStorageState } : {}),
+      },
     },
   ],
 });

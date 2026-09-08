@@ -30,10 +30,15 @@ except ModuleNotFoundError:
 
 from api.v1.endpoints import screening as screening_endpoint
 from src.config import Config
+from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services import screening_service
+from src.services.rbac_service import RbacService
 from src.services.screening import REFERENCE_REVISION
 from src.services.screening.config import Config as ScreeningPipelineConfig
+from src.analysis_ownership import AnalysisOwner
 from src.services.task_queue import TaskInfo, TaskStatus as QueueTaskStatus
+from src.services.wechat_miniapp_auth_service import MiniappPrincipal
+from src.storage import DatabaseManager
 
 
 def _screening_unavailable() -> HTTPException:
@@ -87,20 +92,49 @@ def _screening_unavailable_diagnostics() -> Dict[str, str]:
 
 class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        Config.reset_instance()
-        self.env_patch = patch.dict(os.environ, {"SCREENING_DATA_DIR": ""}, clear=False)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.env_patch = patch.dict(
+            os.environ,
+            {
+                "DATABASE_PATH": str(Path(self.temp_dir.name) / "screening-api.db"),
+                "SCREENING_DATA_DIR": "",
+            },
+            clear=False,
+        )
         self.env_patch.start()
+        Config.reset_instance()
+        DatabaseManager.reset_instance()
+
+        database_manager = DatabaseManager.get_instance()
+        user = MiniappUserRepository(database_manager).upsert_user(
+            openid="screening-api-user",
+            issuer="screening-api-test",
+        )
+        access = RbacService().ensure_user_access(user, assign_default=True)
+        self.principal = MiniappPrincipal(
+            user=user,
+            token_hash="screening-api-token-hash",
+            roles=tuple(access["roles"]),
+            permissions=tuple(access["permissions"]),
+        )
 
     def tearDown(self) -> None:
-        self.env_patch.stop()
+        DatabaseManager.reset_instance()
         Config.reset_instance()
+        self.env_patch.stop()
+        self.temp_dir.cleanup()
 
     def _config(self, *, enabled: bool) -> Config:
         return Config(screening_enabled=enabled)
 
-    @staticmethod
-    def _request(cookies=None) -> SimpleNamespace:
-        return SimpleNamespace(cookies=cookies or {})
+    def _request(self, cookies=None) -> SimpleNamespace:
+        return SimpleNamespace(
+            cookies=cookies or {},
+            state=SimpleNamespace(
+                auth_kind="miniapp",
+                miniapp_principal=self.principal,
+            ),
+        )
 
     def _screen(self, config: Config, *, mock_enrichment: bool = True, **kwargs):
         if not mock_enrichment:
@@ -2354,8 +2388,11 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             message="Screening 选股任务已提交",
         )
 
+        quota_service = MagicMock()
+
         with (
             patch("api.v1.endpoints.screening.get_task_queue", return_value=fake_queue),
+            patch("api.v1.endpoints.screening.FeatureQuotaService", return_value=quota_service),
             patch("api.v1.endpoints.screening.uuid.uuid4", return_value=SimpleNamespace(hex="screen-task-1")),
             patch.object(
                 screening_endpoint.ScreeningService,
@@ -2379,6 +2416,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             strategy="dual_low",
             market="cn",
             max_results=3,
+            owner=AnalysisOwner.user(self.principal.user.id),
             selection_seed="",
             progress_callback=ANY,
         )
@@ -2395,6 +2433,38 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             "正在执行 LLM 候选重排",
         )
 
+    def test_start_screen_task_releases_quota_when_queue_admission_fails(self) -> None:
+        config = self._config(enabled=True)
+        http_request = self._request()
+        fake_queue = MagicMock()
+        fake_queue.submit_background_task.side_effect = RuntimeError("queue admission failed")
+        quota_service = MagicMock()
+        reservation_period_start = object()
+        quota_service.current_period_start.return_value = reservation_period_start
+
+        with (
+            patch("api.v1.endpoints.screening.get_task_queue", return_value=fake_queue),
+            patch("api.v1.endpoints.screening.FeatureQuotaService", return_value=quota_service),
+            patch("api.v1.endpoints.screening.uuid.uuid4", return_value=SimpleNamespace(hex="screen-task-1")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue admission failed"):
+                screening_endpoint.screening_start_screen_task(
+                    screening_endpoint.ScreeningScreenRequest(market="cn", strategy="dual_low", max_results=3),
+                    http_request=http_request,
+                    config=config,
+                )
+
+        quota_service.reserve_for_request.assert_called_once_with(
+            http_request,
+            "screening",
+            period_start=reservation_period_start,
+        )
+        quota_service.release_for_request.assert_called_once_with(
+            http_request,
+            "screening",
+            period_start=reservation_period_start,
+        )
+
     def test_screen_task_status_returns_screening_result(self) -> None:
         task = TaskInfo(
             task_id="screen-task-1",
@@ -2405,12 +2475,16 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             message="任务执行完成",
             result={"enabled": True, "candidates": [], "candidate_count": 0},
             report_type="screening_screen",
+            owner=AnalysisOwner.user(self.principal.user.id),
         )
         fake_queue = MagicMock()
         fake_queue.get_task.return_value = task
 
         with patch("api.v1.endpoints.screening.get_task_queue", return_value=fake_queue):
-            payload = screening_endpoint.screening_screen_task_status("screen-task-1")
+            payload = screening_endpoint.screening_screen_task_status(
+                "screen-task-1",
+                http_request=self._request(),
+            )
 
         self.assertEqual(payload.status, "completed")
         self.assertEqual(payload.result["candidate_count"], 0)
@@ -2421,13 +2495,17 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             stock_code="600519",
             status=QueueTaskStatus.COMPLETED,
             report_type="detailed",
+            owner=AnalysisOwner.user(self.principal.user.id),
         )
         fake_queue = MagicMock()
         fake_queue.get_task.return_value = task
 
         with patch("api.v1.endpoints.screening.get_task_queue", return_value=fake_queue):
             with self.assertRaises(HTTPException) as caught:
-                screening_endpoint.screening_screen_task_status("analysis-task-1")
+                screening_endpoint.screening_screen_task_status(
+                    "analysis-task-1",
+                    http_request=self._request(),
+                )
 
         self.assertEqual(caught.exception.status_code, 404)
         self.assertEqual(caught.exception.detail["error"], "screening_screen_task_not_found")

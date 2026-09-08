@@ -8,6 +8,7 @@ export type ApiErrorCategory =
   | 'invalid_tool_call'
   | 'portfolio_oversell'
   | 'portfolio_busy'
+  | 'feature_quota_exceeded'
   | 'upstream_llm_400'
   | 'upstream_timeout'
   | 'upstream_network'
@@ -167,6 +168,15 @@ function extractErrorCode(data: unknown): string | null {
   return pickString(data.error, data.code);
 }
 
+function extractFeatureQuotaReason(data: unknown): string | null {
+  if (!isRecord(data)) {
+    return null;
+  }
+
+  const detail = isRecord(data.detail) ? data.detail : undefined;
+  return pickString(detail?.reason, data.reason);
+}
+
 export function extractErrorPayloadText(data: unknown): string | null {
   if (typeof data === 'string') {
     return data.trim() || null;
@@ -250,6 +260,12 @@ export function getParsedApiError(error: unknown): ParsedApiError {
   return parseApiError(error);
 }
 
+export function isAuthenticationConflictError(error: unknown): boolean {
+  const response = getResponse(error);
+  return response?.status === 409
+    && extractErrorCode(response.data) === 'authentication_conflict';
+}
+
 export function createApiError(
   parsed: ParsedApiError,
   extra: { response?: ResponseLike; code?: string; cause?: unknown } = {},
@@ -294,6 +310,7 @@ export function parseApiError(error: unknown): ParsedApiError {
   const status = response?.status;
   const payloadText = extractErrorPayloadText(response?.data);
   const errorCode = extractErrorCode(response?.data);
+  const featureQuotaReason = extractFeatureQuotaReason(response?.data);
   const errorMessage = getErrorMessage(error);
   const causeMessage = getCauseMessage(error);
   const code = getErrorCode(error);
@@ -320,6 +337,36 @@ export function parseApiError(error: unknown): ParsedApiError {
       rawMessage,
       status,
       category: 'missing_params',
+    });
+  }
+
+  if (errorCode === 'feature_quota_exceeded') {
+    if (featureQuotaReason === 'feature_disabled') {
+      return createParsedApiError({
+        title: '该功能已被管理员停用',
+        message: '当前功能暂不可用，请联系管理员恢复后再试。',
+        rawMessage,
+        status,
+        category: 'feature_quota_exceeded',
+      });
+    }
+
+    if (featureQuotaReason === 'daily_limit_exceeded') {
+      return createParsedApiError({
+        title: '今日功能额度已用尽',
+        message: '该功能今日可用次数已耗尽，请明日再试或联系管理员调整额度。',
+        rawMessage,
+        status,
+        category: 'feature_quota_exceeded',
+      });
+    }
+
+    return createParsedApiError({
+      title: '功能暂不可用',
+      message: '当前功能暂时不可用或请求受到限制，请稍后重试或联系管理员。',
+      rawMessage,
+      status,
+      category: 'feature_quota_exceeded',
     });
   }
 

@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Any, Dict, Optional
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional
 
 from src.repositories.daily_reflection_repo import DailyReflectionRepository
 from src.storage import DailyReflectionRecord
@@ -72,6 +72,85 @@ class DailyReflectionService:
     def delete(self, *, user_id: int, reflection_id: int) -> None:
         if not self.repository.delete(user_id=user_id, reflection_id=reflection_id):
             raise DailyReflectionNotFoundError("心得不存在")
+
+    def stats(
+        self,
+        *,
+        user_id: int,
+        reference_date: Optional[date] = None,
+        month: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """连续打卡与月度回顾统计。
+
+        - reference_date：客户端本地"今天"，用于计算今日是否已记与当前连续天数；
+          缺省用服务端当天。连续天数以客户端日历为准，避免服务端时区偏差。
+        - month：YYYY-MM，返回该月已打卡的日号列表与数量；缺省用 reference_date 所在月。
+        """
+        today = reference_date or date.today()
+        dates = self.repository.list_dates(user_id=user_id)
+        date_set = set(dates)
+
+        today_done = today in date_set
+        current_streak = self._current_streak(date_set, today)
+        longest_streak = self._longest_streak(dates)
+
+        year_month = self._normalize_month(month, today)
+        month_days = sorted(
+            d.day for d in date_set if f"{d.year:04d}-{d.month:02d}" == year_month
+        )
+
+        return {
+            "total": len(dates),
+            "current_streak": current_streak,
+            "longest_streak": longest_streak,
+            "today_done": today_done,
+            "month": year_month,
+            "month_count": len(month_days),
+            "month_days": month_days,
+        }
+
+    @staticmethod
+    def _normalize_month(month: Optional[str], fallback: date) -> str:
+        value = (month or "").strip()
+        if len(value) == 7 and value[4] == "-":
+            head, _, tail = value.partition("-")
+            if head.isdigit() and tail.isdigit() and 1 <= int(tail) <= 12:
+                return f"{int(head):04d}-{int(tail):02d}"
+        return f"{fallback.year:04d}-{fallback.month:02d}"
+
+    @staticmethod
+    def _current_streak(date_set: set, today: date) -> int:
+        """从今天或昨天起向前连续的天数。
+
+        今天已记则从今天起算；今天未记但昨天已记，连续记录尚未中断，从昨天起算，
+        以便当日提醒用户"别断了连续"；最近一次记录早于昨天则为 0。
+        """
+        if today in date_set:
+            anchor = today
+        elif (today - timedelta(days=1)) in date_set:
+            anchor = today - timedelta(days=1)
+        else:
+            return 0
+        streak = 0
+        cursor = anchor
+        while cursor in date_set:
+            streak += 1
+            cursor -= timedelta(days=1)
+        return streak
+
+    @staticmethod
+    def _longest_streak(dates_asc: List[date]) -> int:
+        longest = 0
+        run = 0
+        previous: Optional[date] = None
+        for current in dates_asc:
+            if previous is not None and current == previous + timedelta(days=1):
+                run += 1
+            else:
+                run = 1
+            longest = max(longest, run)
+            previous = current
+        return longest
 
     @staticmethod
     def serialize(row: DailyReflectionRecord) -> Dict[str, Any]:

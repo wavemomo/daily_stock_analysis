@@ -101,6 +101,8 @@ class CodexAgentBackend(AgentBackend):
             stock_scope=request.stock_scope,
             backend=self.backend_id,
             session_id=request.session_id,
+            resource_owner_id=request.resource_owner_id,
+            portfolio_scope=request.portfolio_scope,
             timeout_seconds=timeout,
             deadline=deadline,
             cancel_event=request.cancel_event,

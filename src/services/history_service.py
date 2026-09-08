@@ -39,6 +39,7 @@ from src.report_language import (
     normalize_strategy_synthesis_payload,
     strategy_invalid_opinion_count,
 )
+from src.analysis_ownership import AnalysisOwner
 from src.storage import DatabaseManager
 from src.services.run_diagnostics import build_run_diagnostic_summary
 from src.services.empty_news import (
@@ -88,14 +89,26 @@ class HistoryService:
     Encapsulates query logic for historical analysis records.
     """
     
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        *,
+        owner: AnalysisOwner,
+    ):
+        """Initialize a history service bound to one trusted analysis owner.
+
+        History is always tenant-owned. Public callers must derive ``owner``
+        from the authenticated request; background and CLI callers must pass
+        ``GLOBAL_ANALYSIS_OWNER`` explicitly when they operate on global data.
         """
-        Initialize the history query service.
-        
-        Args:
-            db_manager: Database manager (optional, defaults to singleton instance)
-        """
+        if not isinstance(owner, AnalysisOwner):
+            raise TypeError("owner must be an AnalysisOwner")
         self.db = db_manager or DatabaseManager.get_instance()
+        self.owner = owner
+
+    def _owner_kwargs(self) -> Dict[str, Any]:
+        """Map the required trusted owner to the storage contract."""
+        return self.owner.storage_kwargs
 
     @staticmethod
     def _serialize_created_at(value: Optional[datetime]) -> Optional[str]:
@@ -311,7 +324,8 @@ class HistoryService:
                 start_date=start_dt,
                 end_date=end_dt,
                 offset=offset,
-                limit=limit
+                limit=limit,
+                **self._owner_kwargs(),
             )
             
             # Convert to response format
@@ -498,21 +512,21 @@ class HistoryService:
         Returns:
             AnalysisHistory object or None
         """
+        owner_kwargs = self._owner_kwargs()
         try:
             int_id = int(record_id)
-            record = self.db.get_analysis_history_by_id(int_id)
+            record = self.db.get_analysis_history_by_id(int_id, **owner_kwargs)
             if record:
                 return record
         except (ValueError, TypeError):
             pass
-        # Fall back to query_id lookup. Keep the old no-kwargs call for
-        # unfiltered paths so existing test doubles and integrations remain compatible.
         if code is None and report_type is None:
-            return self.db.get_latest_analysis_by_query_id(record_id)
+            return self.db.get_latest_analysis_by_query_id(record_id, **owner_kwargs)
         return self.db.get_latest_analysis_by_query_id(
             record_id,
             code=code,
             report_type=report_type,
+            **owner_kwargs,
         )
 
     def resolve_and_get_detail(self, record_id: str) -> Optional[Dict[str, Any]]:
@@ -640,7 +654,10 @@ class HistoryService:
             Complete analysis report dictionary, or None if not exists
         """
         try:
-            record = self.db.get_analysis_history_by_id(record_id)
+            record = self.db.get_analysis_history_by_id(
+                record_id,
+                **self._owner_kwargs(),
+            )
             if not record:
                 return None
             return self._record_to_detail_dict(record)
@@ -658,6 +675,7 @@ class HistoryService:
         return self.db.get_latest_fundamental_snapshot(
             query_id=query_id,
             code=stock_code,
+            **self._owner_kwargs(),
         )
 
     @staticmethod
@@ -829,7 +847,10 @@ class HistoryService:
             Exception: Re-raises any storage-layer exception so the API caller
                        receives a proper 500 error instead of a silent success.
         """
-        return self.db.delete_analysis_history_records(record_ids)
+        return self.db.delete_analysis_history_records(
+            record_ids,
+            **self._owner_kwargs(),
+        )
 
     def get_news_intel(self, query_id: str, limit: int = 20) -> List[Dict[str, str]]:
         """
@@ -880,7 +901,10 @@ class HistoryService:
         """
         try:
             # Look up the corresponding AnalysisHistory record by record_id
-            record = self.db.get_analysis_history_by_id(record_id)
+            record = self.db.get_analysis_history_by_id(
+                record_id,
+                **self._owner_kwargs(),
+            )
             if not record:
                 logger.warning(f"No analysis record found for record_id={record_id}")
                 return []
@@ -900,7 +924,11 @@ class HistoryService:
         - URL-level dedup keeps one canonical news row across repeated analyses.
         - Legacy records may have different historical query_id strategies.
         """
-        records = self.db.get_analysis_history(query_id=query_id, limit=1)
+        records = self.db.get_analysis_history(
+            query_id=query_id,
+            limit=1,
+            **self._owner_kwargs(),
+        )
         if not records:
             return []
 

@@ -13,6 +13,7 @@ from api.v1.schemas.miniapp import (
     DailyReflectionDeleteResponse,
     DailyReflectionItem,
     DailyReflectionListResponse,
+    DailyReflectionStatsResponse,
     DailyReflectionUpsertRequest,
 )
 from src.services.daily_reflection_service import (
@@ -70,6 +71,20 @@ def upsert_reflection(
         return DailyReflectionItem(**payload)
     except DailyReflectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/stats", response_model=DailyReflectionStatsResponse, summary="连续打卡与月度回顾统计")
+def get_reflection_stats(
+    reference_date: Optional[date] = Query(None, description="客户端本地今天(YYYY-MM-DD)"),
+    month: Optional[str] = Query(None, description="回顾月份(YYYY-MM)"),
+    principal: MiniappPrincipal = Depends(require_permission('daily_reflections.read')),
+) -> DailyReflectionStatsResponse:
+    payload = DailyReflectionService().stats(
+        user_id=principal.user.id,
+        reference_date=reference_date,
+        month=month,
+    )
+    return DailyReflectionStatsResponse(**payload)
 
 
 @router.get("/{reflection_id}", response_model=DailyReflectionItem, summary="读取一条心得")

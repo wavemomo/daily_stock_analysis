@@ -20,28 +20,24 @@ try:
 except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
-import src.auth as auth
 from api.app import create_app
 from src.config import Config
 from src.repositories.portfolio_repo import PortfolioRepository
+from src.portfolio_ownership import (
+    LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+    PortfolioScope,
+    PortfolioScopeRequiredError,
+    UNSCOPED_PORTFOLIO_SCOPE,
+)
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_service import PortfolioNotFoundError, PortfolioService
 from src.storage import DatabaseManager
-
-
-def _reset_auth_globals() -> None:
-    auth._auth_enabled = None
-    auth._session_secret = None
-    auth._password_hash_salt = None
-    auth._password_hash_stored = None
-    auth._rate_limit = {}
 
 
 class PortfolioOwnershipTestCase(unittest.TestCase):
     """Exercise two miniapp owners and legacy NULL ownership on real SQLite."""
 
     def setUp(self) -> None:
-        _reset_auth_globals()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp_dir.name)
         self.db_path = self.data_dir / "portfolio_ownership.db"
@@ -51,7 +47,6 @@ class PortfolioOwnershipTestCase(unittest.TestCase):
                 [
                     "STOCK_LIST=600519",
                     "GEMINI_API_KEY=test",
-                    "ADMIN_AUTH_ENABLED=false",
                     "PORTFOLIO_RISK_LOOKBACK_DAYS=1",
                     f"DATABASE_PATH={self.db_path}",
                 ]
@@ -140,6 +135,7 @@ class PortfolioOwnershipTestCase(unittest.TestCase):
             broker="Demo",
             market="cn",
             base_currency="CNY",
+            portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE,
         )
 
         self.assertEqual(account_a["owner_id"], "101")
@@ -157,7 +153,7 @@ class PortfolioOwnershipTestCase(unittest.TestCase):
         self.assertEqual([item["id"] for item in list_a.json()["accounts"]], [account_a["id"]])
         self.assertEqual([item["id"] for item in list_b.json()["accounts"]], [account_b["id"]])
         self.assertEqual(
-            {item["id"] for item in self.service.list_accounts()},
+            {item["id"] for item in self.service.list_accounts(portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)},
             {account_a["id"], account_b["id"], legacy["id"]},
         )
 
@@ -180,7 +176,12 @@ class PortfolioOwnershipTestCase(unittest.TestCase):
         )
         self.assertEqual(foreign_update.status_code, 404, foreign_update.text)
         self.assertEqual(foreign_delete.status_code, 404, foreign_delete.text)
-        self.assertIsNotNone(self.repo.get_account(account_a["id"], owner_id="101"))
+        self.assertIsNotNone(
+            self.repo.get_account(
+                account_a["id"],
+                owner_id=PortfolioScope.user("101"),
+            )
+        )
 
     def test_cross_owner_events_snapshot_risk_and_import_are_hidden(self) -> None:
         today = date.today()
@@ -191,6 +192,7 @@ class PortfolioOwnershipTestCase(unittest.TestCase):
             broker="Demo",
             market="cn",
             base_currency="CNY",
+            portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE,
         )
         self._save_close("600519", today, 110.0)
 
@@ -352,14 +354,63 @@ class PortfolioOwnershipTestCase(unittest.TestCase):
                 broker="huatai",
                 records=[],
                 dry_run=True,
-                owner_id="202",
+                portfolio_scope=PortfolioScope.user("202"),
             )
 
         self.assertEqual(
-            {item["id"] for item in self.service.list_accounts()},
+            {item["id"] for item in self.service.list_accounts(portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)},
             {account_a["id"], account_b["id"], legacy["id"]},
         )
-        self.assertTrue(self.service.delete_trade_event(trade_id))
+        self.assertTrue(
+            self.service.delete_trade_event(
+                trade_id,
+                portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE,
+            )
+        )
+    def test_explicit_scope_contract_separates_users_and_rejects_omission(self) -> None:
+        account_a = self.service.create_account(
+            name="Scope A",
+            broker="Demo",
+            market="cn",
+            base_currency="CNY",
+            portfolio_scope=PortfolioScope.user("101"),
+        )
+        account_b = self.service.create_account(
+            name="Scope B",
+            broker="Demo",
+            market="cn",
+            base_currency="CNY",
+            portfolio_scope=PortfolioScope.user("202"),
+        )
+        legacy = self.service.create_account(
+            name="Legacy only",
+            broker="Demo",
+            market="cn",
+            base_currency="CNY",
+            portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE,
+        )
+
+        self.assertEqual(
+            [item["id"] for item in self.service.list_accounts(portfolio_scope=PortfolioScope.user("101"))],
+            [account_a["id"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in self.service.list_accounts(portfolio_scope=PortfolioScope.user("202"))],
+            [account_b["id"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in self.service.list_accounts(portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE)],
+            [legacy["id"]],
+        )
+        self.assertEqual(
+            {item["id"] for item in self.service.list_accounts(portfolio_scope=UNSCOPED_PORTFOLIO_SCOPE)},
+            {account_a["id"], account_b["id"], legacy["id"]},
+        )
+
+        with self.assertRaisesRegex(PortfolioScopeRequiredError, "portfolio access scope is required"):
+            self.service.list_accounts()
+        with self.assertRaisesRegex(PortfolioScopeRequiredError, "portfolio access scope is required"):
+            self.service.list_accounts(portfolio_scope=None)
 
 
 if __name__ == "__main__":

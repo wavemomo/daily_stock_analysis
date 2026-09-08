@@ -3,21 +3,25 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from api.deps import get_config_dep, get_database_manager
+from api.deps import get_config_dep, get_database_manager, get_request_analysis_owner_context
+from src.analysis_ownership import AnalysisOwner
 from api.v1.errors import api_error
 from src.config import Config
+from src.services.feature_quota_service import FeatureQuotaService
 from src.services.screening_service import ScreeningService
 from src.services.task_queue import TaskStatus as QueueTaskStatus
 from src.services.task_queue import get_task_queue
 from src.storage import DatabaseManager
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ScreeningScreenRequest(BaseModel):
@@ -138,7 +142,15 @@ def screening_start_screen_task(
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> ScreeningScreenAccepted:
     task_id = uuid.uuid4().hex
+    owner = get_request_analysis_owner_context(http_request)
     task_queue = get_task_queue()
+    quota_service = FeatureQuotaService()
+    reservation_period_start = quota_service.current_period_start()
+    quota_service.reserve_for_request(
+        http_request,
+        'screening',
+        period_start=reservation_period_start,
+    )
 
     def run_screen() -> Dict[str, Any]:
         task_queue.update_task_progress(
@@ -154,6 +166,7 @@ def screening_start_screen_task(
             strategy=request.strategy,
             market=request.market,
             max_results=request.max_results,
+            owner=owner,
             selection_seed=request.variant_seed,
             progress_callback=report_progress,
         )
@@ -164,15 +177,27 @@ def screening_start_screen_task(
         )
         return result
 
-    task = task_queue.submit_background_task(
-        run_screen,
-        stock_code="screening_screen",
-        stock_name=f"{request.strategy} / {request.market}",
-        report_type="screening_screen",
-        message="选股任务已提交",
-        task_id=task_id,
-        trace_id=task_id,
-    )
+    try:
+        task = task_queue.submit_background_task(
+            run_screen,
+            stock_code="screening_screen",
+            stock_name=f"{request.strategy} / {request.market}",
+            report_type="screening_screen",
+            message="选股任务已提交",
+            task_id=task_id,
+            trace_id=task_id,
+            owner=owner,
+        )
+    except Exception:
+        try:
+            quota_service.release_for_request(
+                http_request,
+                'screening',
+                period_start=reservation_period_start,
+            )
+        except Exception:
+            logger.exception("Failed to compensate screening quota after task submission failure")
+        raise
     return ScreeningScreenAccepted(
         task_id=task.task_id,
         trace_id=task.trace_id or task.task_id,
@@ -185,8 +210,12 @@ def screening_start_screen_task(
 
 
 @router.get("/screen/tasks/{task_id}", response_model=ScreeningScreenTaskStatus)
-def screening_screen_task_status(task_id: str) -> ScreeningScreenTaskStatus:
-    task = get_task_queue().get_task(task_id)
+def screening_screen_task_status(
+    task_id: str,
+    http_request: Request,
+) -> ScreeningScreenTaskStatus:
+    owner = get_request_analysis_owner_context(http_request)
+    task = get_task_queue().get_task(task_id, owner=owner)
     if task is None or task.report_type != "screening_screen":
         raise _screening_task_not_found(task_id)
 
@@ -209,23 +238,29 @@ def screening_screen(
     config: Config = Depends(get_config_dep),
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> Dict[str, Any]:
+    FeatureQuotaService().reserve_for_request(http_request, 'screening')
+    owner = get_request_analysis_owner_context(http_request)
     return _service(config, db_manager).screen(
         strategy=request.strategy,
         market=request.market,
         max_results=request.max_results,
+        owner=owner,
         selection_seed=request.variant_seed,
     )
 
 
 @router.get("/history")
 def screening_history(
+    http_request: Request,
     limit: int = Query(20, ge=1, le=100),
     strategy: str = Query("", max_length=64),
     market: str = Query("", max_length=16),
     config: Config = Depends(get_config_dep),
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> Dict[str, Any]:
+    owner = get_request_analysis_owner_context(http_request)
     return _service(config, db_manager).history(
+        owner=owner,
         limit=limit,
         strategy=strategy,
         market=market,
@@ -235,16 +270,20 @@ def screening_history(
 @router.get("/history/{run_id}")
 def screening_history_detail(
     run_id: str,
+    http_request: Request,
     config: Config = Depends(get_config_dep),
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> Dict[str, Any]:
-    return _service(config, db_manager).history_detail(run_id)
+    owner = get_request_analysis_owner_context(http_request)
+    return _service(config, db_manager).history_detail(run_id, owner=owner)
 
 
 @router.get("/source-history")
 def screening_source_history(
+    http_request: Request,
     limit: int = Query(100, ge=1, le=100),
     config: Config = Depends(get_config_dep),
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> Dict[str, Any]:
-    return _service(config, db_manager).source_history(limit=limit)
+    owner = get_request_analysis_owner_context(http_request)
+    return _service(config, db_manager).source_history(owner=owner, limit=limit)

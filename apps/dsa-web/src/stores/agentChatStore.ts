@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { notifyFeatureQuotaChanged } from '../api';
 import { agentApi, isAbortError } from '../api/agent';
 import type { ChatSessionItem, ChatStreamRequest } from '../api/agent';
 import {
@@ -70,6 +71,8 @@ type StreamFailureEvent = {
   message?: unknown;
   backend?: string;
   error_code?: string;
+  reason?: string;
+  status_code?: number;
 };
 
 function streamFailureFallback(event: StreamFailureEvent, defaultMessage: string): string {
@@ -99,14 +102,24 @@ function getStreamFailureError(
   event: StreamFailureEvent,
   fallbackMessage: string,
 ): ParsedApiError {
-  return getParsedApiError(
-    getFirstMeaningfulStreamError(
-      event.error,
-      event.message,
-      event.content,
-      fallbackMessage,
-    ),
+  const source = getFirstMeaningfulStreamError(
+    event.error,
+    event.message,
+    event.content,
+    fallbackMessage,
   );
+  return getParsedApiError(event.error_code ? {
+    response: {
+      status: event.status_code,
+      data: {
+        detail: {
+          error: event.error_code,
+          reason: event.reason,
+          message: source,
+        },
+      },
+    },
+  } : source);
 }
 
 interface AgentChatState {
@@ -403,9 +416,18 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
                 ],
           }));
           meta?.onAccepted?.(acceptedEvent);
+          notifyFeatureQuotaChanged();
           return;
         }
         if (!acceptedEvent) {
+          if (event.type === 'error' && event.error_code === 'feature_quota_exceeded') {
+            const failureEvent = event as unknown as StreamFailureEvent;
+            notifyFeatureQuotaChanged();
+            throw getStreamFailureError(
+              failureEvent,
+              '当前功能暂不可用，请稍后重试。',
+            );
+          }
           throw protocolError(`Agent stream emitted ${event.type || 'an unknown event'} before accepted.`);
         }
         if (event.type === 'done') {
@@ -433,6 +455,9 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
         if (event.type === 'error') {
           set({ stopError: false });
           const failureEvent = event as unknown as StreamFailureEvent;
+          if (failureEvent.error_code === 'feature_quota_exceeded') {
+            notifyFeatureQuotaChanged();
+          }
           throw getStreamFailureError(
             failureEvent,
             streamFailureFallback(failureEvent, '分析出错'),

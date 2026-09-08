@@ -8,8 +8,18 @@ const mockLogout = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../../contexts/AuthContext', () => ({
   useAuth: () => ({
-    authEnabled: true,
+    actor: 'web_user',
+    hasAnyPermission: () => true,
     logout: mockLogout,
+  }),
+}));
+
+vi.mock('../../../contexts/FeatureQuotaContext', () => ({
+  useFeatureQuotas: () => ({
+    items: [],
+    isLoading: false,
+    refresh: vi.fn(),
+    describe: () => '股票分析 4 · AI 问股 2',
   }),
 }));
 

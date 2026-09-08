@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from functools import partial
 import threading
 import unittest
 from datetime import date, timedelta
@@ -19,9 +20,44 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import select
 
 from src.config import Config
+from src.portfolio_ownership import PortfolioScope
 from src.repositories.portfolio_repo import PortfolioBusyError, PortfolioRepository
 from src.services.portfolio_service import _AvgState, PortfolioConflictError, PortfolioOversellError, PortfolioService
 from src.storage import DatabaseManager, PortfolioDailySnapshot, PortfolioPosition, PortfolioPositionLot, PortfolioTrade
+
+
+class _ScopedPortfolioService:
+    """Inject one explicit user scope into legacy service-level test calls only."""
+
+    _SCOPE_METHODS = frozenset(
+        {
+            "create_account",
+            "list_accounts",
+            "update_account",
+            "deactivate_account",
+            "record_trade",
+            "record_cash_ledger",
+            "record_corporate_action",
+            "delete_trade_event",
+            "delete_cash_ledger_event",
+            "delete_corporate_action_event",
+            "list_trade_events",
+            "list_cash_ledger_events",
+            "list_corporate_action_events",
+            "get_portfolio_snapshot",
+            "refresh_fx_rates",
+        }
+    )
+
+    def __init__(self, service: PortfolioService, scope: PortfolioScope):
+        self._service = service
+        self._scope = scope
+
+    def __getattr__(self, name: str):
+        attribute = getattr(self._service, name)
+        if name in self._SCOPE_METHODS:
+            return partial(attribute, portfolio_scope=self._scope)
+        return attribute
 
 
 class PortfolioServiceTestCase(unittest.TestCase):
@@ -50,7 +86,8 @@ class PortfolioServiceTestCase(unittest.TestCase):
         DatabaseManager.reset_instance()
 
         self.db = DatabaseManager.get_instance()
-        self.service = PortfolioService()
+        self.portfolio_scope = PortfolioScope.user("portfolio-service-test")
+        self.service = _ScopedPortfolioService(PortfolioService(), self.portfolio_scope)
 
     def tearDown(self) -> None:
         DatabaseManager.reset_instance()
@@ -1157,6 +1194,7 @@ class PortfolioServiceTestCase(unittest.TestCase):
                     market="cn",
                     currency="CNY",
                     trade_uid=uid,
+                    portfolio_scope=self.portfolio_scope,
                 )
                 results.append(uid)
             except Exception as exc:  # pragma: no cover - asserted below
@@ -1212,6 +1250,7 @@ class PortfolioServiceTestCase(unittest.TestCase):
                     market="cn",
                     currency="CNY",
                     trade_uid="dup-race-sell-1",
+                    portfolio_scope=self.portfolio_scope,
                 )
                 results.append("ok")
             except Exception as exc:  # pragma: no cover - asserted below

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple, get_args
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
+from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.services.stock_list_parser import ParseStatus, parse_analysis_target
 from src.core.trading_calendar import MarketPhase
 from src.repositories.decision_signal_repo import (
@@ -213,6 +214,7 @@ class DecisionSignalService:
         expires_to: Optional[Any] = None,
         holding_only: bool = False,
         account_id: Optional[int] = None,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
         stock_identities: Optional[List[Tuple[str, str]]] = None,
         page: int = 1,
         page_size: int = 20,
@@ -254,7 +256,10 @@ class DecisionSignalService:
             if not stock_identity_filters:
                 return {"items": [], "total": 0, "page": safe_page, "page_size": safe_page_size}
         elif holding_only:
-            held_identities = self._cached_holding_identities(account_id=account_id)
+            held_identities = self._cached_holding_identities(
+                account_id=account_id,
+                portfolio_scope=portfolio_scope,
+            )
             if market_norm:
                 held_identities = {
                     identity for identity in held_identities if identity[0] == market_norm
@@ -1074,8 +1079,16 @@ class DecisionSignalService:
             return "partial"
         return "minimal"
 
-    def _cached_holding_identities(self, *, account_id: Optional[int]) -> set[Tuple[str, str]]:
-        identities = self.portfolio_repo.list_cached_position_identities(account_id=account_id)
+    def _cached_holding_identities(
+        self,
+        *,
+        account_id: Optional[int],
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
+    ) -> set[Tuple[str, str]]:
+        identities = self.portfolio_repo.list_cached_position_identities(
+            account_id=account_id,
+            owner_id=portfolio_scope,
+        )
         normalized: set[Tuple[str, str]] = set()
         for market, symbol in identities:
             if not str(symbol or "").strip():

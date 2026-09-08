@@ -7,7 +7,7 @@ import logging
 from datetime import date
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.deps import get_database_manager
 from api.v1.schemas.backtest import (
@@ -19,6 +19,7 @@ from api.v1.schemas.backtest import (
 )
 from api.v1.schemas.common import ErrorResponse
 from src.services.backtest_service import BacktestService
+from src.services.feature_quota_service import FeatureQuotaService
 from src.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -55,11 +56,21 @@ def _validate_analysis_date_range(
 )
 def run_backtest(
     request: BacktestRunRequest,
+    http_request: Request,
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> BacktestRunResponse:
     try:
         _validate_analysis_date_range(request.analysis_date_from, request.analysis_date_to)
         service = BacktestService(db_manager)
+        service.validate_run_request(
+            code=request.code,
+            eval_window_days=request.eval_window_days,
+            min_age_days=request.min_age_days,
+            analysis_date_from=request.analysis_date_from,
+            analysis_date_to=request.analysis_date_to,
+            limit=request.limit,
+        )
+        FeatureQuotaService().reserve_for_request(http_request, 'backtest')
         stats = service.run_backtest(
             code=request.code,
             force=request.force,

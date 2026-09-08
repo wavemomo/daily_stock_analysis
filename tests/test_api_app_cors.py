@@ -28,19 +28,18 @@ class AppCorsConfigTestCase(unittest.TestCase):
         self.assertEqual(cors.kwargs["allow_origins"], ["*"])
         self.assertFalse(cors.kwargs["allow_credentials"])
 
-    def test_allow_all_warns_when_auth_is_disabled(self):
+    def test_allow_all_warns_about_open_cors(self):
+        # Authentication is always enforced now, so opening CORS to any origin
+        # always warrants the open-CORS warning.
         with patch.dict(os.environ, {"CORS_ALLOW_ALL": "true"}, clear=False), \
-             patch("api.app.is_auth_enabled", return_value=False), \
              patch("api.app.logger.warning") as warning:
             self._build_app()
 
         warning.assert_called_once()
         self.assertIn("CORS_ALLOW_ALL=true", warning.call_args.args[0])
-        self.assertIn("ADMIN_AUTH_ENABLED is false", warning.call_args.args[0])
 
-    def test_allow_all_does_not_warn_when_auth_is_enabled(self):
-        with patch.dict(os.environ, {"CORS_ALLOW_ALL": "true"}, clear=False), \
-             patch("api.app.is_auth_enabled", return_value=True), \
+    def test_explicit_origins_do_not_warn(self):
+        with patch.dict(os.environ, {"CORS_ALLOW_ALL": "false"}, clear=False), \
              patch("api.app.logger.warning") as warning:
             self._build_app()
 

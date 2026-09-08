@@ -16,9 +16,11 @@ from tests.litellm_stub import ensure_litellm_stub
 
 ensure_litellm_stub()
 
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER
 from src.analyzer import AnalysisResult
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
+from src.repositories.analysis_repo import AnalysisRepository
 from src.services.run_diagnostics import activate_run_diagnostic_context, current_diagnostic_snapshot, reset_run_diagnostic_context
 
 
@@ -97,6 +99,10 @@ def _make_pipeline(*, agent_mode: bool = False, save_context_snapshot: bool = Tr
         "today": {},
         "yesterday": {},
     }
+    # 生产在 __init__ 绑定 owner-scoped repo；__new__ 夹具需显式装配，
+    # repo.save 会委托到 db.save_analysis_history，从而保留既有断言。
+    pipeline.owner = GLOBAL_ANALYSIS_OWNER
+    pipeline.repo = AnalysisRepository(pipeline.db, owner=GLOBAL_ANALYSIS_OWNER)
 
     pipeline.trend_analyzer = MagicMock()
     pipeline.analyzer = MagicMock()

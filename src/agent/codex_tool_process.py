@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from src.agent.tools.execution import ToolAccessContext
+from src.portfolio_ownership import PortfolioScope
 
 
 # Gate P observed cooperative TERM completion in under 25 ms.  The grace keeps
@@ -125,6 +126,11 @@ def _context_payload(context: ToolAccessContext) -> dict:
         "data_sources": context.data_sources,
         "backend": context.backend,
         "session_id": context.session_id,
+        "resource_owner_id": context.resource_owner_id,
+        "portfolio_scope": {
+            "kind": context.portfolio_scope.kind,
+            "owner_id": context.portfolio_scope.owner_id,
+        },
         "timeout_seconds": context.timeout_seconds,
         "deadline": context.deadline,
         "max_result_bytes": context.max_result_bytes,
@@ -146,6 +152,13 @@ def _context_from_payload(payload: dict) -> ToolAccessContext:
             },
             mode=str(stock_payload.get("mode") or "maintain"),
         )
+    portfolio_payload = payload.get("portfolio_scope")
+    if not isinstance(portfolio_payload, dict):
+        raise ValueError("portfolio scope is required in tool process context")
+    portfolio_scope = PortfolioScope(
+        kind=str(portfolio_payload.get("kind") or ""),
+        owner_id=portfolio_payload.get("owner_id"),
+    )
     return ToolAccessContext(
         stock_scope=stock_scope,
         market=payload.get("market"),
@@ -153,6 +166,8 @@ def _context_from_payload(payload: dict) -> ToolAccessContext:
         data_sources=payload.get("data_sources"),
         backend=payload.get("backend"),
         session_id=payload.get("session_id"),
+        resource_owner_id=payload.get("resource_owner_id"),
+        portfolio_scope=portfolio_scope,
         timeout_seconds=payload.get("timeout_seconds"),
         deadline=payload.get("deadline"),
         cancel_event=None,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime
 import json
 import logging
@@ -78,6 +79,13 @@ PROFILE_CALIBRATION_BREAKDOWN_DIMENSIONS = (
 )
 
 
+@dataclass(frozen=True)
+class _PreparedOutcomeRun:
+    signals: List[DecisionSignalRecord]
+    horizons: Optional[List[str]]
+    force: bool
+
+
 class DecisionSignalOutcomeService:
     """Business logic for signal outcomes, stats, and feedback."""
 
@@ -93,7 +101,7 @@ class DecisionSignalOutcomeService:
         self.signal_repo = signal_repo or DecisionSignalRepository(db_manager)
         self.stock_repo = stock_repo or StockRepository(db_manager)
 
-    def run_outcomes(
+    def prepare_run_request(
         self,
         *,
         signal_id: Optional[int] = None,
@@ -105,7 +113,8 @@ class DecisionSignalOutcomeService:
         source_type: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> _PreparedOutcomeRun:
+        """Validate and select outcome candidates without persisting a result."""
         signal_id_norm = self._optional_positive_int(signal_id, "signal_id")
         market_norm = DecisionSignalService._normalize_optional_market(market)
         action_norm = DecisionSignalService._normalize_optional_action(action)
@@ -141,6 +150,36 @@ class DecisionSignalOutcomeService:
             )
         if signal_id_norm is not None and not signals:
             raise DecisionSignalNotFoundError(f"Decision signal not found: {signal_id_norm}")
+        return _PreparedOutcomeRun(signals=signals, horizons=horizons_norm, force=force)
+
+    def run_outcomes(
+        self,
+        *,
+        signal_id: Optional[int] = None,
+        horizons: Optional[List[str]] = None,
+        force: bool = False,
+        market: Optional[str] = None,
+        stock_code: Optional[str] = None,
+        action: Optional[str] = None,
+        source_type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+        prepared: Optional[_PreparedOutcomeRun] = None,
+    ) -> Dict[str, Any]:
+        prepared_run = prepared or self.prepare_run_request(
+            signal_id=signal_id,
+            horizons=horizons,
+            force=force,
+            market=market,
+            stock_code=stock_code,
+            action=action,
+            source_type=source_type,
+            status=status,
+            limit=limit,
+        )
+        signals = prepared_run.signals
+        horizons_norm = prepared_run.horizons
+        force = prepared_run.force
 
         items: List[Dict[str, Any]] = []
         created_count = 0

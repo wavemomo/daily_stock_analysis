@@ -89,3 +89,6 @@ static/
 /apps/dsa-desktop/node_modules/
 /node_modules/
 docs/specs/
+
+# 语义评审本地产物，不入库
+semantic-review/

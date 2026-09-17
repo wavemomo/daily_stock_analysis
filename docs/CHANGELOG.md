@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [改进] 内置选股（`SCREENING_ENABLED`）默认改为开启：同步更新运行时默认值、配置 Schema `default_value`/描述与 `.env.example`；未显式配置该项的部署重启后即可使用选股页，仍可通过环境变量或 Web/小程序系统设置关闭。
 - [新功能] 渡劫每日心得强化习惯闭环：新增 owner-scoped 的 `GET /api/v1/miniapp/daily-reflections/stats`（当前连续、最长连续、累计、今日是否已记、指定月份打卡日），连续天数以客户端本地日历为准且今日未记但昨日已记时按昨日起算；小程序渡劫页新增连续打卡面板、今日打卡状态、月度回顾日历（可切换月份）与每日提醒（本地按用户存储开关+时间，今日未打卡时应用内提醒横幅）。
 - [测试] 增加连续打卡/最长连续/月度打卡日/owner 隔离的后端服务与端点回归，以及小程序渡劫习惯闭环（提醒偏好、月历前导空白与打卡日、未打卡提醒、切换）的回归覆盖。
 - [文档] 补充 `docs/miniapp.md` 渡劫统计端点契约与连续天数语义。

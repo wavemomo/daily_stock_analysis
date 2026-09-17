@@ -896,7 +896,7 @@ class Config:
     stock_index_remote_update_enabled: bool = True
 
     # === Built-in stock screening ===
-    screening_enabled: bool = False
+    screening_enabled: bool = True
 
     # === AI 分析配置 ===
     generation_backend: str = LITELLM_BACKEND_ID
@@ -2355,7 +2355,7 @@ class Config:
                 minimum=1,
             ),
             portfolio_fx_update_enabled=os.getenv('PORTFOLIO_FX_UPDATE_ENABLED', 'true').lower() == 'true',
-            screening_enabled=parse_env_bool(os.getenv('SCREENING_ENABLED'), default=False),
+            screening_enabled=parse_env_bool(os.getenv('SCREENING_ENABLED'), default=True),
         )
     
     @classmethod

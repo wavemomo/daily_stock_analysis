@@ -1,10 +1,10 @@
 import type React from 'react';
 import { useEffect, useState } from 'react';
-import { LogIn, QrCode, ShieldCheck } from 'lucide-react';
+import { LogIn, ShieldCheck } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, Input } from '../components/common';
 import { useAuth } from '../hooks';
-import { WECHAT_OAUTH_START_PATH, webAuthApi } from '../api/webAuth';
+import { webAuthApi } from '../api/webAuth';
 import { getParsedApiError } from '../api/error';
 
 const OAUTH_RETURN_PATH_STORAGE_KEY = 'dsa.webAuth.returnPath';
@@ -73,15 +73,6 @@ const LoginPage: React.FC = () => {
     }
   };
 
-  const beginWechatLogin = () => {
-    try {
-      window.sessionStorage.setItem(OAUTH_RETURN_PATH_STORAGE_KEY, redirect);
-    } catch {
-      // OAuth succeeds without restoring deep links when storage is unavailable.
-    }
-    window.location.assign(WECHAT_OAUTH_START_PATH);
-  };
-
   return (
     <main className="flex min-h-screen items-center justify-center bg-base px-4 py-10 text-foreground">
       <section className="w-full max-w-xl rounded-3xl border border-border bg-card p-7 shadow-soft-card sm:p-10">
@@ -128,16 +119,6 @@ const LoginPage: React.FC = () => {
             {submitting ? '登录中…' : '登录'}
           </Button>
         </form>
-
-        <div className="mt-6 border-t border-border pt-5">
-          <p className="mb-3 text-center text-xs leading-5 text-muted-foreground">
-            已配置微信开放平台网站应用？也可使用微信扫码登录。
-          </p>
-          <Button type="button" variant="secondary" size="lg" className="w-full" onClick={beginWechatLogin}>
-            <QrCode className="mr-2 h-4 w-4" aria-hidden="true" />
-            前往微信扫码登录
-          </Button>
-        </div>
 
         <p className="mt-5 text-center text-xs leading-5 text-muted-foreground">
           还没有绑定邮箱？请先在小程序端登录并完成「个人设置 → Web 登录邮箱」绑定。

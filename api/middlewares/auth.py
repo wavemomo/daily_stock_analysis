@@ -22,7 +22,6 @@ from src.services.wechat_miniapp_auth_service import (
 
 logger = logging.getLogger(__name__)
 _PUBLIC_AVATAR_PATH_RE = re.compile(rf"^{re.escape(AVATAR_URL_PREFIX)}{AVATAR_FILENAME_PATTERN}$")
-_WEB_WECHAT_CALLBACK_PATH = "/api/v1/web-auth/wechat/callback"
 _WEB_USER_PROTECTED_PATHS = frozenset({
     "/api/v1/web-auth/me",
     "/api/v1/web-auth/logout",
@@ -39,8 +38,6 @@ _DEFAULT_WEB_ORIGINS = frozenset({
 
 EXEMPT_PATHS = frozenset({
     "/api/v1/miniapp/auth/login",
-    "/api/v1/web-auth/wechat/start",
-    "/api/v1/web-auth/wechat/callback",
     "/api/v1/web-auth/password/login",
     "/api/health",
     "/api/v1/health",
@@ -62,14 +59,8 @@ def _trusted_web_origins() -> frozenset[str]:
     return _DEFAULT_WEB_ORIGINS | frozenset(configured)
 
 
-def _is_web_wechat_callback(path: str, method: str) -> bool:
-    """OAuth callback may be anonymous only before any current credential exists."""
-    normalized = path.rstrip("/") or "/"
-    return method.upper() == "GET" and normalized == _WEB_WECHAT_CALLBACK_PATH
-
-
 def _path_exempt(path: str, method: str) -> bool:
-    """Check publicly reachable paths; callback conflicts are handled separately."""
+    """Check publicly reachable paths."""
     normalized = path.rstrip("/") or "/"
     if method.upper() in {"GET", "HEAD"} and _PUBLIC_AVATAR_PATH_RE.fullmatch(path):
         return True
@@ -119,13 +110,6 @@ def reject_if_already_authenticated(
             },
         )
     return None
-
-
-def web_wechat_login_credentials_response(request: Request) -> Optional[JSONResponse]:
-    """拒绝用既有本地登录态重新发起或完成微信扫码登录。"""
-    return reject_if_already_authenticated(
-        request, message="微信扫码登录只能由未登录的授权浏览器发起"
-    )
 
 
 def web_password_login_credentials_response(request: Request) -> Optional[JSONResponse]:
@@ -179,11 +163,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         normalized_path = path.rstrip("/") or "/"
         if request.method.upper() == "OPTIONS" or not path.startswith("/api/v1/"):
-            return await call_next(request)
-        if _is_web_wechat_callback(path, request.method):
-            credentials_response = web_wechat_login_credentials_response(request)
-            if credentials_response is not None:
-                return credentials_response
             return await call_next(request)
         if normalized_path == "/api/v1/miniapp/auth/login":
             token = _miniapp_bearer_token(request)

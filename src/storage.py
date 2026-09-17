@@ -1008,24 +1008,6 @@ class AuthIdentityRecord(Base):
     )
 
 
-class WebWechatLoginTransactionRecord(Base):
-    """网站扫码 OAuth 的服务端 state 与浏览器绑定记录。"""
-
-    __tablename__ = 'web_wechat_login_transactions'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    state_hash = Column(String(64), nullable=False, unique=True, index=True)
-    browser_binding_hash = Column(String(64), nullable=False)
-    redirect_uri = Column(String(2048), nullable=False)
-    expires_at = Column(DateTime, nullable=False, index=True)
-    consumed_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
-
-    __table_args__ = (
-        Index('ix_web_wechat_login_transaction_binding', 'state_hash', 'browser_binding_hash'),
-    )
-
-
 class IdentityBindTransactionRecord(Base):
     """由一个已认证端显式批准的跨端身份绑定挑战。"""
 

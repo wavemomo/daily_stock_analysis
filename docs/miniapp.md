@@ -1,6 +1,6 @@
 # 微信小程序接入
 
-`upupup/` 小程序与 Web 共享同一个 canonical business user、RBAC、个人资源 owner scope 和服务端功能额度。小程序通过微信 `wx.login`/`code2session` 建立 Bearer session，并仅访问 `/api/v1/miniapp/*`；Web 仅通过微信开放平台网站应用扫码 OAuth 建立 HttpOnly `dsa_user_session` Cookie。两类会话不可互换：小程序路径严格不接收 Web Cookie；通用 `/api/v1/*` 由路由 RBAC policy 接受其中一种合法 principal，若同时携带有效 Web Cookie 与 Bearer token，返回 `400 authentication_conflict`。
+`upupup/` 小程序与 Web 共享同一个 canonical business user、RBAC、个人资源 owner scope 和服务端功能额度。小程序通过微信 `wx.login`/`code2session` 建立 Bearer session，并仅访问 `/api/v1/miniapp/*`；Web 通过邮箱密码登录建立 HttpOnly `dsa_user_session` Cookie。两类会话不可互换：小程序路径严格不接收 Web Cookie；通用 `/api/v1/*` 由路由 RBAC policy 接受其中一种合法 principal，若同时携带有效 Web Cookie 与 Bearer token，返回 `400 authentication_conflict`。
 
 管理能力由权限码判定，例如 `rbac.manage`。`admin` 只是 RBAC 角色：它不是独立登录域，也不绕过个人资源的 owner scope。
 
@@ -9,11 +9,8 @@
 在后端部署环境中配置：
 
 ```dotenv
-WECHAT_OPEN_WEB_APP_ID=
-WECHAT_OPEN_WEB_APP_SECRET=
-WECHAT_OPEN_WEB_REDIRECT_URI=https://example.com/api/v1/web-auth/wechat/callback
-WECHAT_OPEN_WEB_STATE_TTL_SECONDS=300
 WEB_USER_SESSION_TTL_SECONDS=604800
+WECHAT_OPEN_WEB_STATE_TTL_SECONDS=300
 WECHAT_MINIAPP_APP_ID=
 WECHAT_MINIAPP_APP_SECRET=
 WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS=8
@@ -21,20 +18,17 @@ WECHAT_MINIAPP_SESSION_TTL_HOURS=720
 CORS_ORIGINS=https://example.com
 ```
 
-`WECHAT_OPEN_WEB_REDIRECT_URI` 必须是已在微信开放平台登记的公开 HTTPS 回调地址；`CORS_ORIGINS` 只控制浏览器 API Origin，不能替代 OAuth 回调配置。微信 AppSecret 只能保存在后端部署环境，不能进入小程序源码、Web 构建、日志或错误响应。只有在单层且完全可信的反向代理拓扑中才设置 `TRUST_X_FORWARDED_FOR=true`。
+`CORS_ORIGINS` 控制浏览器 API 的可信 Origin。`WECHAT_OPEN_WEB_STATE_TTL_SECONDS` 仅用于「显式身份绑定挑战（identity-bind）」的短期 state 有效期，与登录方式无关。微信 AppSecret 只能保存在后端部署环境，不能进入小程序源码、Web 构建、日志或错误响应。只有在单层且完全可信的反向代理拓扑中才设置 `TRUST_X_FORWARDED_FOR=true`。
 
 小程序调用 `wx.login` 获取一次性 code，后端使用微信 `code2session` 解析身份后创建或复用 canonical user，并签发随机 Bearer session。数据库只保存会话令牌 hash，不保存原始 token，也不持久化微信 `session_key`。
 
-身份记录按 `(provider, issuer, subject)` 区分：provider 为 `wechat_miniapp` 或 `wechat_open_web`，issuer 为对应 AppID，subject 为 OpenID。服务端再将身份解析到 canonical user，并以该 user ID 执行 owner-scope 校验。OpenID、UnionID、code、access token、refresh token、AppSecret 与原始 Bearer token 不得回传给客户端或写入日志；昵称和头像只用于展示，不参与身份、RBAC 或资源归属判断。
+身份记录按 `(provider, issuer, subject)` 区分：小程序 provider 为 `wechat_miniapp`，issuer 为对应 AppID，subject 为 OpenID；持有可信 UnionID 时以 `(wechat_unionid, wechat, unionid)` 作为跨端桥接身份。服务端再将身份解析到 canonical user，并以该 user ID 执行 owner-scope 校验。OpenID、UnionID、code、access token、refresh token、AppSecret 与原始 Bearer token 不得回传给客户端或写入日志；昵称和头像只用于展示，不参与身份、RBAC 或资源归属判断。
 
 微信隐私规则不允许在 `onLaunch`/`onLoad` 中静默读取昵称和头像。首次身份登录仍会自动完成；若用户资料为空，登录后可使用微信官方头像昵称填写能力补充资料，也可跳过，之后可在“我的 → 更新微信资料”重新填写。头像临时文件通过认证上传端点保存到 SQLite 数据文件同目录的 `miniapp_avatars/`；API 只接受不超过 2MB、最大 4096×4096 且总像素不超过 1600 万的单帧 JPEG、PNG 或 WebP，服务端完整解码并重新编码后才公开读取。
 
 ## Web 登录方式
 
-Web 端支持两种登录方式，二者都签发同一套 `dsa_user_session` Cookie 会话并走同一 RBAC：
-
-1. **微信开放平台扫码 OAuth**：需要企业主体开通开放平台网站应用，见下文流程。
-2. **邮箱 + 密码登录**：面向无法开通开放平台的个人主体。小程序内已登录用户先在「个人设置 → Web 登录邮箱」用邮件验证码绑定邮箱和密码，再在 Web 端凭邮箱密码登录。邮箱仅作登录标识与找回入口，不参与账号自动合并；密码只保存 pbkdf2-hmac-sha256 派生摘要。
+Web 端通过**邮箱 + 密码登录**建立 `dsa_user_session` Cookie 会话并走与小程序同一套 RBAC。小程序内已登录用户先在「个人设置 → Web 登录邮箱」用邮件验证码绑定邮箱和密码，再在 Web 端凭邮箱密码登录。邮箱仅作登录标识与找回入口，不参与账号自动合并；密码只保存 pbkdf2-hmac-sha256 派生摘要。
 
 ### 邮箱密码绑定与登录
 
@@ -45,19 +39,9 @@ Web 端支持两种登录方式，二者都签发同一套 `dsa_user_session` Co
 - Web 登录（无既有登录态的浏览器）：
   - `POST /api/v1/web-auth/password/login`：提交 `{email, password}`，成功签发 `dsa_user_session` 并返回 `{user, csrf_token}`；失败统一返回 `401 {error:"invalid_credentials"}`，不区分邮箱不存在、密码错误、邮箱未验证或账号停用；浏览器已有登录态时返回 `400 authentication_conflict`。
 
-## Web 微信 OAuth
+## 认证后的 Web API
 
-浏览器通过以下流程完成微信扫码登录：
-
-1. 请求 `GET /api/v1/web-auth/wechat/start`。
-2. 服务端创建短期 state/binding transaction，写入临时浏览器 binding Cookie，并 302 到微信开放平台扫码授权地址。
-3. 微信回调 `GET /api/v1/web-auth/wechat/callback?code=...&state=...`。
-4. 服务端验证 state、浏览器 binding、有效期和单次消费状态，交换 code 后创建或复用 canonical user。
-5. 服务端建立 `dsa_user_session`，清理临时 binding，并固定 `302 /`。
-
-`start` 不接受 `return_path`。回调失败、state/binding 缺失、过期、篡改、重放或已消费时不得建立会话，也不得泄露微信 provider 响应。所有 OAuth 响应应使用 `Cache-Control: no-store`。
-
-认证后的 Web API：
+所有 Web 认证响应使用 `Cache-Control: no-store`：
 
 | 路由 | 认证/约束 | 作用 |
 | --- | --- | --- |

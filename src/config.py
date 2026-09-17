@@ -1310,22 +1310,8 @@ class Config:
         return (os.getenv('WECHAT_MINIAPP_APP_SECRET') or '').strip()
 
     @property
-    def wechat_open_web_app_id(self) -> str:
-        """微信开放平台网站应用 AppID；仅服务端 OAuth 客户端使用。"""
-        return (os.getenv('WECHAT_OPEN_WEB_APP_ID') or '').strip()
-
-    @property
-    def wechat_open_web_app_secret(self) -> str:
-        """微信开放平台网站应用 AppSecret；不得传入客户端或日志。"""
-        return (os.getenv('WECHAT_OPEN_WEB_APP_SECRET') or '').strip()
-
-    @property
-    def wechat_open_web_redirect_uri(self) -> str:
-        """已在微信开放平台登记的服务端 OAuth 回调完整 URI。"""
-        return (os.getenv('WECHAT_OPEN_WEB_REDIRECT_URI') or '').strip()
-
-    @property
     def wechat_open_web_state_ttl_seconds(self) -> int:
+        """Web 端显式身份绑定挑战（identity-bind）的短期 state 有效期（秒）。"""
         return parse_env_int(
             os.getenv('WECHAT_OPEN_WEB_STATE_TTL_SECONDS'),
             300,

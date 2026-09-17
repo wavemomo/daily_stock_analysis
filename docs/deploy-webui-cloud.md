@@ -322,25 +322,21 @@ sudo systemctl reload nginx
 配置成功后，直接用 `http://your-domain.com` 访问即可，不需要带端口号。
 
 > **使用 Nginx 后的注意事项**：
-> - Web 身份入口是微信开放平台网站应用扫码 OAuth；若应用直接位于**单层可信反向代理**（Nginx → App）之后，可在部署环境设置 `TRUST_X_FORWARDED_FOR=true`，让 OAuth 启动/回调等按真实客户端 IP 限流。多级代理或 CDN（CDN → Nginx → App）下，客户端 IP 语义必须按真实链路验证；不要把该开关当作认证或授权机制。
+> - Web 身份入口是邮箱密码登录；若应用直接位于**单层可信反向代理**（Nginx → App）之后，可在部署环境设置 `TRUST_X_FORWARDED_FOR=true`，让登录等按真实客户端 IP 限流。多级代理或 CDN（CDN → Nginx → App）下，客户端 IP 语义必须按真实链路验证；不要把该开关当作认证或授权机制。
 > - 如需 HTTPS，可以用 [Certbot](https://certbot.eff.org/) 自动申请免费的 Let's Encrypt 证书。
 
 ---
 
 ## 安全建议
 
-公网部署的 Web 身份入口是微信开放平台网站应用扫码 OAuth，不再提供内置管理员用户名密码或 `dsa_session` Cookie。请仅在服务端部署环境配置：
+公网部署的 Web 身份入口是邮箱密码登录，不再提供微信开放平台扫码 OAuth、内置管理员用户名密码或 `dsa_session` Cookie。用户先在小程序「个人设置 → Web 登录邮箱」用邮件验证码绑定邮箱和密码，再在 Web 端凭邮箱密码登录。请仅在服务端部署环境配置：
 
 ```env
-WECHAT_OPEN_WEB_APP_ID=wx...
-WECHAT_OPEN_WEB_APP_SECRET=...
-WECHAT_OPEN_WEB_REDIRECT_URI=https://your-domain.com/api/v1/web-auth/wechat/callback
-WECHAT_OPEN_WEB_STATE_TTL_SECONDS=300
 WEB_USER_SESSION_TTL_SECONDS=604800
 CORS_ORIGINS=https://your-domain.com
 ```
 
-`WECHAT_OPEN_WEB_REDIRECT_URI` 必须是已在微信开放平台网站应用中登记的公开 HTTPS 回调地址。`WECHAT_OPEN_WEB_APP_SECRET` 只能保存在后端运行环境，不能进入 Web 构建产物、日志或错误响应。登录后，浏览器只持有 HttpOnly `dsa_user_session`；Web Cookie 的写请求必须同时通过精确 `Origin` 校验和从 `GET /api/v1/web-auth/me` 获取的 `X-CSRF-Token` 校验。
+登录后，浏览器只持有 HttpOnly `dsa_user_session`；Web Cookie 的写请求必须同时通过精确 `Origin` 校验和从 `GET /api/v1/web-auth/me` 获取的 `X-CSRF-Token` 校验。邮件验证码通道所需的 `EMAIL_SENDER` / `EMAIL_PASSWORD` 等配置见小程序文档 `docs/miniapp.md`。
 
 权限管理不依赖独立管理员身份域：Web 使用 `/api/v1/rbac/*`，小程序使用 Bearer-only 的 `/api/v1/miniapp/rbac/*`，两者均要求 `rbac.manage`。角色 `admin` 只是 RBAC 角色，不会绕过个人资源 owner scope；高风险系统接口仍以其明确的权限策略保护。
 

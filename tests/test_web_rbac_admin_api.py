@@ -1,4 +1,4 @@
-"""Unified Web OAuth and miniapp Bearer RBAC regression tests."""
+"""Unified Web Cookie and miniapp Bearer RBAC regression tests."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
 
@@ -22,34 +21,19 @@ from api.app import create_app
 from src.config import Config
 from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.rbac_service import RbacService
-from src.services.web_user_auth_service import WEB_USER_COOKIE_NAME
+from src.services.web_user_auth_service import WEB_USER_COOKIE_NAME, WebUserAuthService
 from src.storage import DatabaseManager
 
 TRUSTED_ORIGIN = "http://localhost:5173"
 
 
-class _WechatResponse:
-    def __init__(self, payload: dict):
-        self.payload = payload
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return self.payload
-
-
 class UnifiedWebRbacApiTestCase(unittest.TestCase):
-    """Exercise Web OAuth Cookie and miniapp Bearer management boundaries."""
+    """Exercise Web Cookie and miniapp Bearer management boundaries."""
 
     _ENV_KEYS = (
         "DATABASE_PATH",
         "STOCK_LIST",
         "GEMINI_API_KEY",
-        "WECHAT_OPEN_WEB_APP_ID",
-        "WECHAT_OPEN_WEB_APP_SECRET",
-        "WECHAT_OPEN_WEB_REDIRECT_URI",
-        "WECHAT_OPEN_WEB_STATE_TTL_SECONDS",
         "WEB_USER_SESSION_TTL_SECONDS",
     )
 
@@ -62,10 +46,6 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
             "DATABASE_PATH": str(self.db_path),
             "STOCK_LIST": "600519",
             "GEMINI_API_KEY": "test",
-            "WECHAT_OPEN_WEB_APP_ID": "web-app-id",
-            "WECHAT_OPEN_WEB_APP_SECRET": "web-app-secret",
-            "WECHAT_OPEN_WEB_REDIRECT_URI": "https://web.example.test/api/v1/web-auth/wechat/callback",
-            "WECHAT_OPEN_WEB_STATE_TTL_SECONDS": "300",
             "WEB_USER_SESSION_TTL_SECONDS": "3600",
         })
         Config.reset_instance()
@@ -129,29 +109,14 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
             "permissions": ["rbac.manage"],
         }
 
-    def _complete_web_oauth(self, *, openid: str = "web-rbac-openid") -> tuple[dict, str]:
-        start = self.browser.get("/api/v1/web-auth/wechat/start", follow_redirects=False)
-        self.assertEqual(start.status_code, 302, start.text)
-        location = urlsplit(start.headers["location"])
-        self.assertEqual(location.scheme, "https")
-        self.assertEqual(location.netloc, "open.weixin.qq.com")
-        state = parse_qs(location.query)["state"][0]
-        responses = [
-            _WechatResponse({"access_token": "upstream-token", "openid": openid}),
-            _WechatResponse({"openid": openid}),
-        ]
-        with patch(
-            "src.services.wechat_open_web_auth_service.httpx.get",
-            side_effect=responses,
-        ):
-            callback = self.browser.get(
-                "/api/v1/web-auth/wechat/callback",
-                params={"code": "wechat-code", "state": state},
-                follow_redirects=False,
-            )
-        self.assertEqual(callback.status_code, 302, callback.text)
-        self.assertEqual(callback.headers["location"], "/")
-        self.assertIn(WEB_USER_COOKIE_NAME, callback.headers["set-cookie"])
+    def _establish_web_session(self, *, openid: str = "web-rbac-user") -> tuple[dict, str]:
+        """直接为 canonical user 铸造独立浏览器会话并加载到测试客户端。"""
+        user = self.user_repo.upsert_user(openid=openid, issuer="web-rbac-api-test")
+        issue = WebUserAuthService().create_session_for_user(
+            user_id=user.id, assign_default_role=True
+        )
+        self.assertIsNotNone(issue)
+        self.browser.cookies.set(WEB_USER_COOKIE_NAME, issue.session_value)
         session = self.browser.get("/api/v1/web-auth/me")
         self.assertEqual(session.status_code, 200, session.text)
         return session.json()["user"], session.json()["csrf_token"]
@@ -163,10 +128,11 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
     def _grant_web_management_access(self, web_user_id: int) -> None:
         self.rbac.repository.ensure_role(web_user_id, "admin")
 
-    def test_removed_password_routes_are_not_registered_and_oauth_protocol_is_registered(self) -> None:
+    def test_web_auth_routes_expose_password_login_and_no_wechat_oauth(self) -> None:
         paths = set(self.app.openapi()["paths"])
-        self.assertIn("/api/v1/web-auth/wechat/start", paths)
-        self.assertIn("/api/v1/web-auth/wechat/callback", paths)
+        self.assertNotIn("/api/v1/web-auth/wechat/start", paths)
+        self.assertNotIn("/api/v1/web-auth/wechat/callback", paths)
+        self.assertIn("/api/v1/web-auth/password/login", paths)
         self.assertIn("/api/v1/web-auth/me", paths)
         self.assertIn("/api/v1/web-auth/logout", paths)
         self.assertNotIn("/api/v1/auth/login", paths)
@@ -187,7 +153,7 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
             200,
         )
 
-        web_user, csrf_token = self._complete_web_oauth()
+        web_user, csrf_token = self._establish_web_session()
         denied = self.browser.get("/api/v1/rbac/catalog")
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertEqual(denied.json()["required_permission"], "rbac.manage")
@@ -210,7 +176,7 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
         self.assertEqual(miniapp_conflict.json()["error"], "authentication_conflict")
 
     def test_web_rbac_writes_require_csrf_and_audit_with_canonical_actor(self) -> None:
-        web_user, csrf_token = self._complete_web_oauth()
+        web_user, csrf_token = self._establish_web_session()
         self._grant_web_management_access(web_user["id"])
         payload = self._role_payload()
 
@@ -239,7 +205,7 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
             self.assertNotIn("actor_kind", event["metadata"])
 
     def test_quota_management_uses_canonical_web_actor_and_matches_bearer_route(self) -> None:
-        web_user, csrf_token = self._complete_web_oauth()
+        web_user, csrf_token = self._establish_web_session()
         self._grant_web_management_access(web_user["id"])
         headers = self._web_write_headers(csrf_token)
 
@@ -286,7 +252,7 @@ class UnifiedWebRbacApiTestCase(unittest.TestCase):
         self.assertEqual(target_account.status_code, 200, target_account.text)
         account_id = target_account.json()["id"]
 
-        web_user, csrf_token = self._complete_web_oauth(openid="web-owner-scope")
+        web_user, csrf_token = self._establish_web_session(openid="web-owner-scope")
         self._grant_web_management_access(web_user["id"])
         own_accounts = self.browser.get("/api/v1/portfolio/accounts")
         self.assertEqual(own_accounts.status_code, 200, own_accounts.text)

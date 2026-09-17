@@ -6,7 +6,7 @@ vi.mock('../index', () => ({
   default: { get, post },
 }));
 
-import { WECHAT_OAUTH_START_PATH, webAuthApi } from '../webAuth';
+import { webAuthApi } from '../webAuth';
 
 describe('webAuthApi', () => {
   it('uses the Cookie-backed session endpoint without exposing OAuth credentials to JavaScript', async () => {
@@ -16,12 +16,24 @@ describe('webAuthApi', () => {
     expect(get).toHaveBeenCalledWith('/api/v1/web-auth/me');
   });
 
-  it('logs out through the single Web OAuth session endpoint', async () => {
+  it('logs out through the single Web session endpoint', async () => {
     post.mockResolvedValueOnce({});
 
     await webAuthApi.logout();
 
     expect(post).toHaveBeenCalledWith('/api/v1/web-auth/logout');
-    expect(WECHAT_OAUTH_START_PATH).toBe('/api/v1/web-auth/wechat/start');
+  });
+
+  it('signs in with email and password against the password login endpoint', async () => {
+    post.mockResolvedValueOnce({ data: { user: { id: 7, permissions: [] }, csrf_token: 'csrf-token' } });
+
+    await expect(webAuthApi.passwordLogin('user@example.com', 'secret-pass')).resolves.toEqual({
+      user: { id: 7, permissions: [] },
+      csrf_token: 'csrf-token',
+    });
+    expect(post).toHaveBeenCalledWith('/api/v1/web-auth/password/login', {
+      email: 'user@example.com',
+      password: 'secret-pass',
+    });
   });
 });

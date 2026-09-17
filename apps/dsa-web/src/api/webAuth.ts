@@ -1,7 +1,5 @@
 import apiClient from './index';
 
-export const WECHAT_OAUTH_START_PATH = '/api/v1/web-auth/wechat/start';
-
 export type WebUser = {
   id: number;
   nickname?: string | null;

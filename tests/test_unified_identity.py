@@ -139,29 +139,29 @@ class UnifiedIdentityTestCase(unittest.TestCase):
             },
         )
 
-    def test_unionid_connects_web_and_miniapp_to_one_user(self) -> None:
+    def test_unionid_connects_two_miniapp_issuers_to_one_user(self) -> None:
         database = self._database()
         service = IdentityService(AuthIdentityRepository(database))
 
-        miniapp_user, created = service.resolve_miniapp_user(
-            app_id="wx-miniapp", openid="miniapp-openid", unionid="trusted-unionid"
+        first_user, created = service.resolve_miniapp_user(
+            app_id="wx-miniapp-a", openid="openid-a", unionid="trusted-unionid"
         )
-        web_user, web_created = service.resolve_open_web_user(
-            app_id="wx-open-web", openid="web-openid", unionid="trusted-unionid"
+        second_user, second_created = service.resolve_miniapp_user(
+            app_id="wx-miniapp-b", openid="openid-b", unionid="trusted-unionid"
         )
 
         self.assertTrue(created)
-        self.assertFalse(web_created)
-        self.assertEqual(web_user.id, miniapp_user.id)
+        self.assertFalse(second_created)
+        self.assertEqual(second_user.id, first_user.id)
         with database.get_session() as session:
             identities = session.execute(
-                select(AuthIdentityRecord).where(AuthIdentityRecord.user_id == miniapp_user.id)
+                select(AuthIdentityRecord).where(AuthIdentityRecord.user_id == first_user.id)
             ).scalars().all()
         self.assertEqual(
             {(row.provider, row.issuer, row.subject) for row in identities},
             {
-                ("wechat_miniapp", "wx-miniapp", "miniapp-openid"),
-                ("wechat_open_web", "wx-open-web", "web-openid"),
+                ("wechat_miniapp", "wx-miniapp-a", "openid-a"),
+                ("wechat_miniapp", "wx-miniapp-b", "openid-b"),
                 ("wechat_unionid", "wechat", "trusted-unionid"),
             },
         )
@@ -172,8 +172,8 @@ class UnifiedIdentityTestCase(unittest.TestCase):
         service.resolve_miniapp_user(
             app_id="wx-miniapp", openid="direct-openid", unionid=None
         )
-        service.resolve_open_web_user(
-            app_id="wx-open-web", openid="web-openid", unionid="union-owned-elsewhere"
+        service.resolve_miniapp_user(
+            app_id="wx-miniapp-c", openid="other-openid", unionid="union-owned-elsewhere"
         )
 
         with self.assertRaisesRegex(AuthIdentityConflictError, "拒绝自动关联"):

@@ -12,7 +12,6 @@ from src.repositories.auth_identity_repo import (
 from src.storage import UserRecord
 
 WECHAT_MINIAPP_PROVIDER = "wechat_miniapp"
-WECHAT_OPEN_WEB_PROVIDER = "wechat_open_web"
 
 
 class IdentityService:
@@ -39,25 +38,9 @@ class IdentityService:
             legacy_openid=None,
         )
 
-    def resolve_open_web_user(
-        self,
-        *,
-        app_id: str,
-        openid: str,
-        unionid: Optional[str],
-    ) -> tuple[UserRecord, bool]:
-        """以网站应用 AppID 为 issuer；只有可信 UnionID 可连接双端账户。"""
-        return self.repository.resolve_or_create(
-            provider=WECHAT_OPEN_WEB_PROVIDER,
-            issuer=app_id,
-            subject=openid,
-            unionid=unionid,
-        )
-
 
 __all__ = [
     "AuthIdentityConflictError",
     "IdentityService",
     "WECHAT_MINIAPP_PROVIDER",
-    "WECHAT_OPEN_WEB_PROVIDER",
 ]

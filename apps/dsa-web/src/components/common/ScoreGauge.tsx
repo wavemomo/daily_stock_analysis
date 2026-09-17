@@ -99,22 +99,22 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
   // Light theme uses a restrained glow; dark theme keeps the stronger terminal-style glow.
   const sentimentConfig = {
     greed: {
-      color: '#00d4ff',       // Cyan
-      glowFilter: 'rgba(0, 212, 255, 0.66)',
-      lightColor: '#22d3ee',  // Lighter cyan
-      lightEndColor: '#0891b2', // Darker cyan
+      color: '#4f46e5',       // Indigo (brand primary)
+      glowFilter: 'rgba(79, 70, 229, 0.66)',
+      lightColor: '#818cf8',  // Lighter indigo
+      lightEndColor: '#4338ca', // Darker indigo
     },
     neutral: {
-      color: '#a855f7',       // Purple
-      glowFilter: 'rgba(168, 85, 247, 0.66)',
-      lightColor: '#c084fc',  // Lighter purple
-      lightEndColor: '#9333ea', // Darker purple
+      color: '#8b5cf6',       // Violet (brand accent)
+      glowFilter: 'rgba(139, 92, 246, 0.66)',
+      lightColor: '#a78bfa',  // Lighter violet
+      lightEndColor: '#7c3aed', // Darker violet
     },
     fear: {
-      color: '#ff4466',       // Red
-      glowFilter: 'rgba(255, 68, 102, 0.66)',
-      lightColor: '#fb7185',  // Lighter rose
-      lightEndColor: '#e11d48', // Darker rose
+      color: '#e64545',       // Red (brand down/up-red)
+      glowFilter: 'rgba(230, 69, 69, 0.66)',
+      lightColor: '#f87171',  // Lighter red
+      lightEndColor: '#dc2626', // Darker red
     },
   };
 

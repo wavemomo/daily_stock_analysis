@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
-"""普通 Web 用户 OAuth、身份绑定与可撤销会话的数据访问层。"""
+"""普通 Web 用户身份绑定与可撤销会话的数据访问层。"""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal, Optional
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 
 from src.storage import (
     DatabaseManager,
     IdentityBindTransactionRecord,
     MiniappUserRecord,
     WebUserSessionRecord,
-    WebWechatLoginTransactionRecord,
     local_naive_now,
 )
 
@@ -21,66 +20,10 @@ IdentityBindState = Literal["pending", "approved", "conflict", "invalid"]
 
 
 class WebUserAuthRepository:
-    """管理网站 OAuth state、显式绑定挑战和独立浏览器会话。"""
+    """管理显式身份绑定挑战和独立浏览器会话。"""
 
     def __init__(self, db_manager: Optional[DatabaseManager] = None):
         self.db = db_manager or DatabaseManager.get_instance()
-
-    def create_wechat_login_transaction(
-        self,
-        *,
-        state_hash: str,
-        browser_binding_hash: str,
-        redirect_uri: str,
-        expires_at: datetime,
-    ) -> None:
-        """创建短期 state；仅保存摘要，且清理过期记录。"""
-        now = local_naive_now()
-
-        def write(session):
-            session.execute(
-                delete(WebWechatLoginTransactionRecord).where(
-                    WebWechatLoginTransactionRecord.expires_at <= now
-                )
-            )
-            session.add(
-                WebWechatLoginTransactionRecord(
-                    state_hash=state_hash,
-                    browser_binding_hash=browser_binding_hash,
-                    redirect_uri=redirect_uri,
-                    expires_at=expires_at,
-                    created_at=now,
-                )
-            )
-
-        self.db._run_write_transaction("create_web_wechat_login_transaction", write)
-
-    def consume_wechat_login_transaction(
-        self,
-        *,
-        state_hash: str,
-        browser_binding_hash: str,
-        now: Optional[datetime] = None,
-    ) -> Optional[str]:
-        """原子校验并消费 OAuth state，返回当初保存的 callback URI。"""
-        current = now or local_naive_now()
-
-        def write(session):
-            statement = (
-                update(WebWechatLoginTransactionRecord)
-                .where(
-                    WebWechatLoginTransactionRecord.state_hash == state_hash,
-                    WebWechatLoginTransactionRecord.browser_binding_hash
-                    == browser_binding_hash,
-                    WebWechatLoginTransactionRecord.consumed_at.is_(None),
-                    WebWechatLoginTransactionRecord.expires_at > current,
-                )
-                .values(consumed_at=current)
-                .returning(WebWechatLoginTransactionRecord.redirect_uri)
-            )
-            return session.execute(statement).scalar_one_or_none()
-
-        return self.db._run_write_transaction("consume_web_wechat_login_transaction", write)
 
     def create_web_session_for_user(
         self,

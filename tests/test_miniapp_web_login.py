@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
 
@@ -20,37 +19,19 @@ from api.app import create_app
 from src.config import Config
 from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.rbac_service import RbacService
-from src.services.web_user_auth_service import WEB_USER_COOKIE_NAME
+from src.services.web_user_auth_service import WEB_USER_COOKIE_NAME, WebUserAuthService
 from src.storage import DatabaseManager
 
 TRUSTED_ORIGIN = "http://localhost:5173"
-OAUTH_BINDING_COOKIE = "dsa_wechat_oauth_binding"
-CALLBACK_PATH = "/api/v1/web-auth/wechat/callback"
-
-
-class _WechatResponse:
-    def __init__(self, payload: dict, *, error: Exception | None = None):
-        self.payload = payload
-        self.error = error
-
-    def raise_for_status(self) -> None:
-        if self.error is not None:
-            raise self.error
-
-    def json(self) -> dict:
-        return self.payload
 
 
 class MiniappWebLoginApiTestCase(unittest.TestCase):
-    """覆盖官方微信网站 OAuth、本地 Web Cookie 与身份确认的真实边界。"""
+    """覆盖 Web 独立 Cookie 会话、小程序 Bearer 边界与显式身份确认。"""
 
     _ENV_KEYS = (
         "DATABASE_PATH",
         "STOCK_LIST",
         "GEMINI_API_KEY",
-        "WECHAT_OPEN_WEB_APP_ID",
-        "WECHAT_OPEN_WEB_APP_SECRET",
-        "WECHAT_OPEN_WEB_REDIRECT_URI",
         "WECHAT_OPEN_WEB_STATE_TTL_SECONDS",
         "WEB_USER_SESSION_TTL_SECONDS",
     )
@@ -58,15 +39,12 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp_dir.name)
-        self.db_path = self.data_dir / "web_wechat_oauth.db"
+        self.db_path = self.data_dir / "miniapp_web_login.db"
         self._original_env = {key: os.environ.get(key) for key in self._ENV_KEYS}
         os.environ.update({
             "DATABASE_PATH": str(self.db_path),
             "STOCK_LIST": "600519",
             "GEMINI_API_KEY": "test",
-            "WECHAT_OPEN_WEB_APP_ID": "web-app-id",
-            "WECHAT_OPEN_WEB_APP_SECRET": "web-app-secret",
-            "WECHAT_OPEN_WEB_REDIRECT_URI": "https://web.example.test/api/v1/web-auth/wechat/callback",
             "WECHAT_OPEN_WEB_STATE_TTL_SECONDS": "300",
             "WEB_USER_SESSION_TTL_SECONDS": "3600",
         })
@@ -116,82 +94,8 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.temp_dir.cleanup()
 
     @staticmethod
-    def _wechat_success(openid: str = "web-openid", unionid: str | None = None) -> list[_WechatResponse]:
-        token_payload = {
-            "access_token": "upstream-access-token",
-            "openid": openid,
-        }
-        userinfo_payload = {"openid": openid}
-        if unionid:
-            token_payload["unionid"] = unionid
-            userinfo_payload["unionid"] = unionid
-        return [_WechatResponse(token_payload), _WechatResponse(userinfo_payload)]
-
-    @staticmethod
     def _member_headers(token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
-
-    def _start_oauth(self, browser: TestClient | None = None) -> tuple[TestClient, str]:
-        client = browser or self.browser
-        response = client.get("/api/v1/web-auth/wechat/start", follow_redirects=False)
-        self.assertEqual(response.status_code, 302, response.text)
-        self.assertEqual(response.headers["cache-control"], "no-store")
-        location = response.headers["location"]
-        parsed = urlsplit(location)
-        query = parse_qs(parsed.query)
-        self.assertEqual(parsed.scheme, "https")
-        self.assertEqual(parsed.netloc, "open.weixin.qq.com")
-        self.assertEqual(parsed.path, "/connect/qrconnect")
-        self.assertEqual(query["appid"], ["web-app-id"])
-        self.assertEqual(query["redirect_uri"], [os.environ["WECHAT_OPEN_WEB_REDIRECT_URI"]])
-        self.assertEqual(query["response_type"], ["code"])
-        self.assertEqual(query["scope"], ["snsapi_login"])
-        self.assertGreaterEqual(len(query["state"][0]), 43)
-        self.assertTrue(location.endswith("#wechat_redirect"))
-        self.assertNotIn("web-app-secret", location)
-        cookie = response.headers["set-cookie"].lower()
-        self.assertIn(f"{OAUTH_BINDING_COOKIE}=", cookie)
-        self.assertIn("httponly", cookie)
-        self.assertIn("samesite=lax", cookie)
-        self.assertIn(f"path={CALLBACK_PATH}", cookie)
-        self.assertNotIn("openid", response.text.lower())
-        return client, query["state"][0]
-
-    def _complete_oauth(
-        self,
-        *,
-        browser: TestClient | None = None,
-        openid: str = "web-openid",
-        unionid: str | None = None,
-    ) -> tuple[TestClient, object]:
-        client, state = self._start_oauth(browser)
-        with patch(
-            "src.services.wechat_open_web_auth_service.httpx.get",
-            side_effect=self._wechat_success(openid, unionid),
-        ) as upstream_get:
-            response = client.get(
-                "/api/v1/web-auth/wechat/callback",
-                params={"code": "wechat-code", "state": state},
-                follow_redirects=False,
-            )
-        self.assertEqual(response.status_code, 302, response.text)
-        self.assertEqual(response.headers["location"], "/")
-        self.assertEqual(response.headers["cache-control"], "no-store")
-        self.assertIn(WEB_USER_COOKIE_NAME, response.headers["set-cookie"])
-        self.assertIn(f"{OAUTH_BINDING_COOKIE}=\"\"", response.headers["set-cookie"])
-        self.assertNotIn("wechat-code", response.text)
-        self.assertNotIn("upstream-access-token", response.text)
-        self.assertNotIn(openid, response.text)
-        self.assertNotIn("web-app-secret", response.text)
-        self.assertEqual(upstream_get.call_count, 2)
-        token_call, userinfo_call = upstream_get.call_args_list
-        self.assertEqual(token_call.kwargs["params"]["appid"], "web-app-id")
-        self.assertEqual(token_call.kwargs["params"]["secret"], "web-app-secret")
-        self.assertEqual(token_call.kwargs["params"]["code"], "wechat-code")
-        self.assertEqual(token_call.kwargs["timeout"], 8.0)
-        self.assertEqual(userinfo_call.kwargs["params"]["openid"], openid)
-        self.assertEqual(userinfo_call.kwargs["timeout"], 8.0)
-        return client, response
 
     def _web_user_and_csrf(self) -> tuple[dict, str]:
         response = self.browser.get("/api/v1/web-auth/me")
@@ -201,52 +105,18 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.assertIn("csrf_token", payload)
         return payload["user"], payload["csrf_token"]
 
-    def test_start_requires_complete_configuration_and_redirect_uri_https(self) -> None:
-        os.environ["WECHAT_OPEN_WEB_REDIRECT_URI"] = "http://localhost:8000/api/v1/web-auth/wechat/callback"
-        Config.reset_instance()
-        rejected = self.browser.get("/api/v1/web-auth/wechat/start", follow_redirects=False)
-        self.assertEqual(rejected.status_code, 503, rejected.text)
-        self.assertEqual(rejected.json()["error"], "wechat_login_failed")
-        self.assertIn(f"{OAUTH_BINDING_COOKIE}=\"\"", rejected.headers["set-cookie"])
+    def _establish_web_session(self, *, openid: str = "web-session-user") -> tuple[dict, str]:
+        """直接为 canonical user 铸造独立浏览器会话并加载到测试客户端。"""
+        user = self.user_repo.upsert_user(openid=openid, issuer="miniapp-web-login-test")
+        issue = WebUserAuthService().create_session_for_user(
+            user_id=user.id, assign_default_role=True
+        )
+        self.assertIsNotNone(issue)
+        self.browser.cookies.set(WEB_USER_COOKIE_NAME, issue.session_value)
+        return self._web_user_and_csrf()
 
-        os.environ["WECHAT_OPEN_WEB_REDIRECT_URI"] = "https://web.example.test/api/v1/web-auth/wechat/callback"
-        os.environ["WECHAT_OPEN_WEB_APP_SECRET"] = ""
-        Config.reset_instance()
-        missing_config = self.browser.get("/api/v1/web-auth/wechat/start", follow_redirects=False)
-        self.assertEqual(missing_config.status_code, 503, missing_config.text)
-        self.assertEqual(missing_config.json()["error"], "wechat_login_failed")
-
-    def test_start_rejects_existing_cookie_or_bearer_before_creating_transaction(self) -> None:
-        self._complete_oauth(openid="web-user-for-start-conflict")
-
-        with patch(
-            "api.v1.endpoints.web_auth.WechatOpenWebAuthService.start_login"
-        ) as start_login:
-            cookie_response = self.browser.get(
-                "/api/v1/web-auth/wechat/start",
-                follow_redirects=False,
-            )
-        self.assertEqual(cookie_response.status_code, 400, cookie_response.text)
-        self.assertEqual(cookie_response.json()["error"], "authentication_conflict")
-        self.assertNotIn(OAUTH_BINDING_COOKIE, cookie_response.headers.get("set-cookie", ""))
-        start_login.assert_not_called()
-
-        anonymous_browser = TestClient(self.app)
-        with patch(
-            "api.v1.endpoints.web_auth.WechatOpenWebAuthService.start_login"
-        ) as start_login:
-            bearer_response = anonymous_browser.get(
-                "/api/v1/web-auth/wechat/start",
-                headers=self._member_headers("other-user-token"),
-                follow_redirects=False,
-            )
-        self.assertEqual(bearer_response.status_code, 400, bearer_response.text)
-        self.assertEqual(bearer_response.json()["error"], "authentication_conflict")
-        self.assertNotIn(OAUTH_BINDING_COOKIE, bearer_response.headers.get("set-cookie", ""))
-        start_login.assert_not_called()
-
-    def test_callback_creates_cookie_only_session_and_exposes_current_user_via_me(self) -> None:
-        self._complete_oauth(unionid="trusted-union-id")
+    def test_web_session_exposes_current_user_via_me_without_leaking_identity(self) -> None:
+        self._establish_web_session(openid="me-user")
         user, csrf_token = self._web_user_and_csrf()
         self.assertIsInstance(user["id"], int)
         self.assertTrue(csrf_token)
@@ -255,7 +125,7 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.assertEqual(self.browser.get("/api/v1/miniapp/auth/me").status_code, 400)
 
     def test_miniapp_login_rejects_web_cookie_and_bearer_before_token_issuance(self) -> None:
-        self._complete_oauth(openid="web-user-for-login-conflict")
+        self._establish_web_session(openid="web-user-for-login-conflict")
 
         with patch(
             "src.services.wechat_miniapp_auth_service.WechatMiniappAuthService.login"
@@ -297,103 +167,8 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.assertEqual(limited.json()["error"], "forbidden")
         self.assertEqual(limited.json()["required_permission"], "account.self")
 
-    def test_callback_rejects_missing_or_wrong_binding_without_consuming_valid_state(self) -> None:
-        _, state = self._start_oauth()
-        binding = self.browser.cookies.get(OAUTH_BINDING_COOKIE)
-        self.assertTrue(binding)
-        without_cookie = TestClient(self.app).get(
-            "/api/v1/web-auth/wechat/callback",
-            params={"code": "wechat-code", "state": state},
-            follow_redirects=False,
-        )
-        self.assertEqual(without_cookie.status_code, 400, without_cookie.text)
-        self.assertEqual(without_cookie.json()["error"], "wechat_login_failed")
-
-        wrong_state = self.browser.get(
-            "/api/v1/web-auth/wechat/callback",
-            params={"code": "wechat-code", "state": "different-state"},
-            follow_redirects=False,
-        )
-        self.assertEqual(wrong_state.status_code, 400, wrong_state.text)
-        self.assertEqual(wrong_state.json()["error"], "wechat_login_failed")
-
-        with patch(
-            "src.services.wechat_open_web_auth_service.httpx.get",
-            side_effect=self._wechat_success(),
-        ) as upstream_get:
-            success = TestClient(self.app).get(
-                "/api/v1/web-auth/wechat/callback",
-                params={"code": "wechat-code", "state": state},
-                headers={"Cookie": f"{OAUTH_BINDING_COOKIE}={binding}"},
-                follow_redirects=False,
-            )
-        self.assertEqual(success.status_code, 302, success.text)
-        self.assertEqual(upstream_get.call_count, 2)
-
-    def test_callback_replay_and_existing_bearer_are_rejected_before_upstream_exchange(self) -> None:
-        _, state = self._start_oauth()
-        binding = self.browser.cookies.get(OAUTH_BINDING_COOKIE)
-        self.assertTrue(binding)
-        with patch(
-            "src.services.wechat_open_web_auth_service.httpx.get",
-            side_effect=self._wechat_success(),
-        ):
-            success = self.browser.get(
-                "/api/v1/web-auth/wechat/callback",
-                params={"code": "wechat-code", "state": state},
-                follow_redirects=False,
-            )
-        self.assertEqual(success.status_code, 302, success.text)
-
-        replay = TestClient(self.app).get(
-            "/api/v1/web-auth/wechat/callback",
-            params={"code": "wechat-code", "state": state},
-            headers={"Cookie": f"{OAUTH_BINDING_COOKIE}={binding}"},
-            follow_redirects=False,
-        )
-        self.assertEqual(replay.status_code, 400, replay.text)
-        self.assertEqual(replay.json()["error"], "wechat_login_failed")
-        self.assertNotIn(WEB_USER_COOKIE_NAME, replay.headers.get("set-cookie", ""))
-
-        second_browser = TestClient(self.app)
-        _, next_state = self._start_oauth(second_browser)
-        with patch("src.services.wechat_open_web_auth_service.httpx.get") as upstream_get:
-            existing_bearer = second_browser.get(
-                "/api/v1/web-auth/wechat/callback",
-                params={"code": "wechat-code", "state": next_state},
-                headers=self._member_headers("other-user-token"),
-                follow_redirects=False,
-            )
-        self.assertEqual(existing_bearer.status_code, 400, existing_bearer.text)
-        self.assertEqual(existing_bearer.json()["error"], "authentication_conflict")
-        upstream_get.assert_not_called()
-
-    def test_upstream_errors_and_identity_mismatch_are_generic_and_do_not_set_session(self) -> None:
-        invalid_cases = (
-            [_WechatResponse({"errcode": 40029})],
-            [_WechatResponse({"access_token": "token", "openid": "web-openid"}), _WechatResponse({"openid": "other-openid"})],
-            [_WechatResponse({"access_token": "token", "openid": "web-openid"}), _WechatResponse({"errcode": 40003})],
-        )
-        for responses in invalid_cases:
-            with self.subTest(responses=responses):
-                client = TestClient(self.app)
-                _, state = self._start_oauth(client)
-                with patch(
-                    "src.services.wechat_open_web_auth_service.httpx.get",
-                    side_effect=responses,
-                ):
-                    response = client.get(
-                        "/api/v1/web-auth/wechat/callback",
-                        params={"code": "wechat-code", "state": state},
-                        follow_redirects=False,
-                    )
-                self.assertEqual(response.status_code, 400, response.text)
-                self.assertEqual(response.json()["error"], "wechat_login_failed")
-                self.assertNotIn(WEB_USER_COOKIE_NAME, response.headers.get("set-cookie", ""))
-
     def test_identity_bind_requires_web_cookie_csrf_and_same_user_confirmation_is_one_time(self) -> None:
-        self._complete_oauth(openid="same-user-openid")
-        user, csrf_token = self._web_user_and_csrf()
+        user, csrf_token = self._establish_web_session(openid="same-user-openid")
         self.principals["same-user-token"] = SimpleNamespace(
             user=self.user_repo.get_user_by_id(user["id"]),
             roles=("member",),
@@ -448,8 +223,7 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.assertEqual(replay.json(), {"status": "invalid"})
 
     def test_identity_bind_refuses_to_merge_two_existing_canonical_users(self) -> None:
-        self._complete_oauth(openid="web-user-for-conflict")
-        _, csrf_token = self._web_user_and_csrf()
+        _, csrf_token = self._establish_web_session(openid="web-user-for-conflict")
         started = self.browser.post(
             "/api/v1/web-auth/identity-bind/start",
             headers={"Origin": TRUSTED_ORIGIN, "X-CSRF-Token": csrf_token},
@@ -471,7 +245,7 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.assertEqual(consumed.json(), {"status": "conflict"})
 
     def test_logout_requires_csrf_and_revokes_the_web_session(self) -> None:
-        self._complete_oauth(openid="logout-user")
+        self._establish_web_session(openid="logout-user")
         _, csrf_token = self._web_user_and_csrf()
         session_value = self.browser.cookies.get(WEB_USER_COOKIE_NAME)
         self.assertTrue(session_value)

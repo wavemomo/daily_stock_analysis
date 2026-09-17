@@ -21,6 +21,14 @@ export const webAuthApi = {
     return data;
   },
 
+  async passwordLogin(email: string, password: string): Promise<WebUserSessionResponse> {
+    const { data } = await apiClient.post<WebUserSessionResponse>(
+      '/api/v1/web-auth/password/login',
+      { email, password },
+    );
+    return data;
+  },
+
   async logout(): Promise<void> {
     await apiClient.post('/api/v1/web-auth/logout');
   },

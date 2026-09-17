@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [新功能] Web 端新增邮箱 + 密码登录（面向无法开通微信开放平台网站应用的个人主体）：小程序内已登录用户在「个人设置 → Web 登录邮箱」用邮件验证码绑定邮箱和密码，Web 端凭邮箱密码登录同一 canonical user，签发与扫码登录一致的 `dsa_user_session` 会话并走同一 RBAC。新增小程序端点 `GET /api/v1/miniapp/auth/email`、`POST /api/v1/miniapp/auth/email/request-code`、`POST /api/v1/miniapp/auth/email/bind`（均需 Bearer + `account.self`）与 Web 端点 `POST /api/v1/web-auth/password/login`（登录失败统一 `401 invalid_credentials`，已登录浏览器重复登录 `400 authentication_conflict`）。密码只保存 pbkdf2-hmac-sha256 派生摘要（标准库，无新依赖）；邮箱仅作登录标识与找回入口，不参与账号自动合并；验证码复用现有邮件通知通道，限时、限次、限频，邮件通道未配置时发码返回 `503`。新增配置 `EMAIL_VERIFICATION_CODE_TTL_SECONDS`/`EMAIL_VERIFICATION_RESEND_INTERVAL_SECONDS`/`EMAIL_VERIFICATION_MAX_ATTEMPTS`，复用既有 `EMAIL_SENDER`/`EMAIL_PASSWORD` 发送验证码。
+- [测试] 指数注册表用例不再受本地运行时缓存影响：`test_stock_list_parser.py` 中校验打包数据契约的用例改为基于打包的 `apps/dsa-web/public/stocks.index.json` 构建注册表，修复开发机存在更新的 `data/cache/stocks.index.json` 时条目数不符导致的偶发失败；同时新增运行时注册表不得丢失打包基线指数的回归。
+- [修复] 统一数据库时间语义为本地（北京，UTC+8）时间：`src/storage.py` 新增单一时间源 `local_naive_now()`/`to_local_naive_datetime()`（替代原 `utc_naive_now()`/`to_utc_naive_datetime()`），此前用 UTC 写入的 26 张表（`users`、`miniapp_sessions`、`rbac_*`、`feature_quota_*`、`decision_signals` 等）与原本用本地时间的 26 张表不再混用两套时基；额度计账日期由 UTC 改为本地日期，修复每日额度在北京时间 08:00 而非 0 点重置；决策信号不再把报告的本地时间当作 UTC 换算，修正过期判断多出 8 小时缓冲的问题。存量部署需将上述 UTC 表的时间戳整体 +8 小时。
+- [修复] 决策信号补齐用户隔离：`decision_signals` 新增 `owner_user_id`/`owner_scope`（含 SQLite 迁移与 owner 时间索引），13 个 `/api/v1/decision-signals/*` 端点统一按可信登录用户派生 `AnalysisOwner`（无 principal 即 401），跨用户访问信号详情、状态、反馈、后验与统计一律按不存在返回 404；重评估会校验 `source_report_id` 对应历史报告的归属，去重与反向信号作废也只在同一 owner 内生效。信号生成侧由 pipeline、告警规则与持仓风险各自传入其真实 owner。
+- [修复] 小程序工作台分析进度不再卡住：任务卡片在 `onShow` 与服务端对账并对非终态任务恢复轮询，修复页面隐藏期间任务完成后进度条永久停留、必须重启小程序的问题；任务状态连续查询失败有上限，不再无限静默重试，卡片在任何状态都可手动关闭。
+- [修复] 小程序问股页键盘弹起时输入框被完全遮挡：页面高度随键盘高度压缩（textarea 已关闭系统自动上推），并补齐 `cursor-spacing`/`hold-keyboard`/聚焦滚底与尾部锚点滚动。
+- [修复] 小程序问股页移动端适配：全屏聊天壳重置全局页面内边距（消除左右不满宽与底部安全区重复留白），自定义导航栏让出状态栏高度，纯空格输入不再显示为可发送。
+- [改进] 小程序语言切换只保留「我的 → 个人设置」一个主入口，移除决策信号页与权限管理页内重复的中英文切换按钮。
+- [测试] 新增决策信号跨用户隔离回归与小程序问股页布局回归；同步迁移组合与决策信号既有夹具，使其按请求 owner 写入数据。
 - [改进] 内置选股（`SCREENING_ENABLED`）默认改为开启：同步更新运行时默认值、配置 Schema `default_value`/描述与 `.env.example`；未显式配置该项的部署重启后即可使用选股页，仍可通过环境变量或 Web/小程序系统设置关闭。
 - [新功能] 渡劫每日心得强化习惯闭环：新增 owner-scoped 的 `GET /api/v1/miniapp/daily-reflections/stats`（当前连续、最长连续、累计、今日是否已记、指定月份打卡日），连续天数以客户端本地日历为准且今日未记但昨日已记时按昨日起算；小程序渡劫页新增连续打卡面板、今日打卡状态、月度回顾日历（可切换月份）与每日提醒（本地按用户存储开关+时间，今日未打卡时应用内提醒横幅）。
 - [测试] 增加连续打卡/最长连续/月度打卡日/owner 隔离的后端服务与端点回归，以及小程序渡劫习惯闭环（提醒偏好、月历前导空白与打卡日、未打卡提醒、切换）的回归覆盖。

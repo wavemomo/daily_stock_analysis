@@ -24,6 +24,7 @@ from src.storage import (
     FeatureQuotaWhitelistRecord,
     MiniappUserRecord,
     RbacAuditEventRecord,
+    local_naive_now,
 )
 
 
@@ -53,9 +54,9 @@ FEATURE_QUOTA_BY_CODE: Dict[str, FeatureQuotaDefinition] = {
 _PLAN_CODE_PATTERN = re.compile(r'^[a-z][a-z0-9_]{1,63}$')
 
 
-def _utc_today() -> date:
-    """Return the quota accounting date in the documented UTC time zone."""
-    return datetime.now(timezone.utc).date()
+def _local_today() -> date:
+    """返回额度计账日期，与数据库时间语义一致，使用本地（北京）时间。"""
+    return local_naive_now().date()
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ class FeatureQuotaService:
         self,
         database_manager: Optional[DatabaseManager] = None,
         *,
-        today_provider: Callable[[], date] = _utc_today,
+        today_provider: Callable[[], date] = _local_today,
     ) -> None:
         self.db = database_manager or DatabaseManager.get_instance()
         self._today_provider = today_provider
@@ -220,7 +221,7 @@ class FeatureQuotaService:
                 target_id=target_id,
                 actor_user_id=actor_user_id,
                 metadata_json=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-                created_at=datetime.utcnow(),
+                created_at=local_naive_now(),
             )
         )
 
@@ -300,7 +301,7 @@ class FeatureQuotaService:
             ):
                 raise ValueError('当前规则替换会与未来排期重叠，请先撤销或调整未来规则')
 
-        now = datetime.utcnow()
+        now = local_naive_now()
         for record in active_records:
             if (
                 record.effective_from <= today
@@ -526,7 +527,7 @@ class FeatureQuotaService:
             previous_limit = policy.daily_limit
             policy.daily_limit = daily_limit
             policy.updated_by_user_id = actor_user_id
-            policy.updated_at = datetime.utcnow()
+            policy.updated_at = local_naive_now()
             self._audit(
                 session,
                 action='feature_quota.policy_updated',
@@ -663,7 +664,7 @@ class FeatureQuotaService:
                         feature_code=feature_code,
                         daily_limit=daily_limit,
                     ))
-            plan.updated_at = datetime.utcnow()
+            plan.updated_at = local_naive_now()
             session.flush()
             payload = self._plan_payload(session, plan)
             self._audit(
@@ -707,7 +708,7 @@ class FeatureQuotaService:
                         effective_until=effective_until,
                     )
                 else:
-                    now = datetime.utcnow()
+                    now = local_naive_now()
                     for assignment in active_assignments:
                         assignment.revoked_at = now
                     replaced_assignment_ids = [assignment.id for assignment in active_assignments]
@@ -839,7 +840,7 @@ class FeatureQuotaService:
             ).all()
             if not rows:
                 raise LookupError('用户当前没有该功能的额度覆盖')
-            now = datetime.utcnow()
+            now = local_naive_now()
             for row in rows:
                 row.revoked_at = now
             self._audit(
@@ -939,7 +940,7 @@ class FeatureQuotaService:
             rows = query.all()
             if not rows:
                 raise LookupError('用户当前没有该白名单规则')
-            now = datetime.utcnow()
+            now = local_naive_now()
             for row in rows:
                 row.revoked_at = now
             scope = normalized_feature_code or '*'
@@ -1124,7 +1125,7 @@ class FeatureQuotaService:
                 ))
             else:
                 usage.used_count = used_count
-                usage.updated_at = datetime.utcnow()
+                usage.updated_at = local_naive_now()
             return self._entitlement(
                 definition,
                 resolved_rule=rule,
@@ -1186,7 +1187,7 @@ class FeatureQuotaService:
             released_count = max(used_count - amount, 0)
             if usage is not None and released_count != used_count:
                 usage.used_count = released_count
-                usage.updated_at = datetime.utcnow()
+                usage.updated_at = local_naive_now()
             return self._entitlement(
                 definition,
                 resolved_rule=rule,

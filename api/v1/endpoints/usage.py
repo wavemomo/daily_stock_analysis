@@ -4,18 +4,19 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import get_database_manager
 from api.v1.schemas.usage import UsageDashboardResponse, UsageSummaryResponse
-from src.storage import DatabaseManager
+from src.storage import DatabaseManager, local_naive_now
 
 logger = logging.getLogger(__name__)
 
-_CST = timezone(timedelta(hours=8))  # Beijing time (UTC+8)
+
+
 
 router = APIRouter()
 
@@ -24,7 +25,7 @@ _VALID_PERIODS = {"today", "month", "all"}
 
 def _date_range(period: str):
     """Return (from_dt, to_dt) as naive datetimes in Beijing time (UTC+8)."""
-    now = datetime.now(tz=_CST).replace(tzinfo=None)  # naive, Beijing local
+    now = local_naive_now()
     if period == "today":
         from_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "month":

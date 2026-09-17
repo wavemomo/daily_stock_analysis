@@ -41,6 +41,7 @@ EXEMPT_PATHS = frozenset({
     "/api/v1/miniapp/auth/login",
     "/api/v1/web-auth/wechat/start",
     "/api/v1/web-auth/wechat/callback",
+    "/api/v1/web-auth/password/login",
     "/api/health",
     "/api/v1/health",
     "/health",
@@ -99,8 +100,10 @@ def _authentication_conflict() -> JSONResponse:
     )
 
 
-def web_wechat_login_credentials_response(request: Request) -> Optional[JSONResponse]:
-    """拒绝用既有本地登录态重新发起或完成微信扫码登录。"""
+def reject_if_already_authenticated(
+    request: Request, *, message: str
+) -> Optional[JSONResponse]:
+    """若浏览器已有本地登录态（Web Cookie 或小程序 Bearer），拒绝重新发起登录。"""
     web_session_value = request.cookies.get(WEB_USER_COOKIE_NAME, "")
     web_principal = (
         WebUserAuthService().authenticate_session(web_session_value)
@@ -112,10 +115,24 @@ def web_wechat_login_credentials_response(request: Request) -> Optional[JSONResp
             status_code=400,
             content={
                 "error": "authentication_conflict",
-                "message": "微信扫码登录只能由未登录的授权浏览器发起",
+                "message": message,
             },
         )
     return None
+
+
+def web_wechat_login_credentials_response(request: Request) -> Optional[JSONResponse]:
+    """拒绝用既有本地登录态重新发起或完成微信扫码登录。"""
+    return reject_if_already_authenticated(
+        request, message="微信扫码登录只能由未登录的授权浏览器发起"
+    )
+
+
+def web_password_login_credentials_response(request: Request) -> Optional[JSONResponse]:
+    """拒绝用既有本地登录态重复发起邮箱密码登录。"""
+    return reject_if_already_authenticated(
+        request, message="邮箱密码登录只能由未登录的浏览器发起"
+    )
 
 
 def _authorize_principal(request: Request, principal, *, auth_kind: str) -> Optional[JSONResponse]:

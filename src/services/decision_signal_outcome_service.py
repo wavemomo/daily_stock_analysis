@@ -16,6 +16,7 @@ from src.repositories.decision_signal_outcome_repo import (
     DecisionSignalOutcomeRepository,
     OutcomeStatsRow,
 )
+from src.analysis_ownership import AnalysisOwner
 from src.repositories.decision_signal_repo import DecisionSignalRepository
 from src.repositories.stock_repo import StockRepository
 from src.schemas.decision_profile import VALID_DECISION_PROFILES
@@ -113,6 +114,7 @@ class DecisionSignalOutcomeService:
         source_type: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
+        owner: Optional[AnalysisOwner] = None,
     ) -> _PreparedOutcomeRun:
         """Validate and select outcome candidates without persisting a result."""
         signal_id_norm = self._optional_positive_int(signal_id, "signal_id")
@@ -137,6 +139,7 @@ class DecisionSignalOutcomeService:
                 statuses=statuses,
                 requested_horizons=horizons_norm,
                 limit=safe_limit,
+                owner=owner,
             )
         else:
             signals = self.repo.list_candidate_signals(
@@ -147,6 +150,7 @@ class DecisionSignalOutcomeService:
                 source_type=source_type_norm,
                 statuses=statuses,
                 limit=safe_limit,
+                owner=owner,
             )
         if signal_id_norm is not None and not signals:
             raise DecisionSignalNotFoundError(f"Decision signal not found: {signal_id_norm}")
@@ -225,6 +229,7 @@ class DecisionSignalOutcomeService:
         statuses: Optional[List[str]],
         requested_horizons: Optional[List[str]],
         limit: int,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[DecisionSignalRecord]:
         selected: List[DecisionSignalRecord] = []
         selected_ids = set()
@@ -241,6 +246,7 @@ class DecisionSignalOutcomeService:
                 statuses=statuses,
                 offset=offset,
                 limit=BATCH_CANDIDATE_SCAN_PAGE_SIZE,
+                owner=owner,
             )
             if not page:
                 break
@@ -323,6 +329,7 @@ class DecisionSignalOutcomeService:
         engine_version: Optional[str] = None,
         eval_status: Optional[str] = None,
         outcome: Optional[str] = None,
+        owner: Optional[AnalysisOwner] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> Dict[str, Any]:
@@ -339,6 +346,7 @@ class DecisionSignalOutcomeService:
             engine_version=engine_version_norm,
             eval_status=eval_status_norm,
             outcome=outcome_norm,
+            owner=owner,
             page=safe_page,
             page_size=safe_page_size,
         )
@@ -349,11 +357,17 @@ class DecisionSignalOutcomeService:
             "page_size": safe_page_size,
         }
 
-    def list_signal_outcomes(self, signal_id: int) -> Dict[str, Any]:
-        signal_id_norm = self._require_existing_signal(signal_id).id
+    def list_signal_outcomes(
+        self,
+        signal_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> Dict[str, Any]:
+        signal_id_norm = self._require_existing_signal(signal_id, owner=owner).id
         return self.list_outcomes(
             signal_id=signal_id_norm,
             engine_version=DECISION_SIGNAL_OUTCOME_ENGINE_VERSION,
+            owner=owner,
             page=1,
             page_size=100,
         )
@@ -364,6 +378,7 @@ class DecisionSignalOutcomeService:
         horizons: Optional[List[str]] = None,
         engine_version: Optional[str] = None,
         statuses: Optional[List[str]] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> Dict[str, Any]:
         engine_version_norm = str(engine_version or DECISION_SIGNAL_OUTCOME_ENGINE_VERSION).strip()
         horizons_norm = self._normalize_horizons(horizons)
@@ -376,6 +391,7 @@ class DecisionSignalOutcomeService:
             engine_version=engine_version_norm,
             horizons=horizons_norm,
             statuses=statuses_norm,
+            owner=owner,
         )
         rows = [stats_row.outcome for stats_row in stats_rows]
         dimensions = (
@@ -401,8 +417,13 @@ class DecisionSignalOutcomeService:
             "profile_calibration": self._profile_calibration(stats_rows),
         }
 
-    def get_feedback(self, signal_id: int) -> Dict[str, Any]:
-        signal = self._require_existing_signal(signal_id)
+    def get_feedback(
+        self,
+        signal_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> Dict[str, Any]:
+        signal = self._require_existing_signal(signal_id, owner=owner)
         row = self.repo.get_feedback(signal_id=signal.id)
         if row is None:
             return {
@@ -424,8 +445,9 @@ class DecisionSignalOutcomeService:
         reason_code: Optional[str] = None,
         note: Optional[str] = None,
         source: str = "api",
+        owner: Optional[AnalysisOwner] = None,
     ) -> Dict[str, Any]:
-        signal = self._require_existing_signal(signal_id)
+        signal = self._require_existing_signal(signal_id, owner=owner)
         fields = {
             "signal_id": signal.id,
             "feedback_value": self._normalize_enum(feedback_value, FEEDBACK_VALUES, "feedback_value"),
@@ -653,9 +675,19 @@ class DecisionSignalOutcomeService:
             return [horizon]
         return list(SUPPORTED_OUTCOME_HORIZONS.keys())
 
-    def _require_existing_signal(self, signal_id: int) -> DecisionSignalRecord:
+    def _require_existing_signal(
+        self,
+        signal_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> DecisionSignalRecord:
+        """Single ownership gate for every signal_id-keyed outcome/feedback path.
+
+        Cross-owner ids surface as not-found so the API never leaks whether
+        another user's signal exists.
+        """
         signal_id_norm = self._optional_positive_int(signal_id, "signal_id")
-        row = self.signal_repo.get(signal_id_norm)
+        row = self.signal_repo.get(signal_id_norm, owner=owner)
         if row is None:
             raise DecisionSignalNotFoundError(f"Decision signal not found: {signal_id_norm}")
         return row

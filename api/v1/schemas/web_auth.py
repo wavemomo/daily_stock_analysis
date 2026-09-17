@@ -15,6 +15,13 @@ class WebUserSessionResponse(BaseModel):
     csrf_token: str
 
 
+class WebPasswordLoginRequest(BaseModel):
+    """Web 端邮箱 + 密码登录（个人主体绕开微信开放平台扫码登录）。"""
+
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
 class IdentityBindStartResponse(BaseModel):
     """仅向已认证 Web user 返回的不透明绑定挑战。"""
 

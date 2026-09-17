@@ -8,12 +8,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, desc, func, select
 
+from src.analysis_ownership import AnalysisOwner
+from src.repositories.decision_signal_repo import decision_signal_owner_conditions
 from src.storage import (
     DatabaseManager,
     DecisionSignalFeedbackRecord,
     DecisionSignalOutcomeRecord,
     DecisionSignalRecord,
-    utc_naive_now,
+    local_naive_now,
 )
 
 
@@ -41,12 +43,13 @@ class DecisionSignalOutcomeRepository:
         action: Optional[str] = None,
         source_type: Optional[str] = None,
         statuses: Optional[List[str]] = None,
+        owner: Optional[AnalysisOwner] = None,
         offset: int = 0,
         limit: int = 100,
     ) -> List[DecisionSignalRecord]:
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
-        conditions = []
+        conditions = list(decision_signal_owner_conditions(owner))
         if signal_id is not None:
             conditions.append(DecisionSignalRecord.id == signal_id)
         if stock_codes:
@@ -107,7 +110,7 @@ class DecisionSignalOutcomeRepository:
             ).scalar_one_or_none()
 
     def upsert_outcome(self, fields: Dict[str, Any]) -> Tuple[DecisionSignalOutcomeRecord, bool]:
-        now = utc_naive_now()
+        now = local_naive_now()
         with self.db.get_session() as session:
             existing = session.execute(
                 select(DecisionSignalOutcomeRecord)
@@ -142,6 +145,7 @@ class DecisionSignalOutcomeRepository:
         engine_version: Optional[str] = None,
         eval_status: Optional[str] = None,
         outcome: Optional[str] = None,
+        owner: Optional[AnalysisOwner] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> Tuple[List[DecisionSignalOutcomeRecord], int]:
@@ -158,6 +162,14 @@ class DecisionSignalOutcomeRepository:
             conditions.append(DecisionSignalOutcomeRecord.eval_status == eval_status)
         if outcome:
             conditions.append(DecisionSignalOutcomeRecord.outcome == outcome)
+        # 后验记录本身不带 owner 列；归属由其父信号决定，因此按父信号 owner 过滤。
+        owner_conditions = decision_signal_owner_conditions(owner)
+        if owner_conditions:
+            conditions.append(
+                DecisionSignalOutcomeRecord.signal_id.in_(
+                    select(DecisionSignalRecord.id).where(and_(*owner_conditions))
+                )
+            )
         where_clause = and_(*conditions) if conditions else True
         offset = (safe_page - 1) * safe_page_size
         with self.db.get_session() as session:
@@ -181,12 +193,15 @@ class DecisionSignalOutcomeRepository:
         engine_version: str,
         horizons: Optional[List[str]] = None,
         statuses: Optional[List[str]] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[OutcomeStatsRow]:
         conditions = [DecisionSignalOutcomeRecord.engine_version == engine_version]
         if horizons:
             conditions.append(DecisionSignalOutcomeRecord.horizon.in_(horizons))
         if statuses:
             conditions.append(DecisionSignalRecord.status.in_(statuses))
+        # 统计已 join 父信号表，直接按 owner 收敛，避免跨用户聚合。
+        conditions.extend(decision_signal_owner_conditions(owner))
         with self.db.get_session() as session:
             rows = session.execute(
                 select(
@@ -215,7 +230,7 @@ class DecisionSignalOutcomeRepository:
             ).scalar_one_or_none()
 
     def upsert_feedback(self, fields: Dict[str, Any]) -> DecisionSignalFeedbackRecord:
-        now = utc_naive_now()
+        now = local_naive_now()
         with self.db.get_session() as session:
             existing = session.execute(
                 select(DecisionSignalFeedbackRecord)

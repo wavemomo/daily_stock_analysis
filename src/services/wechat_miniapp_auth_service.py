@@ -20,7 +20,7 @@ from src.config import Config, get_config
 from src.repositories.auth_identity_repo import AuthIdentityConflictError
 from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.rbac_service import RbacService
-from src.storage import MiniappUserRecord
+from src.storage import MiniappUserRecord, local_naive_now
 
 CODE2SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
 AVATAR_URL_PREFIX = "/api/v1/miniapp/auth/public/avatars/"
@@ -86,7 +86,7 @@ class WechatMiniappAuthService:
             raise MiniappAuthError("当前微信身份暂时无法登录，请稍后重试") from exc
         access = RbacService().ensure_user_access(user, assign_default=created)
         raw_token = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(
+        expires_at = local_naive_now() + timedelta(
             hours=self.config.wechat_miniapp_session_ttl_hours
         )
         self.repository.create_session(

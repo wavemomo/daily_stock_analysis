@@ -2963,6 +2963,8 @@ class StockAnalysisPipeline:
                 portfolio_context=portfolio_context,
                 profile_source="auto_default",
                 market_override=market_override,
+                # 信号继承产出它的分析报告的 owner，保持与 analysis_history 一致的归属。
+                owner=self.owner,
             )
             if isinstance(signal_result, dict):
                 summary = summarize_decision_signal(signal_result.get("item"))

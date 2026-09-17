@@ -371,13 +371,47 @@ class TestEdgeCases:
 # ---------------------------------------------------------------------------
 # Default registry — public API surface.
 # ---------------------------------------------------------------------------
+def _bundled_index_registry() -> IndexRegistry:
+    """基于仓库打包的 ``stocks.index.json`` 构建注册表。
+
+    ``default_index_registry()`` 会在打包文件、远端缓存（``data/cache/``，未纳入版本
+    控制）和 legacy ``static`` 之间挑选最优候选。本地存在更新且合法的远端缓存时，
+    运行时条目数会多于打包基线。校验打包数据契约的用例必须与本地缓存解耦，否则
+    会在开发机上偶发失败。
+    """
+    from src.data.stock_index_loader import (
+        _extract_active_index_rows,
+        _get_bundled_stock_index_path,
+        _load_stock_index_payload,
+        get_remote_stock_index_cache_path,
+        get_stock_index_candidate_paths,
+    )
+    from src.services.stock_list_parser import _index_entry_from_row
+
+    bundled_path = _get_bundled_stock_index_path(
+        get_stock_index_candidate_paths(), get_remote_stock_index_cache_path()
+    )
+    assert bundled_path is not None, "缺少打包的 stocks.index.json"
+    rows = _extract_active_index_rows(_load_stock_index_payload(bundled_path))
+    entries = [
+        entry for entry in (_index_entry_from_row(row) for row in rows) if entry is not None
+    ]
+    return IndexRegistry(entries)
+
+
 class TestDefaultIndexRegistry:
-    def test_default_registry_has_31_entries(self) -> None:
-        registry = default_index_registry()
+    def test_bundled_registry_has_31_entries(self) -> None:
+        registry = _bundled_index_registry()
         assert len(registry) == 31
 
-    def test_default_registry_canonical_ids(self) -> None:
-        registry = default_index_registry()
+    def test_default_registry_never_drops_bundled_indices(self) -> None:
+        """运行时可以选用更新的远端缓存，但不得丢掉打包基线中的任何指数。"""
+        bundled_ids = {entry.canonical_id for entry in _bundled_index_registry()}
+        runtime_ids = {entry.canonical_id for entry in default_index_registry()}
+        assert bundled_ids <= runtime_ids
+
+    def test_bundled_registry_canonical_ids(self) -> None:
+        registry = _bundled_index_registry()
         ids = {entry.canonical_id for entry in registry}
         assert len(ids) == 31
         # The 5 original hard-coded indices are preserved.

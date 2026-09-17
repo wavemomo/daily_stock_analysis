@@ -8,7 +8,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
-from src.storage import AuthIdentityRecord, DatabaseManager, UserRecord
+from src.storage import AuthIdentityRecord, DatabaseManager, UserRecord, local_naive_now
 
 
 class AuthIdentityConflictError(Exception):
@@ -36,7 +36,7 @@ class AuthIdentityRepository:
         normalized_subject = self._required(subject, "subject")
         normalized_unionid = self._optional(unionid)
         normalized_legacy_openid = self._optional(legacy_openid)
-        now = datetime.utcnow()
+        now = local_naive_now()
 
         def write(session):
             primary = self._find_identity(

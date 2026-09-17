@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple, get_args
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
+from src.analysis_ownership import AnalysisOwner
 from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.services.stock_list_parser import ParseStatus, parse_analysis_target
 from src.core.trading_calendar import MarketPhase
@@ -39,8 +40,8 @@ from src.storage import (
     AnalysisHistory,
     DatabaseManager,
     DecisionSignalRecord,
-    to_utc_naive_datetime,
-    utc_naive_now,
+    to_local_naive_datetime,
+    local_naive_now,
 )
 from src.utils.data_processing import parse_json_field
 from src.utils.sanitize import sanitize_decision_signal_payload, sanitize_decision_signal_text
@@ -119,19 +120,30 @@ class DecisionSignalService:
         self.portfolio_repo = portfolio_repo or PortfolioRepository(db_manager)
         self.db = db_manager or getattr(self.repo, "db", None) or DatabaseManager.get_instance()
 
-    def create_signal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        outcome = self.create_signal_with_outcome(payload)
+    def create_signal(
+        self,
+        payload: Dict[str, Any],
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> Dict[str, Any]:
+        outcome = self.create_signal_with_outcome(payload, owner=owner)
         return {"item": outcome.item, "created": outcome.created}
 
-    def create_signal_with_outcome(self, payload: Dict[str, Any]) -> DecisionSignalWriteOutcome:
+    def create_signal_with_outcome(
+        self,
+        payload: Dict[str, Any],
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> DecisionSignalWriteOutcome:
         """Create through the canonical path while preserving repository disposition."""
 
-        result = self._store_signal(payload)
+        result = self._store_signal(payload, owner=owner)
         # Active duplicates can be retries after a prior partial create; rerun invalidation to repair old opposing signals.
         if result.row.status == "active":
             self._invalidate_opposing_active_signals(
                 result.row,
                 reference_at=result.invalidation_reference_at,
+                owner=owner,
             )
         return self._write_outcome(result)
 
@@ -141,6 +153,7 @@ class DecisionSignalService:
         *,
         history_created_at: Optional[datetime],
         market_phase_summary: Any = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> DecisionSignalWriteOutcome:
         """Persist a report-derived signal on the source report's timeline."""
 
@@ -150,7 +163,7 @@ class DecisionSignalService:
             created_at=history_created_at,
             market_phase_summary=market_phase_summary,
         )
-        result = self._store_signal(history_payload)
+        result = self._store_signal(history_payload, owner=owner)
         if result.row.status == "active":
             if result.row.created_at is None:
                 raise DecisionSignalStorageError(
@@ -159,18 +172,28 @@ class DecisionSignalService:
             self._invalidate_opposing_active_signals(
                 result.row,
                 reference_at=result.row.created_at,
+                owner=owner,
             )
-            self._invalidate_history_bound_if_superseded(result.row.id)
+            self._invalidate_history_bound_if_superseded(result.row.id, owner=owner)
 
-        final_row = self.repo.get(result.row.id)
+        final_row = self.repo.get(result.row.id, owner=owner)
         if final_row is None:
             raise DecisionSignalStorageError(
                 f"history-bound DecisionSignal disappeared after write: {result.row.id}"
             )
         return self._write_outcome(result, row=final_row)
 
-    def _store_signal(self, payload: Dict[str, Any]) -> DecisionSignalCreateResult:
+    def _store_signal(
+        self,
+        payload: Dict[str, Any],
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> DecisionSignalCreateResult:
         fields, lifecycle = self._normalize_payload(payload)
+        # 归属只由可信调用方注入，永远不从 payload 读取，避免客户端伪造 owner。
+        if owner is not None:
+            fields["owner_scope"] = owner.scope
+            fields["owner_user_id"] = owner.user_id
         return self.repo.create_if_absent(
             fields,
             allow_relaxed_horizon_fill=lifecycle["horizon_defaulted"],
@@ -189,9 +212,15 @@ class DecisionSignalService:
             duplicate=result.duplicate,
         )
 
-    def get_signal(self, signal_id: int) -> Dict[str, Any]:
-        row = self.repo.get(signal_id)
+    def get_signal(
+        self,
+        signal_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> Dict[str, Any]:
+        row = self.repo.get(signal_id, owner=owner)
         if row is None:
+            # 跨 owner 访问与不存在返回同一个错误，避免泄漏其他用户信号的存在性。
             raise DecisionSignalNotFoundError(f"Decision signal not found: {signal_id}")
         return self._serialize(row)
 
@@ -216,6 +245,7 @@ class DecisionSignalService:
         account_id: Optional[int] = None,
         portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
         stock_identities: Optional[List[Tuple[str, str]]] = None,
+        owner: Optional[AnalysisOwner] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> Dict[str, Any]:
@@ -290,6 +320,7 @@ class DecisionSignalService:
             created_to=created_to_dt,
             expires_from=expires_from_dt,
             expires_to=expires_to_dt,
+            owner=owner,
             page=safe_page,
             page_size=safe_page_size,
         )
@@ -311,7 +342,7 @@ class DecisionSignalService:
             stock_identities=stock_identity_filters,
             holding_only=holding_only,
         ):
-            self._backfill_analysis_signal_from_history(source_report_id_norm)
+            self._backfill_analysis_signal_from_history(source_report_id_norm, owner=owner)
             rows, total = self.repo.list(
                 stock_codes=stock_codes,
                 stock_identities=stock_identity_filters,
@@ -328,6 +359,7 @@ class DecisionSignalService:
                 created_to=created_to_dt,
                 expires_from=expires_from_dt,
                 expires_to=expires_to_dt,
+                owner=owner,
                 page=safe_page,
                 page_size=safe_page_size,
             )
@@ -344,6 +376,7 @@ class DecisionSignalService:
         stock_code: str,
         market: Optional[str] = None,
         limit: int = 1,
+        owner: Optional[AnalysisOwner] = None,
     ) -> Dict[str, Any]:
         market_norm = self._normalize_optional_market(market)
         rows = self.repo.get_latest_active(
@@ -352,6 +385,7 @@ class DecisionSignalService:
             ],
             market=market_norm,
             limit=limit,
+            owner=owner,
         )
         return {
             "items": [self._serialize(row) for row in rows],
@@ -367,9 +401,10 @@ class DecisionSignalService:
         status: str,
         metadata: Optional[Any] = None,
         replace_metadata: bool = False,
+        owner: Optional[AnalysisOwner] = None,
     ) -> Dict[str, Any]:
         status_norm = self._normalize_enum(status, SIGNAL_STATUSES, "status")
-        existing = self.repo.get(signal_id)
+        existing = self.repo.get(signal_id, owner=owner)
         if existing is None:
             raise DecisionSignalNotFoundError(f"Decision signal not found: {signal_id}")
         if status_norm == "active" and (
@@ -395,6 +430,7 @@ class DecisionSignalService:
             status=status_norm,
             metadata_json=metadata_json,
             replace_metadata=replace_metadata,
+            owner=owner,
         )
         if row is None:
             raise DecisionSignalNotFoundError(f"Decision signal not found: {signal_id}")
@@ -450,11 +486,22 @@ class DecisionSignalService:
             )
         )
 
-    def _backfill_analysis_signal_from_history(self, source_report_id: int) -> None:
+    def _backfill_analysis_signal_from_history(
+        self,
+        source_report_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> None:
         """Best-effort lazy extraction for reports saved before DecisionSignal existed."""
 
         try:
-            record = self.db.get_analysis_history_by_id(source_report_id)
+            # 源报告必须对当前 owner 可见，否则不能据此补写信号，
+            # 否则用户能通过任意 source_report_id 触发别人报告的信号生成。
+            history_owner_kwargs = owner.storage_kwargs if owner is not None else {}
+            record = self.db.get_analysis_history_by_id(
+                source_report_id,
+                **history_owner_kwargs,
+            )
             if record is None or getattr(record, "report_type", None) == "market_review":
                 return
 
@@ -522,6 +569,7 @@ class DecisionSignalService:
             self.create_history_bound_signal_with_outcome(
                 payload,
                 history_created_at=getattr(record, "created_at", None),
+                owner=owner,
             )
         except Exception as exc:
             logger.warning(
@@ -648,7 +696,7 @@ class DecisionSignalService:
 
         if not isinstance(created_at, datetime):
             raise ValueError("source report created_at is required for persistence")
-        history_created_at = self._coerce_history_created_at_to_utc_naive(created_at)
+        history_created_at = self._coerce_history_created_at_to_local_naive(created_at)
 
         payload["_created_at_override"] = history_created_at
         payload["status"] = "active"
@@ -703,21 +751,17 @@ class DecisionSignalService:
         }
 
     @staticmethod
-    def _coerce_history_created_at_to_utc_naive(value: datetime) -> datetime:
-        if value.tzinfo is not None:
-            return to_utc_naive_datetime(value)
+    def _coerce_history_created_at_to_local_naive(value: datetime) -> datetime:
+        """报告与决策信号现在都存本地（北京）naive 时间，只需归一化，不再跨时区换算。"""
+        return to_local_naive_datetime(value)
 
-        local_tz = datetime.now().astimezone().tzinfo
-        if local_tz is None or local_tz.utcoffset(value) is None:
-            return to_utc_naive_datetime(value)
-
-        try:
-            return value.replace(tzinfo=local_tz).astimezone(timezone.utc).replace(tzinfo=None)
-        except (OverflowError, OSError):
-            return to_utc_naive_datetime(value)
-
-    def _invalidate_history_bound_if_superseded(self, signal_id: int) -> None:
-        row = self.repo.get(signal_id)
+    def _invalidate_history_bound_if_superseded(
+        self,
+        signal_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> None:
+        row = self.repo.get(signal_id, owner=owner)
         if row is None or row.status != "active":
             return
 
@@ -730,6 +774,7 @@ class DecisionSignalService:
             actions=sorted(opposing_actions),
             decision_profile=row.decision_profile,
             exclude_signal_id=row.id,
+            owner=owner,
         )
         for newer_row in newer_rows:
             if not self._is_prior_signal(row, newer_row, reference_at=newer_row.created_at):
@@ -740,6 +785,7 @@ class DecisionSignalService:
                 status="invalidated",
                 metadata_json=metadata_json,
                 replace_metadata=True,
+                owner=owner,
             )
             if updated is None:
                 logger.warning(
@@ -759,7 +805,7 @@ class DecisionSignalService:
         market: str,
         metadata: Any,
     ) -> Optional[datetime]:
-        base = to_utc_naive_datetime(created_at)
+        base = to_local_naive_datetime(created_at)
         return cls._expires_at_from_base(
             horizon=horizon,
             market=market,
@@ -902,7 +948,7 @@ class DecisionSignalService:
             horizon=horizon,
             market=market,
             metadata=metadata,
-            base=utc_naive_now(),
+            base=local_naive_now(),
         )
 
     @classmethod
@@ -960,16 +1006,19 @@ class DecisionSignalService:
         row: DecisionSignalRecord,
         *,
         reference_at: Optional[datetime],
+        owner: Optional[AnalysisOwner] = None,
     ) -> None:
         opposing_actions = self._opposing_actions(row.action)
         if not opposing_actions:
             return
+        # 只能作废同一 owner 名下的反向信号，不能影响其他用户的信号生命周期。
         old_rows = self.repo.list_active_by_stock_actions(
             market=row.market,
             stock_code=row.stock_code,
             actions=sorted(opposing_actions),
             decision_profile=row.decision_profile,
             exclude_signal_id=row.id,
+            owner=owner,
         )
         for old_row in old_rows:
             if not self._is_prior_signal(old_row, row, reference_at=reference_at):
@@ -980,6 +1029,7 @@ class DecisionSignalService:
                 status="invalidated",
                 metadata_json=metadata_json,
                 replace_metadata=True,
+                owner=owner,
             )
             if updated is None:
                 logger.warning(
@@ -997,8 +1047,8 @@ class DecisionSignalService:
     ) -> bool:
         candidate_created_at = candidate.created_at
         if candidate_created_at is not None and reference_at is not None:
-            candidate_created_at = to_utc_naive_datetime(candidate_created_at)
-            reference_at = to_utc_naive_datetime(reference_at)
+            candidate_created_at = to_local_naive_datetime(candidate_created_at)
+            reference_at = to_local_naive_datetime(reference_at)
             if candidate_created_at != reference_at:
                 return candidate_created_at < reference_at
 
@@ -1024,7 +1074,7 @@ class DecisionSignalService:
         metadata.update({
             "invalidated_by_signal_id": invalidated_by.id,
             "invalidated_reason": f"opposite_active_signal:{row.action}->{invalidated_by.action}",
-            "invalidated_at": utc_naive_now().isoformat(),
+            "invalidated_at": local_naive_now().isoformat(),
             "previous_status": row.status,
         })
         if row.decision_profile is not None:
@@ -1293,7 +1343,7 @@ class DecisionSignalService:
         if value in (None, ""):
             return None
         if isinstance(value, datetime):
-            return to_utc_naive_datetime(value)
+            return to_local_naive_datetime(value)
         if isinstance(value, str):
             text = value.strip()
             if not text:
@@ -1302,13 +1352,13 @@ class DecisionSignalService:
                 parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
             except ValueError as exc:
                 raise ValueError(f"invalid datetime value: {value}") from exc
-            return to_utc_naive_datetime(parsed)
+            return to_local_naive_datetime(parsed)
         raise ValueError(f"invalid datetime value: {value}")
 
     @classmethod
     def _is_expired(cls, expires_at: Optional[datetime]) -> bool:
         normalized_expires_at = cls._parse_datetime(expires_at)
-        return normalized_expires_at is not None and normalized_expires_at <= utc_naive_now()
+        return normalized_expires_at is not None and normalized_expires_at <= local_naive_now()
 
     @staticmethod
     def _json_dumps(value: Any) -> Optional[str]:

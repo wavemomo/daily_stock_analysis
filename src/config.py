@@ -1335,6 +1335,39 @@ class Config:
         )
 
     @property
+    def email_verification_code_ttl_seconds(self) -> int:
+        """Web 端邮箱绑定验证码有效期（秒）。"""
+        return parse_env_int(
+            os.getenv('EMAIL_VERIFICATION_CODE_TTL_SECONDS'),
+            600,
+            field_name='EMAIL_VERIFICATION_CODE_TTL_SECONDS',
+            minimum=60,
+            maximum=1800,
+        )
+
+    @property
+    def email_verification_resend_interval_seconds(self) -> int:
+        """同一邮箱两次发送验证码的最小间隔（秒），用于限频。"""
+        return parse_env_int(
+            os.getenv('EMAIL_VERIFICATION_RESEND_INTERVAL_SECONDS'),
+            60,
+            field_name='EMAIL_VERIFICATION_RESEND_INTERVAL_SECONDS',
+            minimum=30,
+            maximum=600,
+        )
+
+    @property
+    def email_verification_max_attempts(self) -> int:
+        """单个验证码允许的最大错误尝试次数，超过即作废。"""
+        return parse_env_int(
+            os.getenv('EMAIL_VERIFICATION_MAX_ATTEMPTS'),
+            5,
+            field_name='EMAIL_VERIFICATION_MAX_ATTEMPTS',
+            minimum=3,
+            maximum=10,
+        )
+
+    @property
     def wechat_miniapp_code2session_timeout_seconds(self) -> int:
         return parse_env_int(
             os.getenv('WECHAT_MINIAPP_CODE2SESSION_TIMEOUT_SECONDS'),

@@ -19,6 +19,7 @@ from src.services.decision_profile_policy import (
     apply_decision_profile_policy,
 )
 from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
+from src.analysis_ownership import AnalysisOwner
 from src.services.decision_signal_service import DecisionSignalService
 from src.storage import AnalysisHistory, DatabaseManager
 from src.utils.data_processing import parse_json_field
@@ -56,6 +57,8 @@ class _PreparedReassess:
     blocked_reason: Optional[str]
     persist_payload: Optional[dict[str, Any]]
     market_phase_summary: Mapping[str, Any]
+    # 归属随 prepared 一起传递，确保 complete 阶段写入的信号与被校验的源报告同 owner。
+    owner: Optional[AnalysisOwner] = None
 
 
 class DecisionSignalReassessService:
@@ -75,13 +78,19 @@ class DecisionSignalReassessService:
         source_report_id: int,
         decision_profile: str,
         persist: bool = False,
+        owner: Optional[AnalysisOwner] = None,
     ) -> _PreparedReassess:
         """Validate and normalize a reassessment before any quota reservation or write."""
         decision_profile_norm = normalize_decision_profile(decision_profile)
         if decision_profile_norm is None:
             raise ValueError("decision_profile is required")
 
-        record = self.db.get_analysis_history_by_id(source_report_id)
+        # 源报告必须属于当前 owner；跨 owner 一律按“不存在”处理，
+        # 否则任意 source_report_id 都能读取并重评估他人的报告快照。
+        record = self.db.get_analysis_history_by_id(
+            source_report_id,
+            **(owner.storage_kwargs if owner is not None else {}),
+        )
         if record is None:
             raise DecisionSignalSourceReportNotFoundError(f"source report not found: {source_report_id}")
 
@@ -153,6 +162,7 @@ class DecisionSignalReassessService:
             blocked_reason=policy.blocked_reason,
             persist_payload=persist_payload,
             market_phase_summary=market_phase_summary,
+            owner=owner,
         )
 
     def complete_reassess(
@@ -178,6 +188,7 @@ class DecisionSignalReassessService:
                 prepared.persist_payload,
                 history_created_at=getattr(prepared.record, "created_at", None),
                 market_phase_summary=prepared.market_phase_summary,
+                owner=prepared.owner,
             )
         except ValueError as exc:
             raise DecisionSignalUnsupportedReportSnapshotError(

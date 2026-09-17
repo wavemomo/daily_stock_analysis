@@ -74,15 +74,20 @@ if TYPE_CHECKING:
     from src.search_service import SearchResponse
 
 
-def utc_naive_now() -> datetime:
-    """Return current UTC time without tzinfo for SQLite DateTime columns."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+# 数据库 DateTime 列统一存储不带时区的本地时间（北京时间，UTC+8）。
+# 写库时间戳、过期判断和统计窗口都必须使用下面的单一时间源，避免 UTC 与本地时间混用。
+LOCAL_TZ = timezone(timedelta(hours=8))
 
 
-def to_utc_naive_datetime(value: datetime) -> datetime:
-    """Normalize aware datetimes to UTC-naive; treat naive values as UTC-naive."""
+def local_naive_now() -> datetime:
+    """返回北京时间的 naive datetime，与数据库 DateTime 列语义一致。"""
+    return datetime.now(LOCAL_TZ).replace(tzinfo=None)
+
+
+def to_local_naive_datetime(value: datetime) -> datetime:
+    """将带时区的时间归一化为北京时间 naive；naive 值视为已是本地时间。"""
     if value.tzinfo is not None and value.utcoffset() is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(LOCAL_TZ).replace(tzinfo=None)
     return value
 
 
@@ -95,7 +100,7 @@ class DatabaseSchemaMigration(Base):
 
     version = Column(String(64), primary_key=True)
     description = Column(String(255), nullable=False)
-    applied_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    applied_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
 
 class StockDaily(Base):
@@ -143,8 +148,8 @@ class StockDaily(Base):
     canonical_id = Column(String(32), nullable=True)
 
     # 更新时间
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=local_naive_now)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now)
 
     # 唯一约束：同一股票同一日期只能有一条数据
     __table_args__ = (
@@ -208,7 +213,7 @@ class NewsIntel(Base):
     published_date = Column(DateTime, index=True)
 
     # 入库时间
-    fetched_at = Column(DateTime, default=datetime.now, index=True)
+    fetched_at = Column(DateTime, default=local_naive_now, index=True)
     query_source = Column(String(32), index=True)  # bot/web/cli/system
     requester_platform = Column(String(20))
     requester_user_id = Column(String(64))
@@ -243,8 +248,8 @@ class IntelligenceSource(Base):
     last_status = Column(String(32))
     last_error = Column(Text)
     last_fetched_at = Column(DateTime, index=True)
-    created_at = Column(DateTime, default=datetime.now, index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_intel_source_scope', 'scope_type', 'scope_value', 'market'),
@@ -265,7 +270,7 @@ class IntelligenceItem(Base):
     url = Column(String(1000), nullable=False, index=True)
     source = Column(String(100))
     published_at = Column(DateTime, index=True)
-    fetched_at = Column(DateTime, default=datetime.now, index=True)
+    fetched_at = Column(DateTime, default=local_naive_now, index=True)
     scope_type = Column(String(32), nullable=False, default='market', index=True)
     scope_value = Column(String(64), nullable=False, default=INTELLIGENCE_ITEM_NULL_SCOPE_VALUE, index=True)
     market = Column(String(32), nullable=False, default='cn', index=True)
@@ -304,7 +309,7 @@ class FundamentalSnapshot(Base):
     payload = Column(Text, nullable=False)
     source_chain = Column(Text)
     coverage = Column(Text)
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_fundamental_snapshot_query_code', 'query_id', 'code'),
@@ -344,7 +349,7 @@ class ScreeningRun(Base):
     source_errors_json = Column(Text)
     warnings_json = Column(Text)
     result_json = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_screening_run_strategy_created', 'strategy', 'created_at'),
@@ -398,7 +403,7 @@ class AnalysisHistory(Base):
     stop_loss = Column(Float)
     take_profit = Column(Float)
 
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_analysis_code_time', 'code', 'created_at'),
@@ -452,7 +457,7 @@ class BacktestResult(Base):
 
     # 状态
     eval_status = Column(String(16), nullable=False, default='pending')
-    evaluated_at = Column(DateTime, default=datetime.now, index=True)
+    evaluated_at = Column(DateTime, default=local_naive_now, index=True)
 
     # 建议快照（避免未来分析字段变化导致回测不可解释）
     operation_advice = Column(String(20))
@@ -508,7 +513,7 @@ class BacktestSummary(Base):
 
     eval_window_days = Column(Integer, nullable=False, default=10)
     engine_version = Column(String(16), nullable=False, default='v1')
-    computed_at = Column(DateTime, default=datetime.now, index=True)
+    computed_at = Column(DateTime, default=local_naive_now, index=True)
 
     # 计数
     total_evaluations = Column(Integer, default=0)
@@ -563,8 +568,8 @@ class PortfolioAccount(Base):
     market = Column(String(8), nullable=False, default='cn', index=True)  # cn/hk/us
     base_currency = Column(String(8), nullable=False, default='CNY')
     is_active = Column(Boolean, nullable=False, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.now, index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now)
 
     __table_args__ = (
         Index('ix_portfolio_account_owner_active', 'owner_id', 'is_active'),
@@ -590,7 +595,7 @@ class PortfolioTrade(Base):
     tax = Column(Float, default=0.0)
     note = Column(String(255))
     dedup_hash = Column(String(64), index=True)
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         UniqueConstraint('account_id', 'trade_uid', name='uix_portfolio_trade_uid'),
@@ -611,7 +616,7 @@ class PortfolioCashLedger(Base):
     amount = Column(Float, nullable=False)
     currency = Column(String(8), nullable=False, default='CNY')
     note = Column(String(255))
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_portfolio_cash_account_date', 'account_id', 'event_date'),
@@ -633,7 +638,7 @@ class PortfolioCorporateAction(Base):
     cash_dividend_per_share = Column(Float)
     split_ratio = Column(Float)
     note = Column(String(255))
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_portfolio_ca_account_date', 'account_id', 'effective_date'),
@@ -658,7 +663,7 @@ class PortfolioPosition(Base):
     market_value_base = Column(Float, nullable=False, default=0.0)
     unrealized_pnl_base = Column(Float, nullable=False, default=0.0)
     valuation_currency = Column(String(8), nullable=False, default='CNY')
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -687,7 +692,7 @@ class PortfolioPositionLot(Base):
     remaining_quantity = Column(Float, nullable=False, default=0.0)
     unit_cost = Column(Float, nullable=False, default=0.0)
     source_trade_id = Column(Integer, ForeignKey('portfolio_trades.id'))
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_portfolio_lot_account_symbol', 'account_id', 'symbol'),
@@ -713,8 +718,8 @@ class PortfolioDailySnapshot(Base):
     tax_total = Column(Float, nullable=False, default=0.0)
     fx_stale = Column(Boolean, nullable=False, default=False)
     payload = Column(Text)
-    created_at = Column(DateTime, default=datetime.now, index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now)
 
     __table_args__ = (
         UniqueConstraint(
@@ -738,7 +743,7 @@ class PortfolioFxRate(Base):
     rate = Column(Float, nullable=False)
     source = Column(String(32), nullable=False, default='manual')
     is_stale = Column(Boolean, nullable=False, default=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now)
 
     __table_args__ = (
         UniqueConstraint(
@@ -760,7 +765,7 @@ class ConversationMessage(Base):
     session_id = Column(String(100), index=True, nullable=False)
     role = Column(String(20), nullable=False)  # user, assistant, system
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
 
 class ConversationSessionState(Base):
@@ -770,8 +775,8 @@ class ConversationSessionState(Base):
 
     session_id = Column(String(100), primary_key=True)
     selected_skill_ids_json = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
 
 class ConversationSummary(Base):
@@ -785,8 +790,8 @@ class ConversationSummary(Base):
     covered_message_id = Column(Integer, nullable=False, default=0)
     source_message_count = Column(Integer, nullable=False, default=0)
     estimated_tokens = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.now, index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
 
 class AgentProviderTurn(Base):
@@ -807,7 +812,7 @@ class AgentProviderTurn(Base):
     contains_thinking_blocks = Column(Boolean, nullable=False, default=False)
     must_roundtrip = Column(Boolean, nullable=False, default=False, index=True)
     estimated_tokens = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_agent_provider_turn_bucket', 'session_id', 'provider', 'model', 'must_roundtrip'),
@@ -884,7 +889,7 @@ class LLMUsage(Base):
     approx_common_prefix_chars = Column(Integer, nullable=True)
     approx_common_prefix_tokens = Column(Integer, nullable=True)
     known_dynamic_marker_positions = Column(Text, nullable=True)
-    called_at = Column(DateTime, default=datetime.now, index=True)
+    called_at = Column(DateTime, default=local_naive_now, index=True)
 
 
 _LLM_USAGE_TELEMETRY_COLUMN_SQL: Dict[str, str] = {
@@ -973,9 +978,9 @@ class UserRecord(Base):
     avatar_url = Column(String(2048), nullable=True)
     profile_updated_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
-    last_login_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
+    last_login_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
 
 # Backwards-compatible import name for existing repositories.  New code must
@@ -993,9 +998,9 @@ class AuthIdentityRecord(Base):
     provider = Column(String(64), nullable=False)
     issuer = Column(String(255), nullable=False)
     subject = Column(String(255), nullable=False)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
-    last_authenticated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
+    last_authenticated_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         UniqueConstraint('provider', 'issuer', 'subject', name='uix_auth_identity_provider_issuer_subject'),
@@ -1014,7 +1019,7 @@ class WebWechatLoginTransactionRecord(Base):
     redirect_uri = Column(String(2048), nullable=False)
     expires_at = Column(DateTime, nullable=False, index=True)
     consumed_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_web_wechat_login_transaction_binding', 'state_hash', 'browser_binding_hash'),
@@ -1034,10 +1039,61 @@ class IdentityBindTransactionRecord(Base):
     approved_at = Column(DateTime, nullable=True, index=True)
     consumed_at = Column(DateTime, nullable=True, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_identity_bind_transaction_pending', 'expires_at', 'approved_at', 'consumed_at'),
+    )
+
+
+class WebPasswordCredentialRecord(Base):
+    """统一用户的邮箱 + 密码凭据，用于 Web 端登录（个人主体绕开微信开放平台）。
+
+    个人主体无法开通微信开放平台网站应用扫码登录，因此已通过微信小程序认证的
+    用户可绑定邮箱与密码，作为 Web 端的独立登录方式。邮箱仅作登录标识与找回入口，
+    不参与账号自动合并（遵循 unified-wechat-auth：不按邮箱静默合并身份）。
+    密码只保存 pbkdf2 派生摘要，绝不存明文。
+    """
+
+    __tablename__ = 'web_password_credentials'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    email_verified_at = Column(DateTime, nullable=True)
+    password_hash = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
+
+
+class EmailVerificationCodeRecord(Base):
+    """邮箱验证码的服务端记录；仅保存验证码摘要，限时限次消费。"""
+
+    __tablename__ = 'email_verification_codes'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    email = Column(String(255), nullable=False, index=True)
+    code_hash = Column(String(64), nullable=False)
+    purpose = Column(String(32), nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    consumed_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_email_verification_code_lookup', 'user_id', 'email', 'purpose'),
     )
 
 
@@ -1055,8 +1111,8 @@ class FeatureQuotaPolicyRecord(Base):
         nullable=True,
         index=True,
     )
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
     __table_args__ = (
         CheckConstraint('daily_limit >= 0', name='ck_feature_quota_policy_daily_limit_nonnegative'),
@@ -1073,8 +1129,8 @@ class FeatureQuotaPlanRecord(Base):
     name = Column(String(96), nullable=False)
     description = Column(String(255), nullable=False, default='')
     is_active = Column(Boolean, nullable=False, default=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
 
 class FeatureQuotaPlanLimitRecord(Base):
@@ -1086,8 +1142,8 @@ class FeatureQuotaPlanLimitRecord(Base):
     plan_id = Column(Integer, ForeignKey('feature_quota_plans.id', ondelete='CASCADE'), nullable=False, index=True)
     feature_code = Column(String(96), nullable=False, index=True)
     daily_limit = Column(Integer, nullable=False)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('plan_id', 'feature_code', name='uix_feature_quota_plan_limit'),
@@ -1107,7 +1163,7 @@ class FeatureQuotaUserPlanAssignmentRecord(Base):
     effective_until = Column(Date, nullable=True, index=True)
     assigned_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -1132,7 +1188,7 @@ class FeatureQuotaUserOverrideRecord(Base):
     reason = Column(String(255), nullable=False, default='')
     assigned_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
 
     __table_args__ = (
         CheckConstraint('daily_limit >= 0', name='ck_feature_quota_user_override_nonnegative'),
@@ -1157,7 +1213,7 @@ class FeatureQuotaWhitelistRecord(Base):
     reason = Column(String(255), nullable=False, default='')
     granted_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -1178,8 +1234,8 @@ class FeatureQuotaUsageRecord(Base):
     feature_code = Column(String(96), nullable=False, index=True)
     period_start = Column(Date, nullable=False, index=True)
     used_count = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('user_id', 'feature_code', 'period_start', name='uix_feature_quota_usage_daily'),
@@ -1198,7 +1254,7 @@ class MiniappSessionRecord(Base):
     token_hash = Column(String(64), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_miniapp_session_user_expiry', 'user_id', 'expires_at'),
@@ -1215,7 +1271,7 @@ class WebUserSessionRecord(Base):
     token_hash = Column(String(64), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)
     revoked_at = Column(DateTime, nullable=True, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_web_user_session_user_expiry', 'user_id', 'expires_at'),
@@ -1232,8 +1288,8 @@ class RbacRoleRecord(Base):
     name = Column(String(64), nullable=False)
     description = Column(String(255), nullable=False, default='')
     is_system = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
 
 class RbacPermissionRecord(Base):
@@ -1245,7 +1301,7 @@ class RbacPermissionRecord(Base):
     code = Column(String(96), nullable=False, unique=True, index=True)
     group_code = Column(String(64), nullable=False, index=True)
     description = Column(String(255), nullable=False, default='')
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
 
 
 class RbacRolePermissionRecord(Base):
@@ -1256,7 +1312,7 @@ class RbacRolePermissionRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     role_id = Column(Integer, ForeignKey('rbac_roles.id', ondelete='CASCADE'), nullable=False, index=True)
     permission_id = Column(Integer, ForeignKey('rbac_permissions.id', ondelete='CASCADE'), nullable=False, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('role_id', 'permission_id', name='uix_rbac_role_permission'),
@@ -1272,7 +1328,7 @@ class MiniappUserRoleRecord(Base):
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     role_id = Column(Integer, ForeignKey('rbac_roles.id', ondelete='CASCADE'), nullable=False, index=True)
     assigned_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('user_id', 'role_id', name='uix_miniapp_user_role'),
@@ -1295,7 +1351,7 @@ class RbacAuditEventRecord(Base):
         index=True,
     )
     metadata_json = Column(Text, nullable=False, default='{}')
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_rbac_audit_target_created', 'target_type', 'target_id', 'created_at'),
@@ -1312,8 +1368,8 @@ class DailyReflectionRecord(Base):
     reflection_date = Column(Date, nullable=False, index=True)
     title = Column(String(80), nullable=False, default='')
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         UniqueConstraint('user_id', 'reflection_date', name='uix_daily_reflection_user_date'),
@@ -1333,8 +1389,8 @@ class MiniappWatchlistRecord(Base):
     stock_code = Column(String(32), nullable=False)
     match_key = Column(String(32), nullable=False)
     stock_name = Column(String(64), nullable=False, default='')
-    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, nullable=False, index=True)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False, index=True)
 
     __table_args__ = (
         UniqueConstraint('user_id', 'match_key', name='uix_miniapp_watchlist_user_key'),
@@ -1363,8 +1419,8 @@ class AlertRuleRecord(Base):
     source = Column(String(16), nullable=False, default='api', index=True)
     cooldown_policy = Column(Text)
     notification_policy = Column(Text)
-    created_at = Column(DateTime, default=datetime.now, index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_alert_rule_type_target', 'alert_type', 'target'),
@@ -1388,7 +1444,7 @@ class AlertTriggerRecord(Base):
     reason = Column(Text)
     data_source = Column(String(64))
     data_timestamp = Column(DateTime, index=True)
-    triggered_at = Column(DateTime, default=datetime.now, index=True)
+    triggered_at = Column(DateTime, default=local_naive_now, index=True)
     status = Column(String(16), nullable=False, default='triggered', index=True)
     diagnostics = Column(Text)
 
@@ -1415,7 +1471,7 @@ class AlertNotificationRecord(Base):
     retryable = Column(Boolean, nullable=False, default=False)
     latency_ms = Column(Integer)
     diagnostics = Column(Text)
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         Index('ix_alert_notification_trigger_channel', 'trigger_id', 'channel'),
@@ -1437,7 +1493,7 @@ class AlertCooldownRecord(Base):
     cooldown_until = Column(DateTime, index=True)
     reason = Column(Text)
     state = Column(String(16), nullable=False, default='active', index=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         UniqueConstraint('rule_id', 'target', 'severity', name='uix_alert_cooldown_rule_target_severity'),
@@ -1450,6 +1506,16 @@ class DecisionSignalRecord(Base):
     __tablename__ = 'decision_signals'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # 资源归属，语义与 analysis_history 完全一致：信号派生自某条分析报告，
+    # 因此继承该报告的 owner。小程序记录同时携带 user 范围与可信用户主键；
+    # Web 管理端与后台任务显式写 global；既有行保留 NULL，视为 legacy。
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     stock_code = Column(String(16), nullable=False, index=True)
     stock_name = Column(String(64))
     market = Column(String(8), nullable=False, index=True)
@@ -1479,8 +1545,8 @@ class DecisionSignalRecord(Base):
     plan_quality = Column(String(16), nullable=False, default='unknown', index=True)
     status = Column(String(16), nullable=False, default='active', index=True)
     expires_at = Column(DateTime, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
     metadata_json = Column(Text)
 
     __table_args__ = (
@@ -1535,6 +1601,12 @@ class DecisionSignalRecord(Base):
             'decision_profile',
             'created_at',
         ),
+        Index(
+            'ix_decision_signal_owner_time',
+            'owner_user_id',
+            'owner_scope',
+            'created_at',
+        ),
     )
 
 
@@ -1569,8 +1641,8 @@ class DecisionSignalOutcomeRecord(Base):
     data_quality_level = Column(String(24), index=True)
     holding_state = Column(String(16), nullable=False, default='unknown', index=True)
 
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         UniqueConstraint('signal_id', 'horizon', 'engine_version', name='uix_decision_signal_outcome_key'),
@@ -1590,8 +1662,8 @@ class DecisionSignalFeedbackRecord(Base):
     reason_code = Column(String(64), index=True)
     note = Column(Text)
     source = Column(String(16), nullable=False, default='api', index=True)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
 
 class SkillOpinionSampleRecord(Base):
@@ -1615,7 +1687,7 @@ class SkillOpinionSampleRecord(Base):
     data_quality_level = Column(String(24), index=True)
     opinion_created_at = Column(DateTime, index=True)
     sample_schema_version = Column(String(32), nullable=False, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -1663,8 +1735,8 @@ class SkillOpinionOutcomeRecord(Base):
     end_close = Column(Float)
     stock_return_pct = Column(Float)
     directional_return_pct = Column(Float)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    created_at = Column(DateTime, default=local_naive_now, index=True)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, index=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -1808,6 +1880,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_fundamental_snapshot_owner_columns()
             self._ensure_screening_run_owner_columns()
             self._ensure_llm_usage_telemetry_columns()
+            self._ensure_decision_signal_owner_columns()
             self._ensure_decision_signal_profile_schema()
             self._ensure_stock_daily_canonical_id()
             self._ensure_intelligence_item_scope_values()
@@ -1930,7 +2003,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         if not issuer:
             logger.warning('未配置 WECHAT_MINIAPP_APP_ID，跳过 miniapp_users 身份回填')
             return
-        now = utc_naive_now()
+        now = local_naive_now()
         session = self._SessionLocal()
         try:
             users = list(session.execute(
@@ -2251,6 +2324,62 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         ):
             raise RuntimeError(
                 "screening run owner migration verification failed: "
+                f"columns={sorted(verified_columns)} "
+                f"index={verified_indexes.get(index_name)}"
+            )
+
+    def _ensure_decision_signal_owner_columns(self) -> None:
+        """Add and verify strict owner columns for existing SQLite decision signals.
+
+        Legacy rows deliberately retain NULL ownership. They stay invisible to
+        user-scoped reads and are only visible to the explicit global owner,
+        matching the analysis-history policy; no startup migration may infer a
+        user owner for pre-existing signals.
+        """
+        if not self._is_sqlite_engine:
+            return
+        table_name = DecisionSignalRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        expected = {
+            "owner_user_id": "INTEGER",
+            "owner_scope": "VARCHAR(16)",
+        }
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, column_type in expected.items():
+            if column_name in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+
+        index_name = "ix_decision_signal_owner_time"
+        index_columns = ["owner_user_id", "owner_scope", "created_at"]
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} ({', '.join(index_columns)})"
+            )
+
+        verified = inspect(self._engine)
+        verified_columns = {column["name"] for column in verified.get_columns(table_name)}
+        verified_indexes = {
+            index["name"]: index["column_names"]
+            for index in verified.get_indexes(table_name)
+        }
+        if (
+            not set(expected).issubset(verified_columns)
+            or verified_indexes.get(index_name) != index_columns
+        ):
+            raise RuntimeError(
+                "decision signal owner migration verification failed: "
                 f"columns={sorted(verified_columns)} "
                 f"index={verified_indexes.get(index_name)}"
             )

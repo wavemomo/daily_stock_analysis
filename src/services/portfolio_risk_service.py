@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import Config, get_config
+from src.analysis_ownership import AnalysisOwner
 from src.portfolio_ownership import PortfolioScope, UNSET_PORTFOLIO_SCOPE
 from src.repositories.portfolio_repo import PortfolioRepository
 from src.services.decision_signal_service import DecisionSignalService
@@ -90,7 +91,10 @@ class PortfolioRiskService:
             portfolio_scope=portfolio_scope,
         )
         stop_loss = self._build_stop_loss(snapshot, thresholds)
-        decision_signal_risk = self._build_decision_signal_risk(snapshot)
+        decision_signal_risk = self._build_decision_signal_risk(
+            snapshot,
+            portfolio_scope=portfolio_scope,
+        )
 
         return {
             "as_of": as_of_date.isoformat(),
@@ -105,9 +109,27 @@ class PortfolioRiskService:
             "decision_signal_risk": decision_signal_risk,
         }
 
+    @staticmethod
+    def _decision_signal_owner(portfolio_scope: object) -> Optional[AnalysisOwner]:
+        """Map the trusted portfolio scope onto the decision-signal owner contract.
+
+        Only a user-scoped portfolio identifies a canonical business user. The
+        legacy-global and unscoped compatibility scopes carry no user identity, so
+        they return ``None`` and keep the historical unfiltered read behaviour for
+        direct Python/CLI callers instead of silently impersonating an owner.
+        """
+        if isinstance(portfolio_scope, PortfolioScope) and portfolio_scope.kind == "user":
+            try:
+                return AnalysisOwner.user(int(str(portfolio_scope.owner_id)))
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def _build_decision_signal_risk(
         self,
         snapshot: Dict[str, Any],
+        *,
+        portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
     ) -> Dict[str, Any]:
         try:
             held_positions = self._held_position_identities(snapshot)
@@ -125,6 +147,7 @@ class PortfolioRiskService:
                 response = self.decision_signal_service.list_signals(
                     stock_identities=stock_identities,
                     status="active",
+                    owner=self._decision_signal_owner(portfolio_scope),
                     page=page,
                     page_size=100,
                 )

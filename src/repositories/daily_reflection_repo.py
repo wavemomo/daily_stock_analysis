@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy import and_, delete, desc, func, select
 
-from src.storage import DailyReflectionRecord, DatabaseManager
+from src.storage import DailyReflectionRecord, DatabaseManager, local_naive_now
 
 
 class DailyReflectionRepository:
@@ -34,7 +34,7 @@ class DailyReflectionRepository:
                 )
                 .limit(1)
             ).scalar_one_or_none()
-            now = datetime.utcnow()
+            now = local_naive_now()
             if row is None:
                 row = DailyReflectionRecord(
                     user_id=user_id,

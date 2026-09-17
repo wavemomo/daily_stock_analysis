@@ -8,7 +8,7 @@ import pytest
 
 from src.config import Config
 from src.repositories.web_user_auth_repo import WebUserAuthRepository
-from src.storage import DatabaseManager
+from src.storage import DatabaseManager, local_naive_now
 
 
 @pytest.fixture()
@@ -24,7 +24,7 @@ def auth_repository(tmp_path, monkeypatch):
 
 
 def test_wechat_login_transaction_is_consumed_by_single_conditional_update(auth_repository):
-    now = datetime.utcnow()
+    now = local_naive_now()
     auth_repository.create_wechat_login_transaction(
         state_hash="state-hash",
         browser_binding_hash="binding-hash",

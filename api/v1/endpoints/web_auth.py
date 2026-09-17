@@ -9,14 +9,19 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from api.deps import get_current_web_user_principal
-from api.middlewares.auth import web_wechat_login_credentials_response
+from api.middlewares.auth import (
+    web_password_login_credentials_response,
+    web_wechat_login_credentials_response,
+)
 from api.v1.schemas.web_auth import (
     IdentityBindConsumeRequest,
     IdentityBindConsumeResponse,
     IdentityBindStartResponse,
+    WebPasswordLoginRequest,
     WebUserSessionResponse,
 )
 from src.config import get_config
+from src.services.email_password_auth_service import EmailPasswordAuthService
 from src.services.web_user_auth_service import WEB_USER_COOKIE_NAME, WebUserAuthService
 from src.services.wechat_miniapp_auth_service import MiniappPrincipal, WechatMiniappAuthService
 from src.services.wechat_open_web_auth_service import (
@@ -144,6 +149,50 @@ def complete_wechat_login(
         ),
     )
     response.delete_cookie(key=_WEB_WECHAT_BINDING_COOKIE_NAME, path=_WEB_WECHAT_CALLBACK_PATH)
+    return response
+
+
+@router.post(
+    "/password/login",
+    response_model=WebUserSessionResponse,
+    summary="邮箱密码登录（个人主体绕开微信开放平台扫码）",
+)
+def password_login(request: Request, payload: WebPasswordLoginRequest) -> JSONResponse:
+    credentials_response = web_password_login_credentials_response(request)
+    if credentials_response is not None:
+        return credentials_response
+
+    user_id = EmailPasswordAuthService().login(
+        email=payload.email,
+        password=payload.password,
+    )
+    issue = (
+        WebUserAuthService().create_session_for_user(
+            user_id=user_id,
+            assign_default_role=False,
+        )
+        if user_id is not None
+        else None
+    )
+    if issue is None:
+        # 统一失败文案，不区分"邮箱不存在 / 密码错误 / 未验证 / 账号停用"。
+        return _no_store_response(
+            {"error": "invalid_credentials", "message": "邮箱或密码错误"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    response = _no_store_response({
+        "user": _serialize_web_user(issue.principal),
+        "csrf_token": WebUserAuthService.create_csrf_token(issue.session_value),
+    })
+    response.set_cookie(
+        key=WEB_USER_COOKIE_NAME,
+        value=issue.session_value,
+        **_cookie_params(
+            request,
+            max_age=WebUserAuthService().config.web_user_session_ttl_seconds,
+        ),
+    )
     return response
 
 

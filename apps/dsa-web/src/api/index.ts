@@ -21,7 +21,9 @@ function isUnsafeCookieRequest(method: string | undefined): boolean {
 export function isSessionProbe(url: string | undefined): boolean {
   const normalizedUrl = (url ?? '').split('?')[0];
   return normalizedUrl === '/api/v1/web-auth/me'
-    || normalizedUrl === '/api/v1/web-auth/logout';
+    || normalizedUrl === '/api/v1/web-auth/logout'
+    // 邮箱密码登录失败返回 401 表示凭据错误，由登录页就地提示，不触发全局跳转。
+    || normalizedUrl === '/api/v1/web-auth/password/login';
 }
 
 function isLoginRoute(): boolean {

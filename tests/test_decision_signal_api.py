@@ -23,11 +23,12 @@ except ModuleNotFoundError:
 
 from api.app import create_app
 from src.analyzer import AnalysisResult
+from src.analysis_ownership import AnalysisOwner
 from src.config import Config
 from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.decision_signal_extractor import extract_and_persist_from_analysis_result
 from src.services.decision_signal_service import DecisionSignalService
-from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, PortfolioAccount, PortfolioPosition, utc_naive_now
+from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, PortfolioAccount, PortfolioPosition, UserRecord, local_naive_now
 
 
 @contextmanager
@@ -426,7 +427,7 @@ def test_detail_endpoint_lazily_expires_active_signal(client_and_db) -> None:
         json=_payload(
             source_report_id=3101,
             trace_id="trace-3101",
-            expires_at=(utc_naive_now() - timedelta(minutes=5)).isoformat(),
+            expires_at=(local_naive_now() - timedelta(minutes=5)).isoformat(),
         ),
     )
     assert created_resp.status_code == 200, created_resp.text
@@ -493,7 +494,8 @@ def test_create_accepts_timezone_aware_expires_at_values(client_and_db) -> None:
     assert expired_resp.status_code == 200, expired_resp.text
     expired_item = expired_resp.json()["item"]
     assert expired_item["status"] == "expired"
-    assert expired_item["expires_at"] == "2020-01-01T00:00:00"
+    # 输入 2020-01-01T00:00:00Z，按本地（北京，UTC+8）语义归一化落库。
+    assert expired_item["expires_at"] == "2020-01-01T08:00:00"
 
     active_resp = client.post(
         "/api/v1/decision-signals",
@@ -506,7 +508,8 @@ def test_create_accepts_timezone_aware_expires_at_values(client_and_db) -> None:
     assert active_resp.status_code == 200, active_resp.text
     active_item = active_resp.json()["item"]
     assert active_item["status"] == "active"
-    assert active_item["expires_at"] == "2098-12-31T16:00:00"
+    # 输入已是 +08:00，本地语义下原值保留。
+    assert active_item["expires_at"] == "2099-01-01T00:00:00"
 
 
 def test_create_refreshes_expired_same_source_when_future_expiry_is_supplied(client_and_db) -> None:
@@ -532,7 +535,7 @@ def test_create_refreshes_expired_same_source_when_future_expiry_is_supplied(cli
         json=_payload(
             source_report_id=3111,
             trace_id="trace-refresh-new",
-            expires_at=(utc_naive_now() + timedelta(days=2)).isoformat(),
+            expires_at=(local_naive_now() + timedelta(days=2)).isoformat(),
             reason="fresh reason",
             target_price=1900,
         ),
@@ -647,7 +650,7 @@ def test_create_does_not_reactivate_terminal_same_source_status(client_and_db, t
         json=_payload(
             source_report_id=3113,
             trace_id="trace-terminal-new",
-            expires_at=(utc_naive_now() + timedelta(days=2)).isoformat(),
+            expires_at=(local_naive_now() + timedelta(days=2)).isoformat(),
             reason="fresh reason",
         ),
     )
@@ -1360,6 +1363,18 @@ def _decision_signal_count(db: DatabaseManager) -> int:
         return session.query(DecisionSignalRecord).count()
 
 
+def _fixture_owner(db: DatabaseManager) -> AnalysisOwner | None:
+    """Resolve the owner that ``client_and_db`` authenticates every request as.
+
+    Decision signals and their source reports are owner-scoped, so fixtures that
+    seed rows directly must write them under the same owner the HTTP requests
+    read as; otherwise the API correctly treats them as another tenant's data.
+    """
+    with db.session_scope() as session:
+        owner_user_id = session.query(UserRecord.id).order_by(UserRecord.id.asc()).scalar()
+    return AnalysisOwner.user(int(owner_user_id)) if owner_user_id is not None else None
+
+
 def _save_reassess_history(
     db: DatabaseManager,
     *,
@@ -1379,8 +1394,12 @@ def _save_reassess_history(
     if isinstance(context_payload, dict):
         context_payload = json.dumps(context_payload, ensure_ascii=False)
     with db.session_scope() as session:
+        # 重评估要求源报告对请求 owner 可见，所以夹具必须把报告写在夹具用户名下。
+        owner_user_id = session.query(UserRecord.id).order_by(UserRecord.id.asc()).scalar()
         row = AnalysisHistory(
             query_id="query-reassess-test",
+            owner_scope="user" if owner_user_id is not None else None,
+            owner_user_id=owner_user_id,
             code=code,
             name="贵州茅台",
             report_type=report_type,
@@ -1477,6 +1496,7 @@ def _persist_auto_balanced_signal(
         report_type="full",
         profile_source="auto_default",
         service=DecisionSignalService(db_manager=db),
+        owner=_fixture_owner(db),
     )
     assert persisted is not None
     return persisted["item"]
@@ -1806,7 +1826,7 @@ def test_reassess_persist_writes_authoritative_item_and_deduplicates(client_and_
 
 def test_reassess_persist_anchors_expired_signal_to_report_lifecycle(client_and_db) -> None:
     client, db = client_and_db
-    report_created_at = utc_naive_now().replace(microsecond=0) - timedelta(days=30)
+    report_created_at = local_naive_now().replace(microsecond=0) - timedelta(days=30)
     context = _valid_reassess_context()
     context["market_phase_summary"] = {
         "phase": "intraday",
@@ -1824,7 +1844,7 @@ def test_reassess_persist_anchors_expired_signal_to_report_lifecycle(client_and_
     )
     _set_reassess_history_created_at(db, record_id, report_created_at)
     service = DecisionSignalService(db_manager=db)
-    expected_created_at = service._coerce_history_created_at_to_utc_naive(report_created_at)
+    expected_created_at = service._coerce_history_created_at_to_local_naive(report_created_at)
 
     response = client.post(
         "/api/v1/decision-signals/reassess",
@@ -1859,7 +1879,7 @@ def test_reassess_persist_uses_saved_raw_phase_summary_when_context_summary_is_m
     client_and_db,
 ) -> None:
     client, db = client_and_db
-    report_created_at = utc_naive_now().replace(microsecond=0) - timedelta(days=30)
+    report_created_at = local_naive_now().replace(microsecond=0) - timedelta(days=30)
     raw = _valid_reassess_raw(
         horizon="intraday",
         invalidation="跌破关键支撑",
@@ -1871,7 +1891,7 @@ def test_reassess_persist_uses_saved_raw_phase_summary_when_context_summary_is_m
     _set_reassess_history_created_at(db, record_id, report_created_at)
     expected_created_at = DecisionSignalService(
         db_manager=db
-    )._coerce_history_created_at_to_utc_naive(report_created_at)
+    )._coerce_history_created_at_to_local_naive(report_created_at)
 
     response = client.post(
         "/api/v1/decision-signals/reassess",
@@ -1892,7 +1912,7 @@ def test_reassess_persist_returns_final_invalidated_item_without_harming_newer_s
     client_and_db,
 ) -> None:
     client, db = client_and_db
-    report_created_at = utc_naive_now().replace(microsecond=0) - timedelta(days=1)
+    report_created_at = local_naive_now().replace(microsecond=0) - timedelta(days=1)
     context = _valid_reassess_context()
     context["market_phase_summary"] = {"phase": "postmarket"}
     record_id = _save_reassess_history(
@@ -1937,7 +1957,7 @@ def test_reassess_history_refresh_uses_created_at_not_updated_at_for_invalidatio
     client_and_db,
 ) -> None:
     client, db = client_and_db
-    report_created_at = utc_naive_now().replace(microsecond=0) - timedelta(days=1)
+    report_created_at = local_naive_now().replace(microsecond=0) - timedelta(days=1)
     raw = _valid_reassess_raw(horizon="3d", invalidation="跌破关键支撑")
     context = _valid_reassess_context()
     context["market_phase_summary"] = {"phase": "postmarket"}
@@ -1951,13 +1971,13 @@ def test_reassess_history_refresh_uses_created_at_not_updated_at_for_invalidatio
     )
     expected_created_at = DecisionSignalService(
         db_manager=db
-    )._coerce_history_created_at_to_utc_naive(report_created_at)
+    )._coerce_history_created_at_to_local_naive(report_created_at)
     with db.session_scope() as session:
         row = session.query(DecisionSignalRecord).filter(DecisionSignalRecord.id == auto_item["id"]).one()
         row.created_at = expected_created_at
         row.status = "expired"
-        row.expires_at = utc_naive_now() - timedelta(minutes=1)
-        row.updated_at = utc_naive_now() - timedelta(minutes=1)
+        row.expires_at = local_naive_now() - timedelta(minutes=1)
+        row.updated_at = local_naive_now() - timedelta(minutes=1)
     newer_sell = client.post(
         "/api/v1/decision-signals",
         json=_payload(
@@ -2080,8 +2100,8 @@ def test_reassess_balanced_persist_refreshes_expired_auto_generated_signal(clien
     with db.session_scope() as session:
         row = session.query(DecisionSignalRecord).filter(DecisionSignalRecord.id == auto_item["id"]).one()
         row.status = "expired"
-        row.expires_at = utc_naive_now() - timedelta(minutes=1)
-        row.updated_at = utc_naive_now() - timedelta(minutes=1)
+        row.expires_at = local_naive_now() - timedelta(minutes=1)
+        row.updated_at = local_naive_now() - timedelta(minutes=1)
 
     response = client.post(
         "/api/v1/decision-signals/reassess",
@@ -2120,7 +2140,7 @@ def test_reassess_balanced_persist_reports_relaxed_phase_fill_without_overwritin
     with db.session_scope() as session:
         row = session.query(DecisionSignalRecord).filter(DecisionSignalRecord.id == auto_item["id"]).one()
         row.market_phase = None
-        row.updated_at = utc_naive_now()
+        row.updated_at = local_naive_now()
 
     response = client.post(
         "/api/v1/decision-signals/reassess",
@@ -2159,7 +2179,7 @@ def test_reassess_balanced_persist_returns_terminal_auto_signal_without_reactiva
     with db.session_scope() as session:
         row = session.query(DecisionSignalRecord).filter(DecisionSignalRecord.id == auto_item["id"]).one()
         row.status = terminal_status
-        row.updated_at = utc_naive_now()
+        row.updated_at = local_naive_now()
 
     response = client.post(
         "/api/v1/decision-signals/reassess",

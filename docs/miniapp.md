@@ -29,9 +29,25 @@ CORS_ORIGINS=https://example.com
 
 微信隐私规则不允许在 `onLaunch`/`onLoad` 中静默读取昵称和头像。首次身份登录仍会自动完成；若用户资料为空，登录后可使用微信官方头像昵称填写能力补充资料，也可跳过，之后可在“我的 → 更新微信资料”重新填写。头像临时文件通过认证上传端点保存到 SQLite 数据文件同目录的 `miniapp_avatars/`；API 只接受不超过 2MB、最大 4096×4096 且总像素不超过 1600 万的单帧 JPEG、PNG 或 WebP，服务端完整解码并重新编码后才公开读取。
 
+## Web 登录方式
+
+Web 端支持两种登录方式，二者都签发同一套 `dsa_user_session` Cookie 会话并走同一 RBAC：
+
+1. **微信开放平台扫码 OAuth**：需要企业主体开通开放平台网站应用，见下文流程。
+2. **邮箱 + 密码登录**：面向无法开通开放平台的个人主体。小程序内已登录用户先在「个人设置 → Web 登录邮箱」用邮件验证码绑定邮箱和密码，再在 Web 端凭邮箱密码登录。邮箱仅作登录标识与找回入口，不参与账号自动合并；密码只保存 pbkdf2-hmac-sha256 派生摘要。
+
+### 邮箱密码绑定与登录
+
+- 小程序绑定（Bearer + `account.self`）：
+  - `GET /api/v1/miniapp/auth/email`：返回当前用户绑定状态 `{email, email_verified, has_password}`（仅本人可见，不返回密码相关摘要）。
+  - `POST /api/v1/miniapp/auth/email/request-code`：提交 `{email}`，向该邮箱发送验证码。邮件通道未配置（缺 `EMAIL_SENDER`/`EMAIL_PASSWORD`）返回 `503`；邮箱已被其他账号绑定返回 `409`；发送过于频繁返回 `400`。验证码复用邮件通知通道，限时、限次、限频，只保存摘要。
+  - `POST /api/v1/miniapp/auth/email/bind`：提交 `{email, code, password}`，校验验证码后写入邮箱+密码凭据；对同一用户重复绑定即重置密码。密码长度 8-128。
+- Web 登录（无既有登录态的浏览器）：
+  - `POST /api/v1/web-auth/password/login`：提交 `{email, password}`，成功签发 `dsa_user_session` 并返回 `{user, csrf_token}`；失败统一返回 `401 {error:"invalid_credentials"}`，不区分邮箱不存在、密码错误、邮箱未验证或账号停用；浏览器已有登录态时返回 `400 authentication_conflict`。
+
 ## Web 微信 OAuth
 
-Web 不使用密码登录或小程序确认网页登录。浏览器通过以下流程登录：
+浏览器通过以下流程完成微信扫码登录：
 
 1. 请求 `GET /api/v1/web-auth/wechat/start`。
 2. 服务端创建短期 state/binding transaction，写入临时浏览器 binding Cookie，并 302 到微信开放平台扫码授权地址。
@@ -58,6 +74,9 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 - `GET /api/v1/miniapp/auth/me`：返回当前用户摘要，包括可选的 `nickname`、`avatar_url`、roles 和 permissions。
 - `PATCH /api/v1/miniapp/auth/me`：当前用户更新自己的可选昵称；固定使用 Bearer principal 的用户 ID，不接受 OpenID、角色、权限或 owner 字段。
 - `POST /api/v1/miniapp/auth/me/avatar`：认证上传当前用户通过 `chooseAvatar` 选择的头像。
+- `GET /api/v1/miniapp/auth/email`：返回当前用户的 Web 邮箱登录绑定状态 `{email, email_verified, has_password}`。
+- `POST /api/v1/miniapp/auth/email/request-code`：向 `{email}` 发送 Web 登录绑定验证码（邮件通道未配置返回 `503`，邮箱被占用返回 `409`）。
+- `POST /api/v1/miniapp/auth/email/bind`：以 `{email, code, password}` 绑定或重置 Web 登录邮箱密码。
 - `GET|HEAD /api/v1/miniapp/auth/public/avatars/{opaque_filename}`：按合法、不可预测的文件名读取公开头像；不列出文件、不接受写方法，也不使用可枚举的用户 ID。
 - `POST /api/v1/miniapp/auth/logout`：撤销当前会话。
 - `POST /api/v1/miniapp/auth/identity-bind/approve`：以当前小程序 Bearer principal 批准 Web 创建的绑定 challenge。

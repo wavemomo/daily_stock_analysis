@@ -15,6 +15,7 @@ from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.repositories.web_user_auth_repo import IdentityBindState, WebUserAuthRepository
 from src.services.rbac_service import RbacService
 from src.services.wechat_miniapp_auth_service import MiniappPrincipal
+from src.storage import local_naive_now
 
 WEB_USER_COOKIE_NAME = "dsa_user_session"
 
@@ -67,7 +68,7 @@ class WebUserAuthService:
             return None
         access = RbacService().ensure_user_access(user, assign_default=assign_default_role)
         session_value = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(
+        expires_at = local_naive_now() + timedelta(
             seconds=self.config.web_user_session_ttl_seconds
         )
         token_hash = self.hash_value(session_value)
@@ -97,7 +98,7 @@ class WebUserAuthService:
         ):
             return None
         challenge = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(
+        expires_at = local_naive_now() + timedelta(
             seconds=self.config.wechat_open_web_state_ttl_seconds
         )
         created = self.repository.create_identity_bind_transaction(

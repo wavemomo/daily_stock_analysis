@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from src.repositories.auth_identity_repo import AuthIdentityRepository
 from src.services.identity_service import IdentityService
-from src.storage import DatabaseManager, MiniappSessionRecord, MiniappUserRecord
+from src.storage import DatabaseManager, MiniappSessionRecord, MiniappUserRecord, local_naive_now
 
 
 class MiniappUserRepository:
@@ -91,7 +91,7 @@ class MiniappUserRepository:
                 row.avatar_url = avatar_url
                 changed = True
             if changed:
-                now = datetime.utcnow()
+                now = local_naive_now()
                 row.profile_updated_at = now
                 row.updated_at = now
                 session.commit()
@@ -110,7 +110,7 @@ class MiniappUserRepository:
                 user_id=user_id,
                 token_hash=token_hash,
                 expires_at=expires_at,
-                created_at=datetime.utcnow(),
+                created_at=local_naive_now(),
             )
             session.add(row)
             session.commit()
@@ -123,7 +123,7 @@ class MiniappUserRepository:
         *,
         now: Optional[datetime] = None,
     ) -> Optional[MiniappUserRecord]:
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
         with self.db.get_session() as session:
             return session.execute(
                 select(MiniappUserRecord)
@@ -146,6 +146,6 @@ class MiniappUserRepository:
             ).scalar_one_or_none()
             if row is None or row.revoked_at is not None:
                 return False
-            row.revoked_at = datetime.utcnow()
+            row.revoked_at = local_naive_now()
             session.commit()
             return True

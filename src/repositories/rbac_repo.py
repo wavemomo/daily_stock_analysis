@@ -18,6 +18,7 @@ from src.storage import (
     RbacPermissionRecord,
     RbacRolePermissionRecord,
     RbacRoleRecord,
+    local_naive_now,
 )
 
 _ROLE_CODE_PATTERN = re.compile(r'^[a-z][a-z0-9_-]{1,63}$')
@@ -34,7 +35,7 @@ class RbacRepository:
         可在数据库中创建、编辑并分配自定义角色，避免系统升级后内置安全语义
         被页面配置意外破坏。
         """
-        now = datetime.utcnow()
+        now = local_naive_now()
         with self.db.get_session() as session:
             permission_rows = {
                 row.code: row for row in session.execute(select(RbacPermissionRecord)).scalars()
@@ -126,7 +127,7 @@ class RbacRepository:
                 user_id=user_id,
                 role_id=role_id,
                 assigned_by_user_id=assigned_by_user_id,
-                created_at=datetime.utcnow(),
+                created_at=local_naive_now(),
             ))
             if audit_action:
                 self._record_audit(
@@ -249,7 +250,7 @@ class RbacRepository:
                     user_id=user_id,
                     role_id=role.id,
                     assigned_by_user_id=assigned_by_user_id,
-                    created_at=datetime.utcnow(),
+                    created_at=local_naive_now(),
                 )
                 for role in roles
             ])
@@ -286,7 +287,7 @@ class RbacRepository:
                 raise ValueError('不能停用最后一个可管理权限的活跃账户')
             before = bool(target.is_active)
             target.is_active = is_active
-            target.updated_at = datetime.utcnow()
+            target.updated_at = local_naive_now()
             self._record_audit(
                 session,
                 action='user.status_changed',
@@ -319,8 +320,8 @@ class RbacRepository:
                 name=name.strip(),
                 description=description.strip(),
                 is_system=False,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=local_naive_now(),
+                updated_at=local_naive_now(),
             )
             session.add(role)
             session.flush()
@@ -328,7 +329,7 @@ class RbacRepository:
                 RbacRolePermissionRecord(
                     role_id=role.id,
                     permission_id=permission.id,
-                    created_at=datetime.utcnow(),
+                    created_at=local_naive_now(),
                 )
                 for permission in permissions
             ])
@@ -373,13 +374,13 @@ class RbacRepository:
             )
             role.name = name.strip()
             role.description = description.strip()
-            role.updated_at = datetime.utcnow()
+            role.updated_at = local_naive_now()
             session.execute(delete(RbacRolePermissionRecord).where(RbacRolePermissionRecord.role_id == role.id))
             session.add_all([
                 RbacRolePermissionRecord(
                     role_id=role.id,
                     permission_id=permission.id,
-                    created_at=datetime.utcnow(),
+                    created_at=local_naive_now(),
                 )
                 for permission in permissions
             ])
@@ -684,5 +685,5 @@ class RbacRepository:
             target_id=target_id,
             actor_user_id=actor_user_id,
             metadata_json=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-            created_at=datetime.utcnow(),
+            created_at=local_naive_now(),
         ))

@@ -17,7 +17,7 @@ import pytest
 from src.config import Config
 from src.repositories.decision_signal_repo import DecisionSignalCreateResult
 from src.services.decision_signal_service import DecisionSignalService, DecisionSignalStorageError
-from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, utc_naive_now
+from src.storage import AnalysisHistory, DatabaseManager, DecisionSignalRecord, local_naive_now
 from src.utils.sanitize import sanitize_decision_signal_text, sanitize_diagnostic_text
 
 
@@ -229,12 +229,12 @@ def test_service_defaults_lifecycle_and_preserves_explicit_values(isolated_db) -
         metadata={"market_phase_summary": {"minutes_to_close": 45}},
     )
     intraday_payload.pop("horizon")
-    before_intraday = utc_naive_now()
+    before_intraday = local_naive_now()
     intraday = service.create_signal(intraday_payload)["item"]
     intraday_expiry = datetime.fromisoformat(intraday["expires_at"])
     assert intraday["horizon"] == "intraday"
     assert before_intraday + timedelta(minutes=44) <= intraday_expiry
-    assert intraday_expiry <= utc_naive_now() + timedelta(minutes=46)
+    assert intraday_expiry <= local_naive_now() + timedelta(minutes=46)
 
     opening_payload = _payload(
         source_report_id=157,
@@ -243,12 +243,12 @@ def test_service_defaults_lifecycle_and_preserves_explicit_values(isolated_db) -
         metadata={"market_phase_summary": {"minutes_to_open": 10}},
     )
     opening_payload.pop("horizon")
-    before_opening = utc_naive_now()
+    before_opening = local_naive_now()
     opening = service.create_signal(opening_payload)["item"]
     opening_expiry = datetime.fromisoformat(opening["expires_at"])
     assert opening["horizon"] == "intraday"
     assert before_opening + timedelta(hours=4, minutes=9) <= opening_expiry
-    assert opening_expiry <= utc_naive_now() + timedelta(hours=4, minutes=11)
+    assert opening_expiry <= local_naive_now() + timedelta(hours=4, minutes=11)
 
     hk_alert_payload = _payload(
         source_report_id=152,
@@ -260,12 +260,12 @@ def test_service_defaults_lifecycle_and_preserves_explicit_values(isolated_db) -
     )
     hk_alert_payload.pop("horizon")
     hk_alert_payload.pop("market_phase")
-    before_alert = utc_naive_now()
+    before_alert = local_naive_now()
     hk_alert = service.create_signal(hk_alert_payload)["item"]
     hk_alert_expiry = datetime.fromisoformat(hk_alert["expires_at"])
     assert hk_alert["horizon"] == "intraday"
     assert before_alert + timedelta(hours=5, minutes=29) <= hk_alert_expiry
-    assert hk_alert_expiry <= utc_naive_now() + timedelta(hours=5, minutes=31)
+    assert hk_alert_expiry <= local_naive_now() + timedelta(hours=5, minutes=31)
 
     postmarket_payload = _payload(
         source_report_id=153,
@@ -273,12 +273,12 @@ def test_service_defaults_lifecycle_and_preserves_explicit_values(isolated_db) -
         market_phase="postmarket",
     )
     postmarket_payload.pop("horizon")
-    before_postmarket = utc_naive_now()
+    before_postmarket = local_naive_now()
     postmarket = service.create_signal(postmarket_payload)["item"]
     postmarket_expiry = datetime.fromisoformat(postmarket["expires_at"])
     assert postmarket["horizon"] == "3d"
     assert before_postmarket + timedelta(days=3, seconds=-1) <= postmarket_expiry
-    assert postmarket_expiry <= utc_naive_now() + timedelta(days=3, seconds=1)
+    assert postmarket_expiry <= local_naive_now() + timedelta(days=3, seconds=1)
 
     null_lifecycle_payload = _payload(
         source_report_id=158,
@@ -288,12 +288,12 @@ def test_service_defaults_lifecycle_and_preserves_explicit_values(isolated_db) -
         market_phase="intraday",
         metadata={"market_phase_summary": {"minutes_to_close": 30}},
     )
-    before_null_lifecycle = utc_naive_now()
+    before_null_lifecycle = local_naive_now()
     null_lifecycle = service.create_signal(null_lifecycle_payload)["item"]
     null_lifecycle_expiry = datetime.fromisoformat(null_lifecycle["expires_at"])
     assert null_lifecycle["horizon"] == "intraday"
     assert before_null_lifecycle + timedelta(minutes=29) <= null_lifecycle_expiry
-    assert null_lifecycle_expiry <= utc_naive_now() + timedelta(minutes=31)
+    assert null_lifecycle_expiry <= local_naive_now() + timedelta(minutes=31)
 
     swing = service.create_signal(
         _payload(
@@ -315,13 +315,14 @@ def test_service_defaults_lifecycle_and_preserves_explicit_values(isolated_db) -
         )
     )["item"]
     assert explicit["horizon"] == "1d"
-    assert explicit["expires_at"] == "2099-01-01T00:00:00"
+    # 输入为 UTC 的 2099-01-01T00:00:00Z，按本地（北京，UTC+8）语义落库。
+    assert explicit["expires_at"] == "2099-01-01T08:00:00"
 
     past = service.create_signal(
         _payload(
             source_report_id=156,
             trace_id="trace-lifecycle-past",
-            expires_at=(utc_naive_now() - timedelta(minutes=1)).isoformat(),
+            expires_at=(local_naive_now() - timedelta(minutes=1)).isoformat(),
         )
     )["item"]
     assert past["status"] == "expired"
@@ -342,7 +343,7 @@ def test_list_signals_lazily_backfills_analysis_history_signal(isolated_db) -> N
         row.created_at = report_created_at
         session.commit()
     service = DecisionSignalService(db_manager=isolated_db)
-    expected_created_at = service._coerce_history_created_at_to_utc_naive(report_created_at)
+    expected_created_at = service._coerce_history_created_at_to_local_naive(report_created_at)
 
     listed = service.list_signals(source_type="analysis", source_report_id=record_id)
 
@@ -466,7 +467,7 @@ def test_list_signals_backfill_uses_saved_intraday_ttl_metadata(
     created_offset,
     expected_ttl,
 ) -> None:
-    report_created_at = utc_naive_now().replace(microsecond=0) - created_offset
+    report_created_at = local_naive_now().replace(microsecond=0) - created_offset
     record_id = isolated_db.save_analysis_history(
         result=_history_result(),
         query_id=f"query-lazy-signal-ttl-{market_phase_summary['phase']}",
@@ -480,7 +481,7 @@ def test_list_signals_backfill_uses_saved_intraday_ttl_metadata(
         row.created_at = report_created_at
         session.commit()
     service = DecisionSignalService(db_manager=isolated_db)
-    expected_report_created_at = service._coerce_history_created_at_to_utc_naive(report_created_at)
+    expected_report_created_at = service._coerce_history_created_at_to_local_naive(report_created_at)
 
     listed = service.list_signals(source_type="analysis", source_report_id=record_id)
 
@@ -508,21 +509,21 @@ def test_list_signals_backfill_converts_naive_history_created_at_for_invalidatio
         context_snapshot={"market_phase_summary": {"phase": "postmarket"}},
         save_snapshot=True,
     )
-    report_created_at = utc_naive_now() - timedelta(hours=1)
+    report_created_at = local_naive_now() - timedelta(hours=1)
     with isolated_db.get_session() as session:
         row = session.query(AnalysisHistory).filter(AnalysisHistory.id == record_id).one()
         row.created_at = report_created_at
         session.commit()
     service = DecisionSignalService(db_manager=isolated_db)
 
-    def fake_coerce_history_created_at_to_utc_naive(value: datetime) -> datetime:
+    def fake_coerce_history_created_at_to_local_naive(value: datetime) -> datetime:
         assert value == report_created_at
         return value - timedelta(hours=8)
 
     monkeypatch.setattr(
         service,
-        "_coerce_history_created_at_to_utc_naive",
-        fake_coerce_history_created_at_to_utc_naive,
+        "_coerce_history_created_at_to_local_naive",
+        fake_coerce_history_created_at_to_local_naive,
     )
 
     newer_sell = service.create_signal(
@@ -559,7 +560,7 @@ def test_list_signals_invalidates_stale_backfill_when_newer_opposing_signal_exis
         context_snapshot={"market_phase_summary": {"phase": "postmarket"}},
         save_snapshot=True,
     )
-    report_created_at = utc_naive_now() - timedelta(hours=1)
+    report_created_at = local_naive_now() - timedelta(hours=1)
     with isolated_db.get_session() as session:
         row = session.query(AnalysisHistory).filter(AnalysisHistory.id == record_id).one()
         row.created_at = report_created_at
@@ -605,7 +606,7 @@ def test_list_signals_stale_backfill_invalidation_does_not_cross_profile(isolate
         context_snapshot={"market_phase_summary": {"phase": "postmarket"}},
         save_snapshot=True,
     )
-    report_created_at = utc_naive_now() - timedelta(days=1)
+    report_created_at = local_naive_now() - timedelta(days=1)
     with isolated_db.get_session() as session:
         row = session.query(AnalysisHistory).filter(AnalysisHistory.id == record_id).one()
         row.created_at = report_created_at
@@ -1382,7 +1383,7 @@ def test_service_expired_refresh_invalidates_later_opposing_active_signal(isolat
     refreshed = service.create_signal(
         {
             **buy_payload,
-            "expires_at": (utc_naive_now() + timedelta(days=1)).isoformat(),
+            "expires_at": (local_naive_now() + timedelta(days=1)).isoformat(),
         }
     )
 
@@ -1563,7 +1564,7 @@ def test_service_propagates_unexpected_invalidation_failures(isolated_db) -> Non
             return DecisionSignalCreateResult(
                 row=row,
                 created=True,
-                invalidation_reference_at=utc_naive_now(),
+                invalidation_reference_at=local_naive_now(),
             )
 
         def list_active_by_stock_actions(self, **_kwargs):

@@ -32,6 +32,7 @@ from src.market_phase_summary import (
     render_market_phase_summary,
 )
 from src.services.alert_service import AlertService
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER, AnalysisOwner
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.decision_signal_summary import (
     format_decision_signal_excerpt,
@@ -432,10 +433,14 @@ class AlertWorker:
         if identity is None:
             return None
         stock_code, market = identity
+        # 信号归属跟随告警规则的归属：用户规则写 user scope，
+        # 显式管理员/配置规则写 global，避免用户规则产出全局可见信号。
+        owner = self._decision_signal_owner(runtime_rule)
         latest = self.decision_signal_service.get_latest_active(
             stock_code=stock_code,
             market=market,
             limit=1,
+            owner=owner,
         )
         items = latest.get("items") if isinstance(latest, dict) else None
         if items:
@@ -447,10 +452,19 @@ class AlertWorker:
                 result,
                 stock_code=stock_code,
                 market=market,
-            )
+            ),
+            owner=owner,
         )
         item = created.get("item") if isinstance(created, dict) else None
         return summarize_decision_signal(item)
+
+    @staticmethod
+    def _decision_signal_owner(runtime_rule: RuntimeAlertRule) -> AnalysisOwner:
+        """Derive the signal owner from the alert rule that produced it."""
+        owner_id = getattr(runtime_rule, "owner_id", None)
+        if isinstance(owner_id, int) and not isinstance(owner_id, bool) and owner_id > 0:
+            return AnalysisOwner.user(owner_id)
+        return GLOBAL_ANALYSIS_OWNER
 
     def _symbol_identity_for_decision_signal(self, runtime_rule: RuntimeAlertRule) -> Optional[Tuple[str, str]]:
         rule = getattr(runtime_rule, "rule", runtime_rule)

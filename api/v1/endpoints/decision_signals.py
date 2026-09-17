@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from api.deps import get_request_portfolio_scope
+from api.deps import get_request_analysis_owner_context, get_request_portfolio_scope
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.decision_signals import (
     DecisionSignalCreateRequest,
@@ -26,6 +26,7 @@ from api.v1.schemas.decision_signals import (
     DecisionSignalReassessResponse,
     DecisionSignalStatusUpdateRequest,
 )
+from src.analysis_ownership import AnalysisOwner
 from src.portfolio_ownership import UNSET_PORTFOLIO_SCOPE
 from src.services.decision_signal_service import (
     DecisionSignalNotFoundError,
@@ -53,6 +54,16 @@ AUTH_RESPONSE = {
         "description": "未登录或会话无效",
     },
 }
+
+
+def _request_owner(request: Request) -> AnalysisOwner:
+    """Bind every decision-signal request to its canonical authenticated user.
+
+    Decision signals are derived from analysis reports, so they use the same
+    ``AnalysisOwner`` contract as ``analysis_history``. Missing or malformed
+    principals fail closed with 401 inside ``get_request_analysis_owner_context``.
+    """
+    return get_request_analysis_owner_context(request)
 
 
 def _bad_request(exc: Exception, *, error: str = "validation_error") -> HTTPException:
@@ -113,11 +124,15 @@ def _guardrail_blocked(exc: DecisionSignalReassessGuardrailBlockedError) -> HTTP
     ),
     operation_id="createDecisionSignal",
 )
-def create_signal(request: DecisionSignalCreateRequest) -> DecisionSignalMutationResponse:
+def create_signal(
+    request: DecisionSignalCreateRequest,
+    http_request: Request,
+) -> DecisionSignalMutationResponse:
     service = DecisionSignalService()
+    owner = _request_owner(http_request)
     try:
         payload = request.model_dump(exclude_unset=True)
-        return DecisionSignalMutationResponse(**service.create_signal(payload))
+        return DecisionSignalMutationResponse(**service.create_signal(payload, owner=owner))
     except DecisionSignalStorageError as exc:
         raise _internal_error("Create decision signal failed", exc)
     except ValueError as exc:
@@ -174,6 +189,7 @@ def list_signals(
     page_size: int = Query(20, ge=1, le=100),
 ) -> DecisionSignalListResponse:
     service = DecisionSignalService()
+    owner = _request_owner(request)
     try:
         return DecisionSignalListResponse(
             **service.list_signals(
@@ -193,6 +209,9 @@ def list_signals(
                 expires_to=expires_to,
                 holding_only=holding_only,
                 account_id=account_id,
+                # owner 隔离对所有请求恒定生效；portfolio_scope 只服务于
+                # holding_only 的“按持仓过滤”，不是资源归属边界。
+                owner=owner,
                 portfolio_scope=(
                     get_request_portfolio_scope(request)
                     if holding_only
@@ -233,6 +252,7 @@ def run_outcomes(
     http_request: Request,
 ) -> DecisionSignalOutcomeRunResponse:
     service = DecisionSignalOutcomeService()
+    owner = _request_owner(http_request)
     try:
         prepared = service.prepare_run_request(
             signal_id=request.signal_id,
@@ -244,6 +264,7 @@ def run_outcomes(
             source_type=request.source_type,
             status=request.status,
             limit=request.limit,
+            owner=owner,
         )
         FeatureQuotaService().reserve_for_request(http_request, 'decision_signal_outcomes')
         return DecisionSignalOutcomeRunResponse(
@@ -273,6 +294,7 @@ def run_outcomes(
     operation_id="listDecisionSignalOutcomes",
 )
 def list_outcomes(
+    request: Request,
     signal_id: Optional[int] = Query(None, gt=0),
     horizon: Optional[str] = Query(None),
     engine_version: Optional[str] = Query(None),
@@ -282,6 +304,7 @@ def list_outcomes(
     page_size: int = Query(20, ge=1, le=100),
 ) -> DecisionSignalOutcomeListResponse:
     service = DecisionSignalOutcomeService()
+    owner = _request_owner(request)
     try:
         return DecisionSignalOutcomeListResponse(
             **service.list_outcomes(
@@ -290,6 +313,7 @@ def list_outcomes(
                 engine_version=engine_version,
                 eval_status=eval_status,
                 outcome=outcome,
+                owner=owner,
                 page=page,
                 page_size=page_size,
             )
@@ -314,17 +338,20 @@ def list_outcomes(
     operation_id="getDecisionSignalOutcomeStats",
 )
 def get_outcome_stats(
+    request: Request,
     horizons: Optional[List[str]] = Query(None),
     engine_version: Optional[str] = Query(None),
     statuses: Optional[List[str]] = Query(None),
 ) -> DecisionSignalOutcomeStatsResponse:
     service = DecisionSignalOutcomeService()
+    owner = _request_owner(request)
     try:
         return DecisionSignalOutcomeStatsResponse(
             **service.get_stats(
                 horizons=horizons,
                 engine_version=engine_version,
                 statuses=statuses,
+                owner=owner,
             )
         )
     except ValueError as exc:
@@ -355,11 +382,13 @@ def reassess_signal(
     http_request: Request,
 ) -> DecisionSignalReassessResponse:
     service = DecisionSignalReassessService()
+    owner = _request_owner(http_request)
     try:
         prepared = service.prepare_reassess(
             source_report_id=request.source_report_id,
             decision_profile=request.decision_profile,
             persist=request.persist,
+            owner=owner,
         )
         FeatureQuotaService().reserve_for_request(http_request, 'decision_signal_reassess')
         return DecisionSignalReassessResponse(
@@ -394,16 +423,19 @@ def reassess_signal(
 )
 def get_latest_active(
     stock_code: str,
+    request: Request,
     market: Optional[str] = Query(None, description="Optional market filter: cn/hk/us/jp/kr/tw"),
     limit: int = Query(1, ge=1, le=100),
 ) -> DecisionSignalListResponse:
     service = DecisionSignalService()
+    owner = _request_owner(request)
     try:
         return DecisionSignalListResponse(
             **service.get_latest_active(
                 stock_code=stock_code,
                 market=market,
                 limit=limit,
+                owner=owner,
             )
         )
     except DecisionSignalStorageError as exc:
@@ -427,10 +459,11 @@ def get_latest_active(
     description="按 ID 查询单条 DecisionSignal；读取前会执行懒过期。",
     operation_id="getDecisionSignal",
 )
-def get_signal(signal_id: int) -> DecisionSignalItem:
+def get_signal(signal_id: int, request: Request) -> DecisionSignalItem:
     service = DecisionSignalService()
+    owner = _request_owner(request)
     try:
-        return DecisionSignalItem(**service.get_signal(signal_id))
+        return DecisionSignalItem(**service.get_signal(signal_id, owner=owner))
     except DecisionSignalNotFoundError as exc:
         raise _not_found(exc)
     except DecisionSignalStorageError as exc:
@@ -452,10 +485,13 @@ def get_signal(signal_id: int) -> DecisionSignalItem:
     description="返回指定 signal_id 在当前 engine_version 下的后验结果。",
     operation_id="listDecisionSignalOutcomesBySignal",
 )
-def list_signal_outcomes(signal_id: int) -> DecisionSignalOutcomeListResponse:
+def list_signal_outcomes(signal_id: int, request: Request) -> DecisionSignalOutcomeListResponse:
     service = DecisionSignalOutcomeService()
+    owner = _request_owner(request)
     try:
-        return DecisionSignalOutcomeListResponse(**service.list_signal_outcomes(signal_id))
+        return DecisionSignalOutcomeListResponse(
+            **service.list_signal_outcomes(signal_id, owner=owner)
+        )
     except DecisionSignalNotFoundError as exc:
         raise _not_found(exc)
     except Exception as exc:
@@ -475,10 +511,11 @@ def list_signal_outcomes(signal_id: int) -> DecisionSignalOutcomeListResponse:
     description="没有反馈时返回 feedback_value=null；信号不存在时返回 404。",
     operation_id="getDecisionSignalFeedback",
 )
-def get_feedback(signal_id: int) -> DecisionSignalFeedbackItem:
+def get_feedback(signal_id: int, request: Request) -> DecisionSignalFeedbackItem:
     service = DecisionSignalOutcomeService()
+    owner = _request_owner(request)
     try:
-        return DecisionSignalFeedbackItem(**service.get_feedback(signal_id))
+        return DecisionSignalFeedbackItem(**service.get_feedback(signal_id, owner=owner))
     except DecisionSignalNotFoundError as exc:
         raise _not_found(exc)
     except Exception as exc:
@@ -499,8 +536,13 @@ def get_feedback(signal_id: int) -> DecisionSignalFeedbackItem:
     description="按 signal_id upsert 最新 useful/not_useful 反馈。",
     operation_id="putDecisionSignalFeedback",
 )
-def put_feedback(signal_id: int, request: DecisionSignalFeedbackRequest) -> DecisionSignalFeedbackItem:
+def put_feedback(
+    signal_id: int,
+    request: DecisionSignalFeedbackRequest,
+    http_request: Request,
+) -> DecisionSignalFeedbackItem:
     service = DecisionSignalOutcomeService()
+    owner = _request_owner(http_request)
     try:
         return DecisionSignalFeedbackItem(
             **service.put_feedback(
@@ -509,6 +551,7 @@ def put_feedback(signal_id: int, request: DecisionSignalFeedbackRequest) -> Deci
                 reason_code=request.reason_code,
                 note=request.note,
                 source=request.source,
+                owner=owner,
             )
         )
     except DecisionSignalNotFoundError as exc:
@@ -537,8 +580,13 @@ def put_feedback(signal_id: int, request: DecisionSignalFeedbackRequest) -> Deci
     ),
     operation_id="updateDecisionSignalStatus",
 )
-def update_status(signal_id: int, request: DecisionSignalStatusUpdateRequest) -> DecisionSignalItem:
+def update_status(
+    signal_id: int,
+    request: DecisionSignalStatusUpdateRequest,
+    http_request: Request,
+) -> DecisionSignalItem:
     service = DecisionSignalService()
+    owner = _request_owner(http_request)
     try:
         return DecisionSignalItem(
             **service.update_status(
@@ -546,6 +594,7 @@ def update_status(signal_id: int, request: DecisionSignalStatusUpdateRequest) ->
                 status=request.status,
                 metadata=request.metadata,
                 replace_metadata="metadata" in request.model_fields_set,
+                owner=owner,
             )
         )
     except DecisionSignalNotFoundError as exc:

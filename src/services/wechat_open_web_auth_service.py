@@ -16,6 +16,7 @@ from src.config import Config, get_config
 from src.repositories.auth_identity_repo import AuthIdentityConflictError
 from src.repositories.web_user_auth_repo import WebUserAuthRepository
 from src.services.identity_service import IdentityService
+from src.storage import local_naive_now
 
 WECHAT_OPEN_WEB_AUTHORIZE_URL = "https://open.weixin.qq.com/connect/qrconnect"
 WECHAT_OPEN_WEB_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
@@ -64,7 +65,7 @@ class WechatOpenWebAuthService:
         app_id, _, redirect_uri = self._oauth_config()
         state = secrets.token_urlsafe(32)
         browser_binding = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(
+        expires_at = local_naive_now() + timedelta(
             seconds=self.config.wechat_open_web_state_ttl_seconds
         )
         self.repository.create_wechat_login_transaction(

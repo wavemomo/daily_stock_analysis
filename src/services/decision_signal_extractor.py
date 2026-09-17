@@ -9,6 +9,7 @@ from typing import Any, Dict, Literal, Mapping, Optional
 
 from data_provider.base import normalize_stock_code
 
+from src.analysis_ownership import AnalysisOwner
 from src.analyzer import AnalysisResult
 from src.core.trading_calendar import get_market_for_stock
 from src.schemas.decision_action import build_action_fields, normalize_decision_action
@@ -216,6 +217,7 @@ def extract_and_persist_from_analysis_result(
     profile_source: ProfileSource,
     service: Optional[DecisionSignalService] = None,
     market_override: Optional[str] = None,
+    owner: Optional[AnalysisOwner] = None,
 ) -> Dict[str, Any] | None:
     """Best-effort extract and persist a DecisionSignal from an analysis result."""
 
@@ -234,7 +236,7 @@ def extract_and_persist_from_analysis_result(
         if payload is None:
             return None
         writer = service or DecisionSignalService()
-        return writer.create_signal(payload)
+        return writer.create_signal(payload, owner=owner)
     except Exception as exc:
         logger.warning(
             "Decision signal extraction failed: query_id=%s stock_code=%s error=%s",

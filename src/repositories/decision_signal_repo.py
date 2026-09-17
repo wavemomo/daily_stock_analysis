@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, desc, func, or_, select
 
+from src.analysis_ownership import AnalysisOwner
 from src.schemas.decision_profile import (
     DECISION_PROFILE_FILTER_ALL,
     DecisionProfileFilter,
@@ -16,9 +17,32 @@ from src.schemas.decision_profile import (
 from src.storage import (
     DatabaseManager,
     DecisionSignalRecord,
-    to_utc_naive_datetime,
-    utc_naive_now,
+    to_local_naive_datetime,
+    local_naive_now,
 )
+
+
+def decision_signal_owner_conditions(owner: Optional[AnalysisOwner]) -> List[Any]:
+    """Return owner predicates with the same policy as analysis history.
+
+    ``owner=None`` is reserved for internal direct-call compatibility paths and
+    applies no filter. Authenticated API paths must always pass a trusted owner.
+    A user-scoped owner sees only its own rows; the explicit global owner also
+    sees pre-migration ``NULL`` rows, which must never leak to individual users.
+    """
+    if owner is None:
+        return []
+    if owner.scope == "user":
+        return [
+            DecisionSignalRecord.owner_scope == "user",
+            DecisionSignalRecord.owner_user_id == owner.user_id,
+        ]
+    return [
+        or_(
+            DecisionSignalRecord.owner_scope == "global",
+            DecisionSignalRecord.owner_scope.is_(None),
+        )
+    ]
 
 
 @dataclass
@@ -43,6 +67,9 @@ class DecisionSignalRepository:
     _IMMUTABLE_REFRESH_FIELDS = frozenset({
         "id",
         "created_at",
+        # 归属一旦落库不可被后续 refresh 改写，否则同一行可能被移交给别的用户。
+        "owner_user_id",
+        "owner_scope",
         "source_report_id",
         "source_type",
         "source_agent",
@@ -149,11 +176,18 @@ class DecisionSignalRepository:
                 invalidation_reference_at=row.created_at,
             )
 
-    def get(self, signal_id: int) -> Optional[DecisionSignalRecord]:
+    def get(
+        self,
+        signal_id: int,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ) -> Optional[DecisionSignalRecord]:
         self.expire_due_signals()
+        conditions = [DecisionSignalRecord.id == signal_id]
+        conditions.extend(decision_signal_owner_conditions(owner))
         with self.db.get_session() as session:
             return session.execute(
-                select(DecisionSignalRecord).where(DecisionSignalRecord.id == signal_id).limit(1)
+                select(DecisionSignalRecord).where(and_(*conditions)).limit(1)
             ).scalar_one_or_none()
 
     def list(
@@ -174,6 +208,7 @@ class DecisionSignalRepository:
         created_to: Optional[datetime] = None,
         expires_from: Optional[datetime] = None,
         expires_to: Optional[datetime] = None,
+        owner: Optional[AnalysisOwner] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> Tuple[List[DecisionSignalRecord], int]:
@@ -199,6 +234,7 @@ class DecisionSignalRepository:
             expires_from=expires_from,
             expires_to=expires_to,
         )
+        conditions = list(conditions) + decision_signal_owner_conditions(owner)
         where_clause = and_(*conditions) if conditions else True
         safe_page = max(1, int(page))
         safe_page_size = max(1, min(int(page_size), 100))
@@ -225,6 +261,7 @@ class DecisionSignalRepository:
         stock_codes: List[str],
         market: Optional[str] = None,
         limit: int = 1,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[DecisionSignalRecord]:
         self.expire_due_signals()
         safe_limit = max(1, min(int(limit), 100))
@@ -234,6 +271,7 @@ class DecisionSignalRepository:
         ]
         if market:
             conditions.append(DecisionSignalRecord.market == market)
+        conditions.extend(decision_signal_owner_conditions(owner))
         with self.db.get_session() as session:
             rows = session.execute(
                 select(DecisionSignalRecord)
@@ -251,6 +289,7 @@ class DecisionSignalRepository:
         actions: List[str],
         decision_profile: Optional[str],
         exclude_signal_id: Optional[int] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[DecisionSignalRecord]:
         self.expire_due_signals()
         if not actions:
@@ -264,6 +303,7 @@ class DecisionSignalRepository:
         ]
         if exclude_signal_id is not None:
             conditions.append(DecisionSignalRecord.id != exclude_signal_id)
+        conditions.extend(decision_signal_owner_conditions(owner))
         with self.db.get_session() as session:
             rows = session.execute(
                 select(DecisionSignalRecord)
@@ -279,23 +319,26 @@ class DecisionSignalRepository:
         status: str,
         metadata_json: Optional[str] = None,
         replace_metadata: bool = False,
+        owner: Optional[AnalysisOwner] = None,
     ) -> Optional[DecisionSignalRecord]:
+        conditions = [DecisionSignalRecord.id == signal_id]
+        conditions.extend(decision_signal_owner_conditions(owner))
         with self.db.get_session() as session:
             row = session.execute(
-                select(DecisionSignalRecord).where(DecisionSignalRecord.id == signal_id).limit(1)
+                select(DecisionSignalRecord).where(and_(*conditions)).limit(1)
             ).scalar_one_or_none()
             if row is None:
                 return None
             row.status = status
             if replace_metadata:
                 row.metadata_json = metadata_json
-            row.updated_at = utc_naive_now()
+            row.updated_at = local_naive_now()
             session.commit()
             session.refresh(row)
             return row
 
     def expire_due_signals(self, now: Optional[datetime] = None) -> int:
-        now_value = to_utc_naive_datetime(now) if now is not None else utc_naive_now()
+        now_value = to_local_naive_datetime(now) if now is not None else local_naive_now()
         with self.db.get_session() as session:
             rows = session.execute(
                 select(DecisionSignalRecord).where(
@@ -316,14 +359,14 @@ class DecisionSignalRepository:
         for field_name in ("expires_at", "created_at", "updated_at"):
             value = normalized.get(field_name)
             if isinstance(value, datetime):
-                normalized[field_name] = to_utc_naive_datetime(value)
+                normalized[field_name] = to_local_naive_datetime(value)
         return normalized
 
     @staticmethod
     def _normalize_optional_datetime(value: Optional[datetime]) -> Optional[datetime]:
         if value is None:
             return None
-        return to_utc_naive_datetime(value)
+        return to_local_naive_datetime(value)
 
     @classmethod
     def _should_refresh_existing(cls, existing: DecisionSignalRecord, fields: Dict[str, Any]) -> bool:
@@ -332,7 +375,7 @@ class DecisionSignalRepository:
             existing.status == "expired"
             and fields.get("status") == "active"
             and expires_at is not None
-            and expires_at > utc_naive_now()
+            and expires_at > local_naive_now()
         )
 
     @classmethod
@@ -341,7 +384,19 @@ class DecisionSignalRepository:
             if field_name in cls._IMMUTABLE_REFRESH_FIELDS:
                 continue
             setattr(existing, field_name, value)
-        existing.updated_at = utc_naive_now()
+        existing.updated_at = local_naive_now()
+
+    @staticmethod
+    def _owner_identity_conditions(fields: Dict[str, Any]) -> List[Any]:
+        """Scope idempotency lookups to the owner of the incoming signal.
+
+        Without this, two different users analysing the same stock could dedup
+        into a single shared row and each would then see the other's signal.
+        """
+        return [
+            DecisionSignalRecord.owner_scope.is_not_distinct_from(fields.get("owner_scope")),
+            DecisionSignalRecord.owner_user_id.is_not_distinct_from(fields.get("owner_user_id")),
+        ]
 
     @staticmethod
     def _find_existing_in_session(*, session: Any, fields: Dict[str, Any]) -> Optional[DecisionSignalRecord]:
@@ -378,6 +433,7 @@ class DecisionSignalRepository:
             ]
         else:
             return None
+        conditions.extend(DecisionSignalRepository._owner_identity_conditions(fields))
         return session.execute(
             select(DecisionSignalRecord)
             .where(and_(*conditions))
@@ -409,6 +465,7 @@ class DecisionSignalRepository:
             conditions.append(DecisionSignalRecord.source_report_id == source_report_id)
         else:
             conditions.append(DecisionSignalRecord.trace_id == trace_id)
+        conditions.extend(cls._owner_identity_conditions(fields))
 
         candidates = session.execute(
             select(DecisionSignalRecord)
@@ -467,7 +524,7 @@ class DecisionSignalRepository:
             existing.market_phase = new_phase
             changed = True
         if changed:
-            existing.updated_at = utc_naive_now()
+            existing.updated_at = local_naive_now()
         return changed
 
     @classmethod

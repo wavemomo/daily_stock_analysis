@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from sqlalchemy import and_, delete, desc, func, select
 
-from src.storage import DatabaseManager, MiniappWatchlistRecord
+from src.storage import DatabaseManager, MiniappWatchlistRecord, local_naive_now
 
 
 class MiniappWatchlistRepository:
@@ -74,11 +74,11 @@ class MiniappWatchlistRepository:
                 # 已存在则仅在提供了名称且原名称为空时补齐展示名，保持幂等。
                 if stock_name and not existing.stock_name:
                     existing.stock_name = stock_name
-                    existing.updated_at = datetime.utcnow()
+                    existing.updated_at = local_naive_now()
                     session.commit()
                     session.refresh(existing)
                 return existing
-            now = datetime.utcnow()
+            now = local_naive_now()
             row = MiniappWatchlistRecord(
                 user_id=user_id,
                 stock_code=stock_code,

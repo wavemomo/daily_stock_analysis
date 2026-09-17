@@ -12,7 +12,7 @@ from sqlalchemy import inspect
 from src.config import Config
 from src.repositories.decision_signal_repo import DecisionSignalRepository
 from src.schemas.decision_profile import normalize_decision_profile_filter
-from src.storage import Base, DatabaseManager, DecisionSignalRecord, utc_naive_now
+from src.storage import Base, DatabaseManager, DecisionSignalRecord, local_naive_now
 
 
 @pytest.fixture()
@@ -377,13 +377,13 @@ def test_list_latest_status_update_and_lazy_expire(isolated_db) -> None:
             source_report_id=2003,
             trace_id="trace-2003",
             action="alert",
-            expires_at=utc_naive_now() - timedelta(minutes=1),
+            expires_at=local_naive_now() - timedelta(minutes=1),
         )
     )
 
     with isolated_db.session_scope() as session:
         session.query(DecisionSignalRecord).filter_by(id=old_row.id).update(
-            {"created_at": utc_naive_now() - timedelta(days=1)}
+            {"created_at": local_naive_now() - timedelta(days=1)}
         )
 
     rows, total = repo.list(stock_codes=["600519"], action="buy", page=1, page_size=10)
@@ -445,9 +445,10 @@ def test_create_and_list_normalize_aware_datetimes(isolated_db) -> None:
         )
     )
 
-    assert row.created_at == datetime(2026, 6, 8, 20, 0)
-    assert row.updated_at == datetime(2026, 6, 8, 20, 0)
-    assert row.expires_at == datetime(2098, 12, 31, 16, 0)
+    # 带时区输入统一归一化为本地（北京，UTC+8）naive 时间。
+    assert row.created_at == datetime(2026, 6, 9, 4, 0)
+    assert row.updated_at == datetime(2026, 6, 9, 4, 0)
+    assert row.expires_at == datetime(2099, 1, 1, 0, 0)
     assert row.created_at.tzinfo is None
     assert row.updated_at.tzinfo is None
     assert row.expires_at.tzinfo is None
@@ -469,7 +470,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_report_id=2301,
             trace_id="trace-refresh-original",
             status="expired",
-            expires_at=utc_naive_now() - timedelta(days=1),
+            expires_at=local_naive_now() - timedelta(days=1),
             reason="old reason",
             target_price=1800,
         )
@@ -483,7 +484,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_agent="new-agent",
             trigger_source="alert",
             status="active",
-            expires_at=utc_naive_now() + timedelta(days=2),
+            expires_at=local_naive_now() + timedelta(days=2),
             reason="fresh reason",
             target_price=1900,
         )
@@ -509,7 +510,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_agent="new-agent",
             trigger_source="alert",
             status="active",
-            expires_at=utc_naive_now() + timedelta(days=2),
+            expires_at=local_naive_now() + timedelta(days=2),
             reason="agent reason",
             target_price=1950,
         )
@@ -523,7 +524,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_report_id=2302,
             trace_id="trace-refresh-past",
             status="expired",
-            expires_at=utc_naive_now() - timedelta(days=1),
+            expires_at=local_naive_now() - timedelta(days=1),
             reason="past old",
         )
     )
@@ -532,7 +533,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_report_id=2302,
             trace_id="trace-refresh-past-new",
             status="active",
-            expires_at=utc_naive_now() - timedelta(minutes=1),
+            expires_at=local_naive_now() - timedelta(minutes=1),
             reason="past fresh",
         )
     )
@@ -547,7 +548,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_report_id=2303,
             trace_id="trace-refresh-closed",
             status="closed",
-            expires_at=utc_naive_now() - timedelta(days=1),
+            expires_at=local_naive_now() - timedelta(days=1),
             reason="closed old",
         )
     )
@@ -556,7 +557,7 @@ def test_create_if_absent_refreshes_expired_same_key_only_with_future_active(iso
             source_report_id=2303,
             trace_id="trace-refresh-closed-new",
             status="active",
-            expires_at=utc_naive_now() + timedelta(days=2),
+            expires_at=local_naive_now() + timedelta(days=2),
             reason="closed fresh",
         )
     )
@@ -575,7 +576,7 @@ def test_create_if_absent_expired_refresh_keeps_profile_identity(isolated_db) ->
             trace_id="trace-refresh-profile-balanced",
             decision_profile="balanced",
             status="expired",
-            expires_at=utc_naive_now() - timedelta(days=1),
+            expires_at=local_naive_now() - timedelta(days=1),
             reason="old balanced",
         )
     )
@@ -586,7 +587,7 @@ def test_create_if_absent_expired_refresh_keeps_profile_identity(isolated_db) ->
             trace_id="trace-refresh-profile-aggressive",
             decision_profile="aggressive",
             status="active",
-            expires_at=utc_naive_now() + timedelta(days=1),
+            expires_at=local_naive_now() + timedelta(days=1),
             reason="new aggressive",
         )
     )
@@ -596,7 +597,7 @@ def test_create_if_absent_expired_refresh_keeps_profile_identity(isolated_db) ->
             trace_id="trace-refresh-profile-balanced-new",
             decision_profile="balanced",
             status="active",
-            expires_at=utc_naive_now() + timedelta(days=1),
+            expires_at=local_naive_now() + timedelta(days=1),
             reason="new balanced",
         )
     )

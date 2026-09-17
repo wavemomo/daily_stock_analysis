@@ -35,6 +35,32 @@ class MiniappProfileUpdateRequest(BaseModel):
     nickname: Optional[str] = Field(None, max_length=64)
 
 
+class MiniappEmailCodeRequest(BaseModel):
+    """请求向目标邮箱发送 Web 登录绑定验证码。"""
+
+    email: str = Field(..., min_length=3, max_length=254)
+
+
+class MiniappEmailBindRequest(BaseModel):
+    """提交邮箱 + 验证码 + 密码，绑定 Web 端邮箱密码登录。"""
+
+    email: str = Field(..., min_length=3, max_length=254)
+    code: str = Field(..., min_length=1, max_length=16)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class MiniappEmailBindingResponse(BaseModel):
+    """当前用户的 Web 邮箱登录绑定状态（仅本人可见）。"""
+
+    email: Optional[str] = None
+    email_verified: bool = False
+    has_password: bool = False
+
+
+class MiniappEmailCodeSentResponse(BaseModel):
+    sent: bool = True
+
+
 class MiniappIdentityBindApproveRequest(BaseModel):
     """小程序当前用户批准一个 Web 端发起的显式身份绑定挑战。"""
 

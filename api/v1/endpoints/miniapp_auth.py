@@ -8,12 +8,22 @@ from fastapi.responses import FileResponse
 
 from api.deps import get_current_miniapp_principal, require_permission
 from api.v1.schemas.miniapp import (
+    MiniappEmailBindRequest,
+    MiniappEmailBindingResponse,
+    MiniappEmailCodeRequest,
+    MiniappEmailCodeSentResponse,
     MiniappLoginRequest,
     MiniappLoginResponse,
     MiniappProfileUpdateRequest,
     MiniappUserItem,
     MiniappIdentityBindApproveRequest,
     MiniappIdentityBindApproveResponse,
+)
+from src.services.email_password_auth_service import (
+    EmailAlreadyBoundError,
+    EmailPasswordAuthError,
+    EmailPasswordAuthService,
+    EmailPasswordConfigurationError,
 )
 from src.services.web_user_auth_service import WebUserAuthService
 from src.services.wechat_miniapp_auth_service import (
@@ -110,6 +120,72 @@ def get_public_avatar(filename: str) -> FileResponse:
             "Cache-Control": "public, max-age=31536000, immutable",
             "X-Content-Type-Options": "nosniff",
         },
+    )
+
+
+@router.get(
+    "/email",
+    response_model=MiniappEmailBindingResponse,
+    summary="当前用户的 Web 邮箱登录绑定状态",
+)
+def get_email_binding(
+    principal: MiniappPrincipal = Depends(require_permission('account.self')),
+) -> MiniappEmailBindingResponse:
+    status_ = EmailPasswordAuthService().get_binding_status(int(principal.user.id))
+    return MiniappEmailBindingResponse(
+        email=status_.email,
+        email_verified=status_.email_verified,
+        has_password=status_.has_password,
+    )
+
+
+@router.post(
+    "/email/request-code",
+    response_model=MiniappEmailCodeSentResponse,
+    summary="发送 Web 邮箱登录绑定验证码",
+)
+def request_email_code(
+    request: MiniappEmailCodeRequest,
+    principal: MiniappPrincipal = Depends(require_permission('account.self')),
+) -> MiniappEmailCodeSentResponse:
+    try:
+        EmailPasswordAuthService().request_email_verification(
+            user_id=int(principal.user.id),
+            email=request.email,
+        )
+    except EmailPasswordConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except EmailAlreadyBoundError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except EmailPasswordAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return MiniappEmailCodeSentResponse(sent=True)
+
+
+@router.post(
+    "/email/bind",
+    response_model=MiniappEmailBindingResponse,
+    summary="绑定 Web 邮箱密码登录（重复绑定即重置密码）",
+)
+def bind_email(
+    request: MiniappEmailBindRequest,
+    principal: MiniappPrincipal = Depends(require_permission('account.self')),
+) -> MiniappEmailBindingResponse:
+    try:
+        binding = EmailPasswordAuthService().bind_email_password(
+            user_id=int(principal.user.id),
+            email=request.email,
+            code=request.code,
+            password=request.password,
+        )
+    except EmailAlreadyBoundError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except EmailPasswordAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return MiniappEmailBindingResponse(
+        email=binding.email,
+        email_verified=binding.email_verified,
+        has_password=binding.has_password,
     )
 
 

@@ -21,13 +21,14 @@ except ModuleNotFoundError:
     sys.modules["litellm"] = MagicMock()
 
 from api.app import create_app
+from src.analysis_ownership import AnalysisOwner
 from src.config import Config
 from src.portfolio_ownership import PortfolioScope
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import PortfolioBusyError, PortfolioService
-from src.storage import DatabaseManager
+from src.storage import DatabaseManager, MiniappUserRecord
 
 
 class PortfolioPr2TestCase(unittest.TestCase):
@@ -70,6 +71,15 @@ class PortfolioPr2TestCase(unittest.TestCase):
         )
         self.auth_patch.start()
         self.db = DatabaseManager.get_instance()
+        # 决策信号的 owner_user_id 外键指向 users，夹具需要一个真实用户行。
+        with self.db.get_session() as session:
+            session.add(
+                MiniappUserRecord(
+                    id=self.principal.user.id,
+                    openid=f"portfolio-pr2-owner-{self.principal.user.id}",
+                )
+            )
+            session.commit()
         self.service = PortfolioService()
         self.import_service = PortfolioImportService(portfolio_service=self.service)
         self.risk_service = PortfolioRiskService(portfolio_service=self.service)
@@ -92,6 +102,11 @@ class PortfolioPr2TestCase(unittest.TestCase):
     @property
     def portfolio_scope(self) -> PortfolioScope:
         return PortfolioScope.user(str(self.principal.user.id))
+
+    @property
+    def analysis_owner(self) -> AnalysisOwner:
+        """Decision signals are owner-scoped; fixtures must write as the request user."""
+        return AnalysisOwner.user(self.principal.user.id)
 
     def _create_account(self, **kwargs):
         return self.service.create_account(**kwargs, portfolio_scope=self.portfolio_scope)
@@ -157,7 +172,7 @@ class PortfolioPr2TestCase(unittest.TestCase):
             "status": "active",
         }
         payload.update(overrides)
-        return DecisionSignalService().create_signal(payload)["item"]
+        return DecisionSignalService().create_signal(payload, owner=self.analysis_owner)["item"]
 
     @staticmethod
     def _csv_bytes(with_trade_uid: bool = True) -> bytes:

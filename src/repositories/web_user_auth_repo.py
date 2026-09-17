@@ -14,6 +14,7 @@ from src.storage import (
     MiniappUserRecord,
     WebUserSessionRecord,
     WebWechatLoginTransactionRecord,
+    local_naive_now,
 )
 
 IdentityBindState = Literal["pending", "approved", "conflict", "invalid"]
@@ -34,7 +35,7 @@ class WebUserAuthRepository:
         expires_at: datetime,
     ) -> None:
         """创建短期 state；仅保存摘要，且清理过期记录。"""
-        now = datetime.utcnow()
+        now = local_naive_now()
 
         def write(session):
             session.execute(
@@ -62,7 +63,7 @@ class WebUserAuthRepository:
         now: Optional[datetime] = None,
     ) -> Optional[str]:
         """原子校验并消费 OAuth state，返回当初保存的 callback URI。"""
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
 
         def write(session):
             statement = (
@@ -90,7 +91,7 @@ class WebUserAuthRepository:
         now: Optional[datetime] = None,
     ) -> bool:
         """仅为活跃 canonical user 创建浏览器会话。"""
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
 
         def write(session):
             user = session.execute(
@@ -123,7 +124,7 @@ class WebUserAuthRepository:
         expires_at: datetime,
     ) -> bool:
         """创建由当前 Web user 发起的短期显式绑定挑战。"""
-        now = datetime.utcnow()
+        now = local_naive_now()
 
         def write(session):
             session.execute(
@@ -161,7 +162,7 @@ class WebUserAuthRepository:
         now: Optional[datetime] = None,
     ) -> Optional[datetime]:
         """将挑战与 Bearer 当前用户原子绑定；客户端不得指定请求用户。"""
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
 
         def write(session):
             approved_user = session.execute(
@@ -201,7 +202,7 @@ class WebUserAuthRepository:
         now: Optional[datetime] = None,
     ) -> IdentityBindState:
         """消费已批准 challenge，拒绝对两个 canonical users 静默合并。"""
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
 
         def write(session):
             transaction = session.execute(
@@ -234,7 +235,7 @@ class WebUserAuthRepository:
         *,
         now: Optional[datetime] = None,
     ) -> Optional[MiniappUserRecord]:
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
         with self.db.get_session() as session:
             return session.execute(
                 select(MiniappUserRecord)
@@ -249,7 +250,7 @@ class WebUserAuthRepository:
             ).scalar_one_or_none()
 
     def revoke_session(self, token_hash: str, *, now: Optional[datetime] = None) -> bool:
-        current = now or datetime.utcnow()
+        current = now or local_naive_now()
 
         def write(session):
             row = session.execute(

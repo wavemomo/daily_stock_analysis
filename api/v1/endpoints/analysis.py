@@ -46,6 +46,9 @@ from api.v1.schemas.analysis import (
     DuplicateTaskErrorResponse,
     MarketReviewRequest,
     MarketReviewAccepted,
+    PublicReportItem,
+    PublicReportListResponse,
+    PublicReportDetailResponse,
 )
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.history import (
@@ -1792,4 +1795,139 @@ def _build_analysis_report(
         summary=summary,
         strategy=strategy,
         details=details
+    )
+
+
+# ============================================================
+# 报告展览（跨用户，仅当天个股报告，不含大盘复盘）
+# ============================================================
+
+_GALLERY_MAX_LIMIT = 50
+
+
+def _gallery_owner_name(nickname: Optional[str]) -> Optional[str]:
+    """展示生成者昵称；仅昵称，绝不返回 openid/unionid 等身份标识。"""
+    text = (nickname or "").strip()
+    return text or None
+
+
+@router.get(
+    "/gallery",
+    response_model=PublicReportListResponse,
+    summary="报告展览：所有用户当天生成的个股报告（可搜索）",
+    description="跨用户列出当天生成的个股分析报告，排除大盘复盘；支持按股票代码或名称搜索。",
+)
+def get_report_gallery(
+    search: Optional[str] = Query(None, description="按股票代码或名称模糊搜索"),
+    page: int = Query(1, ge=1, description="页码（从 1 开始）"),
+    limit: int = Query(20, ge=1, le=_GALLERY_MAX_LIMIT, description="每页数量"),
+) -> PublicReportListResponse:
+    from src.storage import DatabaseManager, local_naive_now
+    from src.services.history_service import HistoryService
+
+    db = DatabaseManager.get_instance()
+    today = local_naive_now().date()
+    offset = (page - 1) * limit
+    try:
+        records, total, nicknames = db.get_public_stock_reports_paginated(
+            search=search,
+            on_date=today,
+            offset=offset,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.error("查询报告展览列表失败: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": "查询报告展览失败"},
+        )
+
+    items = []
+    for record in records:
+        owner_id = getattr(record, "owner_user_id", None)
+        items.append(
+            PublicReportItem(
+                id=int(record.id),
+                stock_code=HistoryService._display_stock_code(record.code),
+                stock_name=getattr(record, "name", None),
+                report_type=getattr(record, "report_type", None),
+                sentiment_score=getattr(record, "sentiment_score", None),
+                operation_advice=getattr(record, "operation_advice", None),
+                analysis_summary=getattr(record, "analysis_summary", None),
+                owner_name=_gallery_owner_name(nicknames.get(owner_id) if owner_id else None),
+                created_at=HistoryService._serialize_created_at(getattr(record, "created_at", None)),
+            )
+        )
+
+    return PublicReportListResponse(
+        total=total,
+        page=page,
+        limit=limit,
+        date=today.isoformat(),
+        items=items,
+    )
+
+
+@router.get(
+    "/gallery/{record_id}",
+    response_model=PublicReportDetailResponse,
+    responses={404: {"description": "报告不存在或不在展览范围内", "model": ErrorResponse}},
+    summary="报告展览：查看当天个股报告全文",
+    description="按主键读取当天生成的个股报告 Markdown 全文（跨用户可见，排除大盘复盘）。",
+)
+def get_report_gallery_detail(record_id: int) -> PublicReportDetailResponse:
+    from src.storage import DatabaseManager
+    from src.services.history_service import (
+        HistoryService,
+        MarkdownReportGenerationError,
+    )
+
+    db = DatabaseManager.get_instance()
+    record = db.get_public_stock_report_by_id(record_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "not_found", "message": "报告不存在或不在展览范围内"},
+        )
+
+    # 用记录自身的 owner 复用既有渲染逻辑；展览报告本身即为公开内容。
+    owner = AnalysisOwner.from_legacy(
+        getattr(record, "owner_scope", None),
+        getattr(record, "owner_user_id", None),
+        allow_unscoped=True,
+    ) or AnalysisOwner.global_owner()
+    service = HistoryService(db, owner=owner)
+    try:
+        content = service.get_markdown_report(str(record.id))
+    except MarkdownReportGenerationError as exc:
+        logger.error("生成展览报告全文失败 record_id=%s: %s", record_id, exc.message)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "generation_failed", "message": "生成报告全文失败"},
+        )
+    if not content:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "not_found", "message": "报告内容为空"},
+        )
+
+    owner_name = None
+    owner_id = getattr(record, "owner_user_id", None)
+    if owner_id:
+        try:
+            from src.repositories.miniapp_user_repo import MiniappUserRepository
+
+            user = MiniappUserRepository(db).get_user_by_id(int(owner_id))
+            owner_name = _gallery_owner_name(getattr(user, "nickname", None)) if user else None
+        except Exception:
+            owner_name = None
+
+    return PublicReportDetailResponse(
+        id=int(record.id),
+        stock_code=HistoryService._display_stock_code(record.code),
+        stock_name=getattr(record, "name", None),
+        report_type=getattr(record, "report_type", None),
+        owner_name=owner_name,
+        created_at=HistoryService._serialize_created_at(getattr(record, "created_at", None)),
+        content=content,
     )

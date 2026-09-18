@@ -3663,6 +3663,30 @@ class StockAnalysisPipeline:
         
         return results
 
+    def _resolve_owner_email_receivers(self) -> Optional[List[str]]:
+        """按报告 owner 解析邮件收件人。
+
+        - 全局 owner（定时任务/大盘复盘/后台）：返回 None，沿用全局或分组收件人。
+        - 用户 owner：返回该用户"报告接收邮箱"列表；无绑定邮箱或已关闭"报告发送到
+          邮箱"开关时返回空列表（表示跳过邮件，且绝不回退到全局收件人）。
+
+        解析失败一律 fail-closed 返回空列表，避免把某用户的报告误发到全局管理员邮箱。
+        """
+        owner = getattr(self, "owner", None)
+        if owner is None or getattr(owner, "scope", None) != "user":
+            return None
+        user_id = getattr(owner, "user_id", None)
+        if not user_id:
+            return []
+        try:
+            from src.repositories.email_password_repo import EmailPasswordRepository
+
+            target = EmailPasswordRepository().get_report_email_target(int(user_id))
+        except Exception as exc:  # noqa: BLE001 - 邮箱解析失败不应影响主流程，且不回退全局
+            logger.warning("解析用户报告接收邮箱失败，跳过该用户邮件通知: %s", exc)
+            return []
+        return [target] if target else []
+
     def _send_single_stock_notification(
         self,
         result: AnalysisResult,
@@ -3730,6 +3754,12 @@ class StockAnalysisPipeline:
                 }
                 if _supports_explicit_keyword(self.notifier.send, "structured_payload"):
                     send_kwargs["structured_payload"] = _share_image_payload(result)
+                owner_email_receivers = self._resolve_owner_email_receivers()
+                if owner_email_receivers is not None and _supports_explicit_keyword(
+                    self.notifier.send, "email_receivers_override"
+                ):
+                    # 用户归属报告：邮件只发到该用户自己的邮箱（或按开关跳过），不发全局收件人。
+                    send_kwargs["email_receivers_override"] = owner_email_receivers
                 sent = self.notifier.send(report_content, **send_kwargs)
                 notification_run = self._build_notification_run_snapshot(
                     channel="report",
@@ -4113,7 +4143,39 @@ class StockAnalysisPipeline:
                             channel_error,
                         )
                     elif channel == NotificationChannel.EMAIL:
-                        if stock_email_groups:
+                        owner_email_receivers = self._resolve_owner_email_receivers()
+                        if owner_email_receivers is not None:
+                            # 用户归属报告：邮件只发到该用户自己的邮箱，忽略全局分组/默认收件人。
+                            if not owner_email_receivers:
+                                logger.info("按用户偏好跳过汇总报告邮件（无接收邮箱或已关闭）")
+                                _record_channel_result(channel.value, True)
+                            else:
+                                def _send_email_owner(
+                                    receivers=owner_email_receivers,
+                                ) -> bool:
+                                    use_image = self.notifier._should_use_image_for_channel(
+                                        channel, image_bytes
+                                    )
+                                    if use_image:
+                                        return self.notifier._send_email_with_inline_image(
+                                            image_bytes, receivers=receivers
+                                        )
+                                    return self.notifier.send_to_email(
+                                        strip_hidden_markdown_metadata(report).strip(),
+                                        receivers=receivers,
+                                    )
+
+                                channel_success, channel_error = _send_channel_safely(
+                                    channel.value,
+                                    _send_email_owner,
+                                )
+                                non_wechat_success = channel_success or non_wechat_success
+                                _record_channel_result(
+                                    channel.value,
+                                    channel_success,
+                                    channel_error,
+                                )
+                        elif stock_email_groups:
                             code_to_emails: Dict[str, Optional[List[str]]] = {}
                             for r in results:
                                 if r.code not in code_to_emails:

@@ -2584,6 +2584,7 @@ class NotificationService(
         email_stock_codes: Optional[List[str]],
         email_send_to_all: bool,
         route_type: Optional[str] = None,
+        email_receivers_override: Optional[List[str]] = None,
     ) -> bool:
         use_image = self._should_use_image_for_channel(channel, image_bytes)
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
@@ -2607,7 +2608,14 @@ class NotificationService(
             return self.send_to_telegram(content)
         if channel == NotificationChannel.EMAIL:
             receivers = None
-            if email_send_to_all and self._stock_email_groups:
+            if email_receivers_override is not None:
+                # 显式收件人（按报告 owner 用户路由）：空列表表示该用户无接收
+                # 邮箱或已关闭"报告发送到邮箱"，视为无需发送（非失败），避免误发到全局收件人。
+                if not email_receivers_override:
+                    logger.info("按用户偏好跳过邮件发送（无接收邮箱或已关闭报告邮件）")
+                    return True
+                receivers = list(email_receivers_override)
+            elif email_send_to_all and self._stock_email_groups:
                 receivers = self.get_all_email_receivers()
             elif email_stock_codes and self._stock_email_groups:
                 receivers = self.get_receivers_for_stocks(email_stock_codes)
@@ -2652,6 +2660,7 @@ class NotificationService(
         dedup_key: Optional[str] = None,
         cooldown_key: Optional[str] = None,
         structured_payload: Optional[Dict[str, Any]] = None,
+        email_receivers_override: Optional[List[str]] = None,
     ) -> NotificationDispatchResult:
         """
         Send a notification and return per-channel diagnostics.
@@ -2808,6 +2817,7 @@ class NotificationService(
                     email_stock_codes=email_stock_codes,
                     email_send_to_all=email_send_to_all,
                     route_type=route_type,
+                    email_receivers_override=email_receivers_override,
                 )
                 latency_ms = int((time.monotonic() - started_at) * 1000)
 
@@ -2870,6 +2880,7 @@ class NotificationService(
         dedup_key: Optional[str] = None,
         cooldown_key: Optional[str] = None,
         structured_payload: Optional[Dict[str, Any]] = None,
+        email_receivers_override: Optional[List[str]] = None,
     ) -> bool:
         """
         统一发送接口 - 向所有已配置的渠道发送。
@@ -2886,6 +2897,7 @@ class NotificationService(
             dedup_key=dedup_key,
             cooldown_key=cooldown_key,
             structured_payload=structured_payload,
+            email_receivers_override=email_receivers_override,
         )
         return bool(result.success)
 

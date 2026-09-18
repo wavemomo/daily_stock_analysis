@@ -60,6 +60,41 @@ class EmailPasswordRepository:
                 .limit(1)
             ).scalar_one_or_none()
 
+    def get_report_email_target(self, user_id: int) -> Optional[str]:
+        """返回该用户"应接收报告的邮箱"：已绑定且开关开启时为邮箱，否则 None。
+
+        用于报告完成后按 owner 路由邮件收件人；纯微信登录（无凭据）或用户关闭
+        开关时返回 None，调用方据此跳过邮件发送。
+        """
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(WebPasswordCredentialRecord)
+                .where(WebPasswordCredentialRecord.user_id == user_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if row is None or not row.report_email_enabled:
+                return None
+            email = (row.email or "").strip()
+            return email or None
+
+    def set_report_email_enabled(self, *, user_id: int, enabled: bool) -> bool:
+        """切换该用户"报告发送到邮箱"开关；无凭据（未绑定邮箱）返回 False。"""
+        now = local_naive_now()
+
+        def write(session):
+            row = session.execute(
+                select(WebPasswordCredentialRecord)
+                .where(WebPasswordCredentialRecord.user_id == user_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            row.report_email_enabled = bool(enabled)
+            row.updated_at = now
+            return True
+
+        return bool(self.db._run_write_transaction("set_report_email_enabled", write))
+
     def find_email_owner_id(self, email: str) -> Optional[int]:
         """返回已绑定该邮箱的用户 ID；用于拒绝把同一邮箱绑给不同用户。"""
         with self.db.get_session() as session:

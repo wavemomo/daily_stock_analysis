@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, BarChart3, Bell, BriefcaseBusiness, Gauge, Home, LogOut, MessageSquareQuote, Search, Settings2, ShieldCheck, TicketCheck } from 'lucide-react';
+import { Activity, BarChart3, Bell, BriefcaseBusiness, Gauge, Home, LayoutGrid, LogOut, MessageSquareQuote, Search, Settings2, ShieldCheck, TicketCheck } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { getParsedApiError } from '../../api/error';
 import { SCREENING_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, screeningApi } from '../../api/screening';
@@ -36,6 +36,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'screening', labelKey: 'layout.nav.screening', to: '/screening', icon: Search, requiredPermissions: ['screening.read'] },
   { key: 'portfolio', labelKey: 'layout.nav.portfolio', to: '/portfolio', icon: BriefcaseBusiness, requiredPermissions: ['portfolio.read'] },
   { key: 'decision-signals', labelKey: 'layout.nav.decisionSignals', to: '/decision-signals', icon: Activity, requiredPermissions: ['decision_signals.read'] },
+  { key: 'report-gallery', labelKey: 'layout.nav.reportGallery', to: '/report-gallery', icon: LayoutGrid, requiredPermissions: ['analysis.read'] },
   { key: 'backtest', labelKey: 'layout.nav.backtest', to: '/backtest', icon: BarChart3, requiredPermissions: ['backtest.read'] },
   { key: 'alerts', labelKey: 'layout.nav.alerts', to: '/alerts', icon: Bell, requiredPermissions: ['alerts.read'] },
   { key: 'usage', labelKey: 'layout.nav.usage', to: '/usage', icon: Gauge, requiredPermissions: ['usage.read'] },

@@ -467,3 +467,39 @@ class DuplicateTaskErrorResponse(BaseModel):
             "existing_task_id": "abc123def456"
         }
     })
+
+
+class PublicReportItem(BaseModel):
+    """报告展览列表项：跨用户当天生成的个股报告摘要（不含大盘复盘）。"""
+
+    id: int
+    stock_code: str = ""
+    stock_name: Optional[str] = None
+    report_type: Optional[str] = None
+    sentiment_score: Optional[float] = None
+    operation_advice: Optional[str] = None
+    analysis_summary: Optional[str] = None
+    owner_name: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class PublicReportListResponse(BaseModel):
+    """报告展览分页列表。"""
+
+    total: int = 0
+    page: int = 1
+    limit: int = 20
+    date: str = ""
+    items: List[PublicReportItem] = Field(default_factory=list)
+
+
+class PublicReportDetailResponse(BaseModel):
+    """报告展览详情：当天个股报告的 Markdown 全文。"""
+
+    id: int
+    stock_code: str = ""
+    stock_name: Optional[str] = None
+    report_type: Optional[str] = None
+    owner_name: Optional[str] = None
+    created_at: Optional[str] = None
+    content: str = ""

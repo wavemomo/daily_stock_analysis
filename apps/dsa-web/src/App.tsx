@@ -26,6 +26,7 @@ const TokenUsagePage = lazy(() => import('./pages/TokenUsagePage'));
 const FeatureQuotasPage = lazy(() => import('./pages/FeatureQuotasPage'));
 const StockScreeningPage = lazy(() => import('./pages/StockScreeningPage'));
 const AccessControlPage = lazy(() => import('./pages/AccessControlPage'));
+const ReportGalleryPage = lazy(() => import('./pages/ReportGalleryPage'));
 
 const AppContent: React.FC = () => {
   const location = useLocation();
@@ -90,6 +91,7 @@ const AppContent: React.FC = () => {
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/usage" element={<TokenUsagePage />} />
         <Route path="/feature-quotas" element={<FeatureQuotasPage />} />
+        <Route path="/report-gallery" element={<ReportGalleryPage />} />
         <Route path="/settings" element={canManageSystem ? <SettingsPage /> : <Navigate to="/" replace />} />
         <Route path="/access-control" element={canManageRbac ? <AccessControlPage /> : <Navigate to="/" replace />} />
         <Route path="*" element={<NotFoundPage />} />

@@ -1050,6 +1050,8 @@ class WebPasswordCredentialRecord(Base):
     email = Column(String(255), nullable=False, unique=True, index=True)
     email_verified_at = Column(DateTime, nullable=True)
     password_hash = Column(String(255), nullable=False)
+    # 用户级开关：生成的报告是否发送到该邮箱（默认开启）。
+    report_email_enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
     updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
@@ -1859,6 +1861,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_miniapp_user_profile_columns()
             self._ensure_miniapp_resource_owner_columns()
             self._ensure_analysis_history_owner_columns()
+            self._ensure_web_password_credential_columns()
             self._ensure_fundamental_snapshot_owner_columns()
             self._ensure_screening_run_owner_columns()
             self._ensure_llm_usage_telemetry_columns()
@@ -2202,6 +2205,36 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 "analysis history owner migration verification failed: "
                 f"columns={sorted(verified_columns)} "
                 f"index={verified_indexes.get(index_name)}"
+            )
+
+    def _ensure_web_password_credential_columns(self) -> None:
+        """Add the per-user report-email toggle to existing SQLite credentials."""
+        if not self._is_sqlite_engine:
+            return
+        table_name = WebPasswordCredentialRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        column_name = "report_email_enabled"
+        if column_name not in columns:
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD COLUMN {column_name} BOOLEAN NOT NULL DEFAULT 1"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+        verified_columns = {
+            column["name"]
+            for column in inspect(self._engine).get_columns(table_name)
+        }
+        if column_name not in verified_columns:
+            raise RuntimeError(
+                "web password credential report-email migration verification failed: "
+                f"columns={sorted(verified_columns)}"
             )
 
     def _ensure_fundamental_snapshot_owner_columns(self) -> None:
@@ -4346,6 +4379,97 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 .all()
             )
             return list(results)
+
+    def get_public_stock_reports_paginated(
+        self,
+        *,
+        search: Optional[str] = None,
+        on_date: Optional[date] = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> Tuple[List[AnalysisHistory], int, Dict[int, Optional[str]]]:
+        """跨用户查询指定日期（默认今天）生成的个股报告，用于"报告展览"。
+
+        排除大盘复盘（code=MARKET / report_type=market_review）。可选按股票代码或
+        名称模糊搜索。返回 (记录列表, 总数, {owner_user_id: 昵称}) —— 昵称仅用于
+        展示生成者，绝不暴露 openid/unionid 等身份标识。
+        """
+        from sqlalchemy import func
+
+        day = on_date or local_naive_now().date()
+        start = datetime.combine(day, datetime.min.time())
+        end = datetime.combine(day + timedelta(days=1), datetime.min.time())
+        with self.get_session() as session:
+            conditions = [
+                AnalysisHistory.created_at >= start,
+                AnalysisHistory.created_at < end,
+                AnalysisHistory.code != "MARKET",
+                or_(
+                    AnalysisHistory.report_type.is_(None),
+                    AnalysisHistory.report_type != "market_review",
+                ),
+            ]
+            keyword = (search or "").strip()
+            if keyword:
+                like = f"%{keyword}%"
+                conditions.append(
+                    or_(
+                        AnalysisHistory.code.ilike(like),
+                        AnalysisHistory.name.ilike(like),
+                    )
+                )
+            where_clause = and_(*conditions)
+            total = session.execute(
+                select(func.count(AnalysisHistory.id)).where(where_clause)
+            ).scalar() or 0
+            records = session.execute(
+                select(AnalysisHistory)
+                .where(where_clause)
+                .order_by(desc(AnalysisHistory.created_at))
+                .offset(offset)
+                .limit(limit)
+            ).scalars().all()
+            owner_ids = {r.owner_user_id for r in records if r.owner_user_id}
+            nicknames: Dict[int, Optional[str]] = {}
+            if owner_ids:
+                for uid, nickname in session.execute(
+                    select(UserRecord.id, UserRecord.nickname).where(
+                        UserRecord.id.in_(owner_ids)
+                    )
+                ).all():
+                    nicknames[int(uid)] = nickname
+            return list(records), total, nicknames
+
+    def get_public_stock_report_by_id(
+        self,
+        record_id: int,
+        *,
+        on_date: Optional[date] = None,
+    ) -> Optional[AnalysisHistory]:
+        """按主键读取"报告展览"可见的单条个股报告（跨用户）。
+
+        仅返回指定日期（默认今天）生成、且非大盘复盘（code!=MARKET /
+        report_type!=market_review）的记录；其它一律视为不可见，返回 None。
+        用于公共详情：调用方再用记录自身 owner 复用现有渲染逻辑。
+        """
+        day = on_date or local_naive_now().date()
+        start = datetime.combine(day, datetime.min.time())
+        end = datetime.combine(day + timedelta(days=1), datetime.min.time())
+        with self.get_session() as session:
+            return session.execute(
+                select(AnalysisHistory).where(
+                    and_(
+                        AnalysisHistory.id == record_id,
+                        AnalysisHistory.created_at >= start,
+                        AnalysisHistory.created_at < end,
+                        AnalysisHistory.code != "MARKET",
+                        or_(
+                            AnalysisHistory.report_type.is_(None),
+                            AnalysisHistory.report_type != "market_review",
+                        ),
+                    )
+                )
+            ).scalars().first()
 
     def get_latest_analysis_by_query_id(
         self,

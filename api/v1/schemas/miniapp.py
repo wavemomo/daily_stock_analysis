@@ -55,6 +55,13 @@ class MiniappEmailBindingResponse(BaseModel):
     email: Optional[str] = None
     email_verified: bool = False
     has_password: bool = False
+    report_email_enabled: bool = False
+
+
+class MiniappReportEmailToggleRequest(BaseModel):
+    """切换"生成的报告是否发送到已绑定邮箱"。"""
+
+    enabled: bool
 
 
 class MiniappEmailCodeSentResponse(BaseModel):

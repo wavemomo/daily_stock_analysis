@@ -33,9 +33,12 @@ Web 端通过**邮箱 + 密码登录**建立 `dsa_user_session` Cookie 会话并
 ### 邮箱密码绑定与登录
 
 - 小程序绑定（Bearer + `account.self`）：
-  - `GET /api/v1/miniapp/auth/email`：返回当前用户绑定状态 `{email, email_verified, has_password}`（仅本人可见，不返回密码相关摘要）。
+  - `GET /api/v1/miniapp/auth/email`：返回当前用户绑定状态 `{email, email_verified, has_password, report_email_enabled}`（仅本人可见，不返回密码相关摘要）。
+  - `PATCH /api/v1/miniapp/auth/email/report-delivery`：提交 `{enabled}`，切换"生成的报告是否发送到已绑定邮箱"（未绑定邮箱返回 `400`）。
   - `POST /api/v1/miniapp/auth/email/request-code`：提交 `{email}`，向该邮箱发送验证码。邮件通道未配置（缺 `EMAIL_SENDER`/`EMAIL_PASSWORD`）返回 `503`；邮箱已被其他账号绑定返回 `409`；发送过于频繁返回 `400`。验证码复用邮件通知通道，限时、限次、限频，只保存摘要。
   - `POST /api/v1/miniapp/auth/email/bind`：提交 `{email, code, password}`，校验验证码后写入邮箱+密码凭据；对同一用户重复绑定即重置密码。密码长度 8-128。
+- 报告邮件投递：用户在小程序生成的个股分析报告，其邮件通知只发送到该用户绑定的邮箱（受"报告发送到邮箱"开关控制）；未绑定邮箱或关闭开关时跳过邮件，且不回退到全局收件人。定时任务/大盘复盘等无用户归属（global）的报告仍按全局 `EMAIL_RECEIVERS` 投递。其它通知渠道（企业微信/飞书等）不受此影响，仍按现有配置广播。
+
 - Web 登录（无既有登录态的浏览器）：
   - `POST /api/v1/web-auth/password/login`：提交 `{email, password}`，成功签发 `dsa_user_session` 并返回 `{user, csrf_token}`；失败统一返回 `401 {error:"invalid_credentials"}`，不区分邮箱不存在、密码错误、邮箱未验证或账号停用；浏览器已有登录态时返回 `400 authentication_conflict`。
 
@@ -58,7 +61,8 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 - `GET /api/v1/miniapp/auth/me`：返回当前用户摘要，包括可选的 `nickname`、`avatar_url`、roles 和 permissions。
 - `PATCH /api/v1/miniapp/auth/me`：当前用户更新自己的可选昵称；固定使用 Bearer principal 的用户 ID，不接受 OpenID、角色、权限或 owner 字段。
 - `POST /api/v1/miniapp/auth/me/avatar`：认证上传当前用户通过 `chooseAvatar` 选择的头像。
-- `GET /api/v1/miniapp/auth/email`：返回当前用户的 Web 邮箱登录绑定状态 `{email, email_verified, has_password}`。
+- `GET /api/v1/miniapp/auth/email`：返回当前用户的 Web 邮箱登录绑定状态 `{email, email_verified, has_password, report_email_enabled}`。
+- `PATCH /api/v1/miniapp/auth/email/report-delivery`：以 `{enabled}` 切换"报告发送到邮箱"开关（Web Cookie 会话亦可访问，需 `account.self` + CSRF）。
 - `POST /api/v1/miniapp/auth/email/request-code`：向 `{email}` 发送 Web 登录绑定验证码（邮件通道未配置返回 `503`，邮箱被占用返回 `409`）。
 - `POST /api/v1/miniapp/auth/email/bind`：以 `{email, code, password}` 绑定或重置 Web 登录邮箱密码。
 - `GET|HEAD /api/v1/miniapp/auth/public/avatars/{opaque_filename}`：按合法、不可预测的文件名读取公开头像；不列出文件、不接受写方法，也不使用可枚举的用户 ID。
@@ -67,6 +71,8 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 - `GET /api/v1/miniapp/watchlist`：列出当前用户的个人自选股（owner-scope，返回 `items` 与 `stock_codes`）。
 - `POST /api/v1/miniapp/watchlist/add`：将 `{ stock_code, stock_name? }` 加入当前用户自选；代码非法返回 `400`，HK 等价变体按归一 key 去重，单用户上限 200。
 - `POST /api/v1/miniapp/watchlist/remove`：从当前用户自选移除 `{ stock_code }`，返回移除后的最新列表。
+- `GET /api/v1/analysis/gallery`：报告展览——跨用户列出当天生成的个股分析报告（排除大盘复盘 `code=MARKET`/`report_type=market_review`），支持 `search`（股票代码或名称）、`page`、`limit`（≤50）；仅返回摘要与生成者昵称，不含 openid/unionid。需 `analysis.read`（普通成员可见）。
+- `GET /api/v1/analysis/gallery/{record_id}`：报告展览详情——按主键返回当天个股报告的 Markdown 全文（跨用户可见，排除大盘复盘）。
 - `GET /api/v1/miniapp/daily-reflections`：分页列出当前用户心得。
 - `GET /api/v1/miniapp/daily-reflections/stats`：连续打卡与月度回顾统计（owner-scope）。可选 `reference_date`（客户端本地今天）与 `month`（YYYY-MM），返回 `total`、`current_streak`、`longest_streak`、`today_done`、`month`、`month_count`、`month_days`。连续天数以客户端日历为准；今日未记但昨日已记时按昨日起算，避免跨时区误断。
 - `GET /api/v1/miniapp/daily-reflections/by-date/{YYYY-MM-DD}`：读取指定日期心得，不存在时返回 `null`。

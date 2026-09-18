@@ -12,6 +12,7 @@ from api.v1.schemas.miniapp import (
     MiniappEmailBindingResponse,
     MiniappEmailCodeRequest,
     MiniappEmailCodeSentResponse,
+    MiniappReportEmailToggleRequest,
     MiniappLoginRequest,
     MiniappLoginResponse,
     MiniappProfileUpdateRequest,
@@ -136,6 +137,31 @@ def get_email_binding(
         email=status_.email,
         email_verified=status_.email_verified,
         has_password=status_.has_password,
+        report_email_enabled=status_.report_email_enabled,
+    )
+
+
+@router.patch(
+    "/email/report-delivery",
+    response_model=MiniappEmailBindingResponse,
+    summary="切换生成的报告是否发送到已绑定邮箱",
+)
+def set_report_email_delivery(
+    request: MiniappReportEmailToggleRequest,
+    principal: MiniappPrincipal = Depends(require_permission('account.self')),
+) -> MiniappEmailBindingResponse:
+    try:
+        binding = EmailPasswordAuthService().set_report_email_enabled(
+            user_id=int(principal.user.id),
+            enabled=request.enabled,
+        )
+    except EmailPasswordAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return MiniappEmailBindingResponse(
+        email=binding.email,
+        email_verified=binding.email_verified,
+        has_password=binding.has_password,
+        report_email_enabled=binding.report_email_enabled,
     )
 
 
@@ -186,6 +212,7 @@ def bind_email(
         email=binding.email,
         email_verified=binding.email_verified,
         has_password=binding.has_password,
+        report_email_enabled=binding.report_email_enabled,
     )
 
 

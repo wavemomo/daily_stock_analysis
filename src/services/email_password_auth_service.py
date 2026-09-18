@@ -61,6 +61,7 @@ class EmailBindingStatus:
     email: Optional[str]
     email_verified: bool
     has_password: bool
+    report_email_enabled: bool
 
 
 def hash_password(password: str) -> str:
@@ -137,12 +138,24 @@ class EmailPasswordAuthService:
     def get_binding_status(self, user_id: int) -> EmailBindingStatus:
         credential = self.repository.get_credential_by_user_id(user_id)
         if credential is None:
-            return EmailBindingStatus(email=None, email_verified=False, has_password=False)
+            return EmailBindingStatus(
+                email=None,
+                email_verified=False,
+                has_password=False,
+                report_email_enabled=False,
+            )
         return EmailBindingStatus(
             email=credential.email,
             email_verified=credential.email_verified_at is not None,
             has_password=bool(credential.password_hash),
+            report_email_enabled=bool(credential.report_email_enabled),
         )
+
+    def set_report_email_enabled(self, *, user_id: int, enabled: bool) -> EmailBindingStatus:
+        """切换"报告发送到邮箱"开关；未绑定邮箱时报错（映射 400）。"""
+        if not self.repository.set_report_email_enabled(user_id=user_id, enabled=bool(enabled)):
+            raise EmailPasswordAuthError("请先绑定邮箱后再设置报告邮件开关")
+        return self.get_binding_status(user_id)
 
     # ---------------- 验证码 ----------------
 

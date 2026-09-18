@@ -10,24 +10,17 @@ is inferred.
 
 from __future__ import annotations
 
-import base64
 import html
-import mimetypes
 import re
-import sys
 from dataclasses import dataclass, field
 from datetime import date
-from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 import markdown2
 
 
-PROJECT_URL = "https://github.com/ZhuLinsen/daily_stock_analysis"
-PROJECT_REPOSITORY = "ZhuLinsen/daily_stock_analysis"
-PROJECT_DISPLAY_NAME = "股票智能分析系统"
-DEFAULT_XIAOHONGSHU_QR_PATH = "src/assets/share_image/xiaohongshu_qr.jpg"
-DEFAULT_XIAOHONGSHU_HANDLE = "@霸天土小豆"
+BRAND_SHORT_NAME = "upupup"
+PROJECT_DISPLAY_NAME = "万股图录"
 _MARKET_RE = re.compile(
     r"(?:大盘复盘|市场复盘|market\s+(?:review|recap)|시황\s*리뷰)", re.IGNORECASE
 )
@@ -67,7 +60,6 @@ _POSTER_TEXT = {
         "dimensions": "信号拆解", "leaders": "强势板块", "laggards": "弱势板块",
         "focus_tag": "关注", "avoid_tag": "回避", "focus": "重点跟踪", "funds": "资金观察",
         "strategy": "明日策略", "risks": "风险提示", "tagline": "让股票研究更简单、更高效",
-        "open_source": "开源项目 · GitHub", "xiaohongshu": "小红书",
         "disclaimer": "AI 生成，仅供研究交流，不构成投资建议。市场有风险，决策需谨慎。",
         "source": "数据源",
     },
@@ -84,7 +76,6 @@ _POSTER_TEXT = {
         "dimensions": "Signal Breakdown", "leaders": "Leading Sectors", "laggards": "Lagging Sectors",
         "focus_tag": "Watch", "avoid_tag": "Avoid", "focus": "Key Watchlist", "funds": "Fund Flow Watch",
         "strategy": "Next-session Plan", "risks": "Risk Alerts", "tagline": "Make stock research simpler and more efficient",
-        "open_source": "Open Source · GitHub", "xiaohongshu": "Xiaohongshu",
         "disclaimer": "AI-generated for research only; not investment advice. Markets involve risk.",
         "source": "Source",
     },
@@ -101,7 +92,6 @@ _POSTER_TEXT = {
         "dimensions": "신호 분석", "leaders": "강세 섹터", "laggards": "약세 섹터",
         "focus_tag": "관찰", "avoid_tag": "회피", "focus": "주요 관찰", "funds": "자금 흐름",
         "strategy": "다음 거래일 전략", "risks": "리스크 경고", "tagline": "주식 리서치를 더 쉽고 효율적으로",
-        "open_source": "오픈소스 · GitHub", "xiaohongshu": "샤오홍슈",
         "disclaimer": "AI 생성 연구 자료이며 투자 조언이 아닙니다. 투자에는 위험이 따릅니다.",
         "source": "데이터 소스",
     },
@@ -160,46 +150,6 @@ class Table:
     raw_rows: list[list[str]] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class ShareImageBranding:
-    """Optional deployment-owned social branding for share posters."""
-
-    xiaohongshu_url: str = ""
-    xiaohongshu_handle: str = ""
-    # Kept for compatibility with persisted configs. The poster deliberately
-    # renders only the public nickname/handle below the QR code.
-    xiaohongshu_id: str = ""
-    xiaohongshu_qr_path: str = ""
-
-    @property
-    def has_xiaohongshu(self) -> bool:
-        return any((
-            self.xiaohongshu_url.strip(),
-            self.xiaohongshu_handle.strip(),
-            self.xiaohongshu_qr_path.strip(),
-        ))
-
-
-def share_image_branding_from_config(config: object) -> ShareImageBranding:
-    """Build poster branding with bundled defaults applied only as an atomic pair."""
-
-    url = str(getattr(config, "share_image_xiaohongshu_url", None) or "").strip()
-    handle = str(getattr(config, "share_image_xiaohongshu_handle", None) or "").strip()
-    account_id = str(getattr(config, "share_image_xiaohongshu_id", None) or "").strip()
-    qr_path = str(getattr(config, "share_image_xiaohongshu_qr_path", None) or "").strip()
-
-    if not any((url, handle, qr_path)):
-        handle = DEFAULT_XIAOHONGSHU_HANDLE
-        qr_path = DEFAULT_XIAOHONGSHU_QR_PATH
-
-    return ShareImageBranding(
-        xiaohongshu_url=url,
-        xiaohongshu_handle=handle,
-        xiaohongshu_id=account_id,
-        xiaohongshu_qr_path=qr_path,
-    )
-
-
 @dataclass
 class StockPoster:
     title: str
@@ -253,38 +203,6 @@ class MarketPoster:
 class MarketSegment:
     title: str
     markdown: str
-
-
-def _asset_path(path_value: str) -> Optional[Path]:
-    if not path_value.strip():
-        return None
-
-    configured = Path(path_value).expanduser()
-    candidates = [configured] if configured.is_absolute() else [
-        Path.cwd() / configured,
-        Path(__file__).resolve().parent.parent / configured,
-    ]
-    bundle_root = getattr(sys, "_MEIPASS", None)
-    if bundle_root and not configured.is_absolute():
-        candidates.append(Path(bundle_root) / configured)
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _asset_data_uri(path_value: str) -> str:
-    asset_path = _asset_path(path_value)
-    if asset_path is None:
-        return ""
-    try:
-        payload = asset_path.read_bytes()
-    except OSError:
-        return ""
-    mime_type = mimetypes.guess_type(asset_path.name)[0] or "image/png"
-    encoded = base64.b64encode(payload).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
 
 
 def _plain(value: object) -> str:
@@ -1992,51 +1910,13 @@ def _multi_market_body(
     return "".join(blocks)
 
 
-def _safe_web_url(value: str) -> str:
-    url = value.strip()
-    return url if re.match(r"^https?://", url, re.IGNORECASE) else ""
-
-
-def _xiaohongshu_card(branding: ShareImageBranding, language: str) -> str:
-    if not branding.has_xiaohongshu:
-        return ""
-
-    label = _poster_text(language, "xiaohongshu")
-    handle = branding.xiaohongshu_handle.strip()
-    account = handle or branding.xiaohongshu_url.strip()
-    qr_data_uri = _asset_data_uri(branding.xiaohongshu_qr_path)
-    qr_alt = f"{label}二维码" if language == "zh" else f"{label} QR"
-    image = (
-        f'<div class="qr-frame"><img src="{qr_data_uri}" alt="{_escape(qr_alt)}"></div>'
-        if qr_data_uri else ""
-    )
-    url = _safe_web_url(branding.xiaohongshu_url)
-    if image and url:
-        image = f'<a href="{_escape(url)}">{image}</a>'
-    separator = "" if handle.startswith("@") else (" " if account else "")
-    account_markup = f'<span><b>{_escape(label)}</b>{separator}{_escape(account)}</span>'
-    if url:
-        account_markup = f'<a class="social-link" href="{_escape(url)}">{account_markup}</a>'
-    return (
-        f'<div class="qr-card{(" text-only" if not image else "")}">{image}'
-        f'{account_markup}</div>'
-    )
-
-
-def _footer(branding: ShareImageBranding, source_line: str, language: str) -> str:
-    social_card = _xiaohongshu_card(branding, language)
-    brand_class = "footer-brand" if social_card else "footer-brand full"
+def _footer(source_line: str, language: str) -> str:
     return f"""
     <footer class="poster-footer">
-      <div class="{brand_class}">
-        <div class="footer-title"><strong>DSA</strong><span>{_escape(PROJECT_DISPLAY_NAME)}</span></div>
+      <div class="footer-brand full">
+        <div class="footer-title"><strong>{_escape(BRAND_SHORT_NAME)}</strong><span>{_escape(PROJECT_DISPLAY_NAME)}</span></div>
         <small>{_escape(_poster_text(language, "tagline"))}</small>
-        <div class="repo-line">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.45 7.45 0 0 1 8 3.91c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .22.15.47.55.39A8.15 8.15 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z"/></svg>
-          <div><em>{_escape(_poster_text(language, "open_source"))}</em><b>{_escape(PROJECT_REPOSITORY)}</b></div>
-        </div>
       </div>
-      {social_card}
     </footer>
     <div class="disclaimer">{_escape(_poster_text(language, "disclaimer"))}{_escape(source_line)}</div>
     """
@@ -2047,7 +1927,6 @@ def build_share_image_html(
     *,
     generated_on: Optional[date] = None,
     structured_payload: Optional[Mapping[str, Any]] = None,
-    branding: Optional[ShareImageBranding] = None,
 ) -> str:
     """Build a deterministic 1080px stock, market, or dashboard share poster.
 
@@ -2114,8 +1993,6 @@ def build_share_image_html(
         subtitle = _poster_text(language, "dashboard_subtitle")
         content = _generic_body(fallback_html)
 
-    poster_branding = branding or ShareImageBranding()
-
     return f"""<!DOCTYPE html>
 <html lang="{_poster_html_language(language)}">
 <head>
@@ -2151,22 +2028,17 @@ def build_share_image_html(
 </head>
 <body>
   <main class="poster {report_kind}">
-    <header class="poster-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><strong>DSA</strong><em>|</em> {_escape(_poster_text(language, "brand"))}</div><div class="meta"><span class="date-chip">{_escape(stamp)}</span></div></header>
+    <header class="poster-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><strong>{_escape(BRAND_SHORT_NAME)}</strong><em>|</em> {_escape(_poster_text(language, "brand"))}</div><div class="meta"><span class="date-chip">{_escape(stamp)}</span></div></header>
     <section class="hero"><h1>{_escape(title)}{f'<span class="code">{_escape(data.code)}</span>' if report_kind == 'stock' and data.code else ''}</h1><p>{_escape(subtitle)}</p></section>
     {content}
-    {_footer(poster_branding, source_line, language)}
+    {_footer(source_line, language)}
   </main>
 </body>
 </html>"""
 
 
 __all__ = [
-    "DEFAULT_XIAOHONGSHU_HANDLE",
-    "DEFAULT_XIAOHONGSHU_QR_PATH",
-    "PROJECT_REPOSITORY",
+    "BRAND_SHORT_NAME",
     "PROJECT_DISPLAY_NAME",
-    "PROJECT_URL",
-    "ShareImageBranding",
     "build_share_image_html",
-    "share_image_branding_from_config",
 ]

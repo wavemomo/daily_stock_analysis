@@ -1,6 +1,6 @@
 # 分享图片模板与数据填充
 
-分享图片用于把个股分析和市场复盘转换为适合社交平台传播的 1080px 长图。个股和大盘使用两套独立的信息结构，但共用 DSA 品牌、仓库标识 `ZhuLinsen/daily_stock_analysis` 和风险声明。GitHub 区不放二维码；Web 与桌面端分享图默认展示仓库内置小红书二维码及昵称 `@霸天土小豆`，部署配置可替换二维码和账号信息。
+分享图片用于把个股分析和市场复盘转换为适合社交平台传播的 1080px 长图。个股和大盘使用两套独立的信息结构，但共用「万股图录（upupup）」品牌与风险声明。分享图不再展示开源仓库地址或小红书二维码/账号信息。
 
 ## 运行时如何填充
 
@@ -25,15 +25,7 @@
 分享图需要运行环境提供对应语言字体。官方 Docker 镜像已内置 Noto CJK 字体；Debian/Ubuntu 源码部署使用默认 `wkhtmltoimage` 引擎时，应安装 `wkhtmltopdf fonts-noto-cjk`。如果只安装转图工具而缺少 CJK 字体，中文或韩文可能在 PNG 中消失，只剩数字、英文和边框。
 `fonts-noto-cjk` 是 Debian 字体包名，不代表新增日文报告语言。项目的报告输出仍只支持 `REPORT_LANGUAGE=zh|en|ko`；日股个股和日本市场复盘中的日文原生名称由通用 Noto CJK fallback 覆盖，页面语言仍跟随所选报告语言，不会根据 `7203.T` 或 `region=jp` 切换成未支持的 `ja` 输出。
 
-小红书品牌使用以下可选配置。全部留空时展示仓库内置二维码及昵称 `@霸天土小豆`；配置任一自定义值后仅使用这组自定义品牌信息，避免把自定义账号与默认二维码混合：
-
-```dotenv
-SHARE_IMAGE_XIAOHONGSHU_URL=https://example.com/my-xiaohongshu
-SHARE_IMAGE_XIAOHONGSHU_HANDLE=@我的账号
-SHARE_IMAGE_XIAOHONGSHU_QR_PATH=assets/my-xiaohongshu-qr.png
-```
-
-二维码路径支持绝对路径或相对项目根目录路径；冻结桌面后端也会从 PyInstaller 资源目录解析相对路径。账号 URL 只接受 `http://` 或 `https://`。二维码在转图时以内嵌 Data URI 渲染，不依赖运行时网络。未配置 `SHARE_IMAGE_XIAOHONGSHU_QR_PATH` 时，统一回退到随源码和桌面包分发的 `src/assets/share_image/xiaohongshu_qr.jpg`，因此 Web PNG 与桌面 Electron PNG 都会保留二维码。二维码下方固定显示小红书昵称，例如 `小红书@霸天土小豆`；历史配置中的数字 ID 不参与分享图渲染。
+分享图底部固定展示「万股图录（upupup）」品牌标识与风险声明，不含社交账号二维码或开源仓库信息，也无需相关运行时配置。
 
 ## Web 一键分享
 
@@ -114,15 +106,10 @@ npx playwright install chromium
 
 ```python
 from pathlib import Path
-from src.share_image import ShareImageBranding, build_share_image_html
+from src.share_image import build_share_image_html
 
 markdown_text = Path("reports/example.md").read_text(encoding="utf-8")
-branding = ShareImageBranding(
-    xiaohongshu_url="https://example.com/my-xiaohongshu",
-    xiaohongshu_handle="@我的账号",
-    xiaohongshu_qr_path="assets/my-xiaohongshu-qr.png",
-)
-html = build_share_image_html(markdown_text, branding=branding)
+html = build_share_image_html(markdown_text)
 Path("share-preview.html").write_text(html, encoding="utf-8")
 ```
 
@@ -153,6 +140,6 @@ png_bytes = markdown_to_image(
 - 涨跌颜色优先使用结构化 payload 持久化的 `color_scheme`，旧记录则从最终报告颜色标记恢复；模板不按市场地区硬编码涨跌色。
 - 分享图中的买入、止损和目标只保留可扫描的价格或“等待企稳”；完整条件始终保留在原报告中。
 - 没有真实价格序列时不绘制伪 K 线；顶部仅保留非数据化的品牌光晕。
-- 小红书 URL、昵称和二维码路径可由运行时配置覆盖；二维码下只显示昵称，不显示数字 ID。全部留空时使用内置昵称 `@霸天土小豆` 和仓库内置二维码。GitHub 固定展示仓库标识 `ZhuLinsen/daily_stock_analysis`，不生成二维码。
+- 底部仅展示「万股图录（upupup）」品牌标识，不含开源仓库地址、社交账号或二维码。
 - 大盘报告在核心模块已成功提取时不重复附加完整 Markdown；额外的详情章节保留在原报告中，分享图只呈现结构化摘要。
 - 图片底部固定说明“AI 生成，仅供研究交流，不构成投资建议”。

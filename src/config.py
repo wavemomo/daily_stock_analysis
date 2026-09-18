@@ -1161,10 +1161,6 @@ class Config:
     markdown_to_image_channels: List[str] = field(default_factory=list)  # 逗号分隔：telegram,wechat,custom,email
     markdown_to_image_max_chars: int = 15000  # 超过此长度不转换，避免超大图片
     md2img_engine: str = "wkhtmltoimage"  # wkhtmltoimage | markdown-to-file | playwright
-    share_image_xiaohongshu_url: Optional[str] = None
-    share_image_xiaohongshu_handle: Optional[str] = None
-    share_image_xiaohongshu_id: Optional[str] = None
-    share_image_xiaohongshu_qr_path: Optional[str] = None
 
     # 实时行情预取（Issue #455）：设为 false 可禁用，避免 efinance/akshare_em 全市场拉取
     prefetch_realtime_quotes: bool = True
@@ -2211,10 +2207,6 @@ class Config:
                 minimum=1,
             ),
             md2img_engine=cls._parse_md2img_engine(os.getenv('MD2IMG_ENGINE', 'wkhtmltoimage')),
-            share_image_xiaohongshu_url=(os.getenv('SHARE_IMAGE_XIAOHONGSHU_URL') or '').strip() or None,
-            share_image_xiaohongshu_handle=(os.getenv('SHARE_IMAGE_XIAOHONGSHU_HANDLE') or '').strip() or None,
-            share_image_xiaohongshu_id=(os.getenv('SHARE_IMAGE_XIAOHONGSHU_ID') or '').strip() or None,
-            share_image_xiaohongshu_qr_path=(os.getenv('SHARE_IMAGE_XIAOHONGSHU_QR_PATH') or '').strip() or None,
             prefetch_realtime_quotes=os.getenv('PREFETCH_REALTIME_QUOTES', 'true').lower() == 'true',
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
             sqlite_wal_enabled=os.getenv('SQLITE_WAL_ENABLED', 'true').lower() == 'true',

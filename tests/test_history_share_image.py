@@ -6,7 +6,6 @@ import pytest
 from fastapi import HTTPException
 
 from api.v1.endpoints import history as history_endpoint
-from src.share_image import DEFAULT_XIAOHONGSHU_HANDLE, DEFAULT_XIAOHONGSHU_QR_PATH
 
 
 class _FakeHistoryService:
@@ -130,9 +129,7 @@ def test_history_share_image_html_returns_desktop_poster_with_restrictive_csp(mo
     assert response.media_type == "text/html"
     assert b"poster" in response.body
     assert captured["structured_payload"] is raw_result
-    assert captured["branding"].xiaohongshu_handle == DEFAULT_XIAOHONGSHU_HANDLE
-    assert captured["branding"].xiaohongshu_id == ""
-    assert captured["branding"].xiaohongshu_qr_path == DEFAULT_XIAOHONGSHU_QR_PATH
+    assert "branding" not in captured
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-security-policy"] == (
         "default-src 'none'; img-src data:; style-src 'unsafe-inline'"

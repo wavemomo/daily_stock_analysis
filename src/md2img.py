@@ -21,17 +21,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from src.share_image import (
-    ShareImageBranding,
-    build_share_image_html,
-    share_image_branding_from_config,
-)
+from src.share_image import build_share_image_html
 
 logger = logging.getLogger(__name__)
-
-
-def _share_image_branding(config: object) -> ShareImageBranding:
-    return share_image_branding_from_config(config)
 
 
 def _resolve_playwright_command() -> Optional[str]:
@@ -51,7 +43,6 @@ def _resolve_playwright_command() -> Optional[str]:
 def _markdown_to_image_playwright(
     markdown_text: str,
     structured_payload: Optional[Mapping[str, Any]] = None,
-    branding: Optional[ShareImageBranding] = None,
 ) -> Optional[bytes]:
     """Convert a share-poster HTML document to PNG with Playwright Chromium."""
     playwright_command = _resolve_playwright_command()
@@ -70,7 +61,6 @@ def _markdown_to_image_playwright(
             build_share_image_html(
                 markdown_text,
                 structured_payload=structured_payload,
-                branding=branding,
             ),
             encoding="utf-8",
         )
@@ -109,7 +99,6 @@ def _markdown_to_image_playwright(
 def _markdown_to_image_m2f(
     markdown_text: str,
     structured_payload: Optional[Mapping[str, Any]] = None,
-    branding: Optional[ShareImageBranding] = None,
 ) -> Optional[bytes]:
     """Convert Markdown to PNG via markdown-to-file (m2f) CLI. Better emoji support (Issue #455)."""
     m2f_command = shutil.which("m2f")
@@ -131,7 +120,6 @@ def _markdown_to_image_m2f(
                 build_share_image_html(
                     markdown_text,
                     structured_payload=structured_payload,
-                    branding=branding,
                 )
             )
 
@@ -169,7 +157,6 @@ def _markdown_to_image_m2f(
 def _markdown_to_image_wkhtml(
     markdown_text: str,
     structured_payload: Optional[Mapping[str, Any]] = None,
-    branding: Optional[ShareImageBranding] = None,
 ) -> Optional[bytes]:
     """Convert Markdown to PNG via imgkit/wkhtmltoimage."""
     try:
@@ -182,7 +169,6 @@ def _markdown_to_image_wkhtml(
         html = build_share_image_html(
             markdown_text,
             structured_payload=structured_payload,
-            branding=branding,
         )
         options = {
             "format": "png",
@@ -245,13 +231,11 @@ def markdown_to_image(
 
         config = get_config()
         engine = getattr(config, "md2img_engine", "wkhtmltoimage")
-        branding = _share_image_branding(config)
     except Exception:
         engine = "wkhtmltoimage"
-        branding = share_image_branding_from_config(object())
 
     if engine == "markdown-to-file":
-        return _markdown_to_image_m2f(markdown_text, structured_payload, branding)
+        return _markdown_to_image_m2f(markdown_text, structured_payload)
     if engine == "playwright":
-        return _markdown_to_image_playwright(markdown_text, structured_payload, branding)
-    return _markdown_to_image_wkhtml(markdown_text, structured_payload, branding)
+        return _markdown_to_image_playwright(markdown_text, structured_payload)
+    return _markdown_to_image_wkhtml(markdown_text, structured_payload)

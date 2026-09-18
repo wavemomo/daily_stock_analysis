@@ -63,11 +63,7 @@ from src.analysis_context_pack_overview import (
 from src.market_phase_summary import extract_market_phase_summary
 from src.config import get_config
 from src.md2img import markdown_to_image
-from src.share_image import (
-    ShareImageBranding,
-    build_share_image_html,
-    share_image_branding_from_config,
-)
+from src.share_image import build_share_image_html
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +135,6 @@ def _history_share_image_input(
             },
         )
     return result, markdown_content
-
-
-def _history_share_image_branding(config: object) -> ShareImageBranding:
-    return share_image_branding_from_config(config)
 
 
 def _stock_bar_group_key(record_code: str, display_code: str) -> str:
@@ -903,7 +895,6 @@ def get_history_share_image_html(
         html = build_share_image_html(
             markdown_content,
             structured_payload=_history_share_image_payload(result),
-            branding=_history_share_image_branding(config),
         )
     except Exception as exc:
         logger.error("Share image HTML generation failed for %s: %s", record_id, exc)

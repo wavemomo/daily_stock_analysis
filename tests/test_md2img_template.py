@@ -11,38 +11,32 @@ from src.md2img import (
     _markdown_to_image_wkhtml,
     markdown_to_image,
 )
-from src.share_image import (
-    DEFAULT_XIAOHONGSHU_HANDLE,
-    DEFAULT_XIAOHONGSHU_QR_PATH,
-    ShareImageBranding,
-)
+from src.share_image import BRAND_SHORT_NAME, PROJECT_DISPLAY_NAME
 
 
-TEST_BRANDING = ShareImageBranding(
-    xiaohongshu_url="https://example.com/xhs",
-    xiaohongshu_handle="@示例账号",
-    xiaohongshu_id="123456",
-    xiaohongshu_qr_path=str(
-        Path(__file__).parents[1] / "src" / "assets" / "share_image" / "xiaohongshu_qr.jpg"
-    ),
-)
+def _assert_brand_without_social(html: str) -> None:
+    """分享图使用新品牌，且不含旧 DSA/开源/小红书信息。"""
+    assert f"<strong>{BRAND_SHORT_NAME}</strong>" in html
+    assert PROJECT_DISPLAY_NAME in html
+    assert "DSA" not in html
+    assert "ZhuLinsen/daily_stock_analysis" not in html
+    assert "小红书" not in html
+    assert "开源" not in html
+    assert "GitHub" not in html
+    assert 'class="qr-frame"' not in html
 
 
 def test_wkhtml_renderer_uses_share_poster_dimensions_and_qr_template():
     with patch("imgkit.from_string", return_value=b"png") as render:
         assert _markdown_to_image_wkhtml(
             "# 大盘复盘\n\n## 结论\n\n震荡",
-            branding=TEST_BRANDING,
         ) == b"png"
 
     html, output = render.call_args.args
     options = render.call_args.kwargs["options"]
     assert output is False
     assert 'class="poster market"' in html
-    assert "项目主页二维码" not in html
-    assert "ZhuLinsen/daily_stock_analysis" in html
-    assert "<b>小红书</b>@示例账号" in html
-    assert "123456" not in html
+    _assert_brand_without_social(html)
     assert options["width"] == 1080
     assert options["disable-smart-width"] == ""
 
@@ -64,14 +58,10 @@ def test_markdown_to_file_renderer_receives_the_same_share_poster(tmp_path, monk
 
     assert _markdown_to_image_m2f(
         "# 贵州茅台 600519\n\n## 结论\n\n偏多",
-        branding=TEST_BRANDING,
     ) == b"png"
     assert captured["command"] == resolved_m2f
     assert 'class="poster stock"' in captured["html"]
-    assert "项目主页二维码" not in captured["html"]
-    assert "ZhuLinsen/daily_stock_analysis" in captured["html"]
-    assert "<b>小红书</b>@示例账号" in captured["html"]
-    assert "123456" not in captured["html"]
+    _assert_brand_without_social(captured["html"])
 
 
 def test_playwright_renderer_receives_the_same_share_poster(tmp_path, monkeypatch):
@@ -91,7 +81,6 @@ def test_playwright_renderer_receives_the_same_share_poster(tmp_path, monkeypatc
 
     assert _markdown_to_image_playwright(
         "# 贵州茅台 600519\n\n## 结论\n\n偏多",
-        branding=TEST_BRANDING,
     ) == b"png"
     assert captured["args"][0] == resolved_playwright
     assert captured["args"][1:6] == [
@@ -103,39 +92,14 @@ def test_playwright_renderer_receives_the_same_share_poster(tmp_path, monkeypatc
     ]
     assert "--full-page" in captured["args"]
     assert 'class="poster stock"' in captured["html"]
-    assert "ZhuLinsen/daily_stock_analysis" in captured["html"]
-    assert "<b>小红书</b>@示例账号" in captured["html"]
-    assert "123456" not in captured["html"]
+    _assert_brand_without_social(captured["html"])
 
 
 def test_config_accepts_playwright_image_engine():
     assert Config._parse_md2img_engine("playwright") == "playwright"
 
 
-def test_markdown_to_image_forwards_social_branding_from_config():
-    config = SimpleNamespace(
-        md2img_engine="wkhtmltoimage",
-        share_image_xiaohongshu_url="https://example.com/xhs",
-        share_image_xiaohongshu_handle="@自定义账号",
-        share_image_xiaohongshu_id="987654",
-        share_image_xiaohongshu_qr_path="custom-qr.png",
-    )
-    with (
-        patch("src.config.get_config", return_value=config),
-        patch("src.md2img._markdown_to_image_wkhtml", return_value=b"png") as render,
-    ):
-        assert markdown_to_image("# 大盘复盘") == b"png"
-
-    branding = render.call_args.args[2]
-    assert branding == ShareImageBranding(
-        xiaohongshu_url="https://example.com/xhs",
-        xiaohongshu_handle="@自定义账号",
-        xiaohongshu_id="987654",
-        xiaohongshu_qr_path="custom-qr.png",
-    )
-
-
-def test_markdown_to_image_uses_bundled_qr_when_branding_is_unconfigured():
+def test_markdown_to_image_dispatches_without_branding_argument():
     config = SimpleNamespace(md2img_engine="wkhtmltoimage")
     with (
         patch("src.config.get_config", return_value=config),
@@ -143,10 +107,9 @@ def test_markdown_to_image_uses_bundled_qr_when_branding_is_unconfigured():
     ):
         assert markdown_to_image("# 大盘复盘") == b"png"
 
-    branding = render.call_args.args[2]
-    assert branding.xiaohongshu_handle == DEFAULT_XIAOHONGSHU_HANDLE
-    assert branding.xiaohongshu_id == ""
-    assert branding.xiaohongshu_qr_path == DEFAULT_XIAOHONGSHU_QR_PATH
+    # 渲染器只接收 (markdown, structured_payload)，不再透传 branding
+    assert render.call_args.args == ("# 大盘复盘", None)
+    assert "branding" not in render.call_args.kwargs
 
 
 def test_wkhtml_renderer_forwards_structured_analysis_payload():

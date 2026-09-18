@@ -127,9 +127,6 @@ Go to your forked repo → `Settings` → `Secrets and variables` → `Actions` 
 | `MARKDOWN_TO_IMAGE_CHANNELS` | Notification channels that receive report images: telegram,wechat,custom,email,slack | Optional |
 | `MARKDOWN_TO_IMAGE_MAX_CHARS` | Skip image conversion above this Markdown length (default 15000) | Optional |
 | `MD2IMG_ENGINE` | Image renderer: `wkhtmltoimage` (default), `markdown-to-file`, or `playwright`. Debian/Ubuntu deployments using `wkhtmltoimage` should install both `wkhtmltopdf` and `fonts-noto-cjk` so supported Chinese and Korean report text renders correctly | Optional |
-| `SHARE_IMAGE_XIAOHONGSHU_URL` | Xiaohongshu profile URL shown in share images; empty disables the link | Optional |
-| `SHARE_IMAGE_XIAOHONGSHU_HANDLE` | Xiaohongshu nickname shown in share images; when all Xiaohongshu settings are empty, uses bundled nickname `@霸天土小豆` | Optional |
-| `SHARE_IMAGE_XIAOHONGSHU_QR_PATH` | QR image path, absolute or relative to the project root; when all Xiaohongshu settings are empty, uses the bundled QR | Optional |
 | `NOTIFICATION_REPORT_CHANNELS` | Report route channels for single-stock, aggregate daily, market review, merged push, and Feishu document success notifications. Empty means all configured channels | Optional |
 | `NOTIFICATION_ALERT_CHANNELS` | Alert route channels for EventMonitor notifications. Empty means all configured channels | Optional |
 | `NOTIFICATION_SYSTEM_ERROR_CHANNELS` | Reserved system_error route channels. No automatic system error producer is added in P3; empty means all configured channels | Optional |

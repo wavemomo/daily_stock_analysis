@@ -157,6 +157,69 @@ class MiniappWebLoginApiTestCase(unittest.TestCase):
         self.assertEqual(first.id, repeated.id)
         self.assertNotEqual(first.id, second.id)
 
+    def test_neutral_account_and_reflection_routes_reuse_backend_for_web_cookie(self) -> None:
+        """中性前缀 /account、/daily-reflections 复用同一处理逻辑，接受 Web Cookie（写操作需 CSRF）。"""
+        _, csrf_token = self._establish_web_session(openid="neutral-web-user")
+
+        me = self.browser.get("/api/v1/account/me")
+        self.assertEqual(me.status_code, 200, me.text)
+        self.assertEqual(self.browser.get("/api/v1/account/email").status_code, 200)
+        self.assertEqual(self.browser.get("/api/v1/daily-reflections").status_code, 200)
+        self.assertEqual(self.browser.get("/api/v1/daily-reflections/stats").status_code, 200)
+
+        no_csrf = self.browser.put(
+            "/api/v1/daily-reflections",
+            json={"reflection_date": "2026-01-01", "content": "hello"},
+        )
+        self.assertEqual(no_csrf.status_code, 403, no_csrf.text)
+        self.assertEqual(no_csrf.json()["error"], "csrf_failed")
+
+        saved = self.browser.put(
+            "/api/v1/daily-reflections",
+            headers={"Origin": TRUSTED_ORIGIN, "X-CSRF-Token": csrf_token},
+            json={"reflection_date": "2026-01-01", "title": "day1", "content": "hello"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["content"], "hello")
+
+    def test_same_origin_cookie_write_passes_csrf_without_cors_allowlist(self) -> None:
+        """同源写请求（Origin host == 请求 Host）无需 CORS_ORIGINS 白名单即可通过 CSRF。"""
+        _, csrf_token = self._establish_web_session(openid="same-origin-user")
+        saved = self.browser.patch(
+            "/api/v1/account/me",
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf_token},
+            json={"nickname": "renamed"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+
+    def test_cross_origin_cookie_write_still_rejected(self) -> None:
+        """跨源写请求即便带有效 CSRF token 仍被拒绝。"""
+        _, csrf_token = self._establish_web_session(openid="cross-origin-user")
+        rejected = self.browser.patch(
+            "/api/v1/account/me",
+            headers={"Origin": "https://evil.example", "X-CSRF-Token": csrf_token},
+            json={"nickname": "renamed"},
+        )
+        self.assertEqual(rejected.status_code, 403, rejected.text)
+        self.assertEqual(rejected.json()["error"], "csrf_failed")
+
+    def test_neutral_account_route_accepts_miniapp_bearer(self) -> None:
+        """中性前缀同样接受小程序 Bearer（同一处理逻辑对两端复用）。"""
+        response = TestClient(self.app).get(
+            "/api/v1/account/me",
+            headers=self._member_headers("other-user-token"),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_neutral_account_route_still_enforces_central_rbac(self) -> None:
+        """中性前缀不绕过 RBAC：无 account.self 的 Bearer 被拒。"""
+        limited = TestClient(self.app).get(
+            "/api/v1/account/me",
+            headers=self._member_headers("limited-token"),
+        )
+        self.assertEqual(limited.status_code, 403, limited.text)
+        self.assertEqual(limited.json()["required_permission"], "account.self")
+
     def test_miniapp_account_route_cannot_bypass_central_rbac(self) -> None:
         limited = TestClient(self.app).get(
             "/api/v1/miniapp/auth/me",

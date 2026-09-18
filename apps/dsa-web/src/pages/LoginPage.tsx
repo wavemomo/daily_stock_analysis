@@ -82,7 +82,7 @@ const LoginPage: React.FC = () => {
           </div>
           <div>
             <p className="text-sm font-medium text-primary">邮箱密码登录</p>
-            <h1 className="mt-1 text-3xl font-bold tracking-tight">登录主升浪 Web 端</h1>
+            <h1 className="mt-1 text-3xl font-bold tracking-tight">登录万股图录 Web 端</h1>
             <p className="mt-2 text-sm leading-6 text-secondary-text">
               使用在小程序「个人设置 → Web 登录邮箱」绑定的邮箱和密码登录，与小程序为同一账户。
             </p>

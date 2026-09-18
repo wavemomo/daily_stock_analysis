@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -142,11 +143,36 @@ def _authorize_principal(request: Request, principal, *, auth_kind: str) -> Opti
     return None
 
 
+def _request_host(request: Request) -> str:
+    """Resolve the host the browser addressed, honoring a trusted reverse proxy."""
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    return forwarded_host or request.headers.get("host", "").strip()
+
+
+def _origin_trusted(request: Request) -> bool:
+    """Trust explicitly configured origins and genuine same-origin requests.
+
+    Same-origin requests (Origin host == the host the browser addressed) are the
+    exact case CSRF protection is meant to allow, so they are accepted without
+    requiring the deployment origin to be duplicated into CORS_ORIGINS. Genuine
+    cross-origin requests must still be allow-listed. The double-submit CSRF
+    token bound to the HttpOnly session remains the primary guard.
+    """
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return False
+    if origin in _trusted_web_origins():
+        return True
+    origin_host = urlparse(origin).netloc
+    host = _request_host(request)
+    return bool(origin_host) and bool(host) and origin_host == host
+
+
 def _validate_web_csrf(request: Request, session_value: str) -> Optional[JSONResponse]:
     if request.method.upper() not in _UNSAFE_METHODS:
         return None
     if (
-        request.headers.get("origin", "") not in _trusted_web_origins()
+        not _origin_trusted(request)
         or not WebUserAuthService.verify_csrf_token(
             session_value,
             request.headers.get("x-csrf-token", ""),

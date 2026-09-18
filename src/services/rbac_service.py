@@ -73,6 +73,9 @@ DOMAIN_PREFIXES = (
     ('/api/v1/miniapp/watchlist', 'watchlist'),
     ('/api/v1/miniapp/auth', 'account'),
     ('/api/v1/rbac', 'rbac'),
+    # 中性前缀（Web Cookie 与小程序 Bearer 复用同一处理逻辑）。
+    ('/api/v1/daily-reflections', 'daily_reflections'),
+    ('/api/v1/account', 'account'),
     ('/api/v1/decision-signals', 'decision_signals'),
     ('/api/v1/intelligence', 'intelligence'),
     ('/api/v1/portfolio', 'portfolio'),

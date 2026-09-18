@@ -32,6 +32,8 @@ router = APIRouter()
 
 router.include_router(web_auth.router, prefix="/web-auth", tags=["WebAuth"])
 router.include_router(miniapp_auth.router, prefix="/miniapp/auth", tags=["MiniappAuth"])
+# 中性前缀：本人资料 / Web 邮箱端点，供 Web Cookie 与小程序 Bearer 复用同一处理逻辑。
+router.include_router(miniapp_auth.account_router, prefix="/account", tags=["Account"])
 router.include_router(miniapp_rbac.router, prefix="/miniapp/rbac", tags=["MiniappRbac"])
 router.include_router(
     miniapp_system_config.router,
@@ -53,6 +55,12 @@ router.include_router(feature_quotas.router, prefix="/feature-quotas", tags=["Fe
 router.include_router(
     daily_reflections.router,
     prefix="/miniapp/daily-reflections",
+    tags=["DailyReflections"],
+)
+# 中性前缀：渡劫每日心得，供 Web Cookie 与小程序 Bearer 复用同一处理逻辑。
+router.include_router(
+    daily_reflections.router,
+    prefix="/daily-reflections",
     tags=["DailyReflections"],
 )
 router.include_router(

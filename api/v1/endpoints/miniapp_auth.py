@@ -36,6 +36,10 @@ from src.services.wechat_miniapp_auth_service import (
 )
 
 router = APIRouter()
+# 账户自助端点（本人资料 / Web 邮箱），供小程序 Bearer 与 Web Cookie 复用。
+# 通过 router.include_router(account_router) 挂在 /miniapp/auth 下保持小程序兼容，
+# 同时在 api/v1/router.py 以中性前缀 /account 挂载供 Web 复用。
+account_router = APIRouter()
 
 
 @router.post("/login", response_model=MiniappLoginResponse, summary="微信小程序登录")
@@ -49,7 +53,7 @@ def login(request: MiniappLoginRequest) -> MiniappLoginResponse:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
 
 
-@router.get("/me", response_model=MiniappUserItem, summary="当前小程序用户")
+@account_router.get("/me", response_model=MiniappUserItem, summary="当前用户资料")
 def me(
     principal: MiniappPrincipal = Depends(get_current_miniapp_principal),
 ) -> MiniappUserItem:
@@ -61,7 +65,7 @@ def me(
     )
 
 
-@router.patch("/me", response_model=MiniappUserItem, summary="更新当前小程序用户昵称")
+@account_router.patch("/me", response_model=MiniappUserItem, summary="更新当前用户昵称")
 def update_me(
     request: MiniappProfileUpdateRequest,
     principal: MiniappPrincipal = Depends(require_permission('account.self')),
@@ -76,10 +80,10 @@ def update_me(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
-@router.post(
+@account_router.post(
     "/me/avatar",
     response_model=MiniappUserItem,
-    summary="上传当前小程序用户头像",
+    summary="上传当前用户头像",
 )
 async def upload_me_avatar(
     file: UploadFile = File(...),
@@ -124,7 +128,7 @@ def get_public_avatar(filename: str) -> FileResponse:
     )
 
 
-@router.get(
+@account_router.get(
     "/email",
     response_model=MiniappEmailBindingResponse,
     summary="当前用户的 Web 邮箱登录绑定状态",
@@ -141,7 +145,7 @@ def get_email_binding(
     )
 
 
-@router.patch(
+@account_router.patch(
     "/email/report-delivery",
     response_model=MiniappEmailBindingResponse,
     summary="切换生成的报告是否发送到已绑定邮箱",
@@ -165,7 +169,7 @@ def set_report_email_delivery(
     )
 
 
-@router.post(
+@account_router.post(
     "/email/request-code",
     response_model=MiniappEmailCodeSentResponse,
     summary="发送 Web 邮箱登录绑定验证码",
@@ -188,7 +192,7 @@ def request_email_code(
     return MiniappEmailCodeSentResponse(sent=True)
 
 
-@router.post(
+@account_router.post(
     "/email/bind",
     response_model=MiniappEmailBindingResponse,
     summary="绑定 Web 邮箱密码登录（重复绑定即重置密码）",
@@ -251,3 +255,7 @@ def logout(
 ) -> Response:
     WechatMiniappAuthService().revoke(principal.token_hash)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# 小程序保持在 /miniapp/auth 前缀下访问本人资料 / 邮箱端点（Bearer 认证）。
+router.include_router(account_router)

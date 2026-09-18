@@ -27,6 +27,8 @@ const FeatureQuotasPage = lazy(() => import('./pages/FeatureQuotasPage'));
 const StockScreeningPage = lazy(() => import('./pages/StockScreeningPage'));
 const AccessControlPage = lazy(() => import('./pages/AccessControlPage'));
 const ReportGalleryPage = lazy(() => import('./pages/ReportGalleryPage'));
+const PersonalSettingsPage = lazy(() => import('./pages/PersonalSettingsPage'));
+const TribulationPage = lazy(() => import('./pages/TribulationPage'));
 
 const AppContent: React.FC = () => {
   const location = useLocation();
@@ -92,6 +94,8 @@ const AppContent: React.FC = () => {
         <Route path="/usage" element={<TokenUsagePage />} />
         <Route path="/feature-quotas" element={<FeatureQuotasPage />} />
         <Route path="/report-gallery" element={<ReportGalleryPage />} />
+        <Route path="/tribulation" element={<TribulationPage />} />
+        <Route path="/personal-settings" element={<PersonalSettingsPage />} />
         <Route path="/settings" element={canManageSystem ? <SettingsPage /> : <Navigate to="/" replace />} />
         <Route path="/access-control" element={canManageRbac ? <AccessControlPage /> : <Navigate to="/" replace />} />
         <Route path="*" element={<NotFoundPage />} />

@@ -11,7 +11,7 @@ test.describe('Web login smoke', () => {
     await page.goto('/login');
     await page.waitForLoadState('domcontentloaded');
 
-    await expect(page.getByRole('heading', { name: '登录主升浪 Web 端' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '登录万股图录 Web 端' })).toBeVisible();
     await expect(page.getByPlaceholder('you@example.com')).toBeVisible();
     await expect(page.getByPlaceholder('请输入密码')).toBeVisible();
     await expect(page.getByRole('button', { name: '登录' })).toBeVisible();

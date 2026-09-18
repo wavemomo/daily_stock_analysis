@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 小程序系统设置项在中文界面下未显示中文：新增与 Web 端一致的配置项本地化映射（`upupup/utils/system-config-i18n.js`），系统设置的分类标题、字段标题/说明与下拉选项按当前界面语言显示（中文使用本地映射，英文回退后端 schema 原文），切换语言即时刷新且保留未保存的编辑。
+- [修复] Web 端 Cookie 写请求同源时被误判为 CSRF 失败：`_validate_web_csrf` 的来源校验在配置白名单之外额外信任「同源请求」（`Origin` host 等于浏览器访问的 Host，支持反代 `X-Forwarded-Host`），修复保存昵称等所有 Web 写操作在部署域名未写入 `CORS_ORIGINS` 时返回 `Invalid Origin or CSRF token`（`csrf_failed`）的问题；跨源请求仍需显式加入 `CORS_ORIGINS` 白名单，绑定 HttpOnly 会话的双提交 CSRF token 仍为主要防护，安全强度不降低。该修复作用于统一中间件，覆盖设置保存、持仓、告警、退出登录、个人设置等全部 Web 写入口。
+- [改进] 小程序「个人信息」页精简为仅头像与昵称：昵称默认只读，右侧「修改」按钮点击后进入可编辑态且按钮文案变为「保存」；头像框贴合头像尺寸展示；编辑视图隐藏微信登录态等冗余提示（登录与首次完善资料流程不受影响）。
+- [新功能] Web 端新增「个人设置」页（`/personal-settings`）：查看并修改个人信息（昵称，头像展示）、管理 Web 登录邮箱（绑定状态/发送验证码/绑定或改密/"报告发送到邮箱"开关）、界面语言切换、退出登录；与小程序「个人设置」功能一致，复用同一后端。
+- [新功能] Web 端新增「渡劫」页（`/tribulation`）：连续打卡统计（当前/最长连续、累计、今日状态）、今日心得编辑、本月打卡日历、历史心得分页与删除；数据与小程序渡劫共用同一后端（打卡连续天数、月历等仍由后端计算）。
+- [改进] 打通渡劫每日心得与账户自助能力的前后端复用：后端将本人资料/邮箱端点（`GET/PATCH /me`、`POST /me/avatar`、`GET/PATCH/POST /email*`）与渡劫端点（`daily-reflections`）额外挂到中性前缀 `/api/v1/account/*` 与 `/api/v1/daily-reflections*`，Web Cookie 与小程序 Bearer 复用同一处理逻辑与 RBAC；小程序原 `/api/v1/miniapp/*` 路径保持不变，已发布客户端不受影响。
+- [改进] 小程序系统设置改为分模块进入：系统设置首页改为模块列表（配置分类 + 备份/调度器/生成后端/Agent 后端/LLM 渠道/通知渠道测试等高级模块），点击某个模块才进入其详情进行查看与保存，与 Web 端"一次聚焦一个模块"的分类导航一致；配置仍由同一后端 Schema 驱动。
+- [改进] Web 端品牌名统一为「万股图录（upupup）」：站点标题、侧栏标识、登录页标题、各页面浏览器标题、通知测试默认文案与设置帮助文案中的产品名 `DSA`/`主升浪`/`Daily Stock Analysis` 统一改为中文「万股图录」、英文 `upupup`；环境变量名（`DSA_*`）、代码路径与后端输出匹配逻辑等技术标识保持不变。
+- [改进] 小程序「我的 → 个人设置」中的"更新微信资料"更名为"个人信息"，并明确支持查看与修改头像、昵称（复用 `PATCH /me`、`POST /me/avatar`）。
+- [测试] 新增中性前缀双认证回归：验证 `/api/v1/account/*` 与 `/api/v1/daily-reflections*` 在 Web Cookie（GET 免 CSRF、写操作需 CSRF）与小程序 Bearer 下均可用且仍受 RBAC 约束。
 - [改进] Web 端登录邮箱输入框的 `autocomplete` 由 `username` 改为 `email`，使浏览器/密码管理器按"邮箱"而非"用户名"提示与填充，与页面既有"邮箱密码登录"文案一致；登录流程与后端邮箱校验不变。
 - [改进] 报告分享图去除开源仓库标识与小红书二维码/账号信息，品牌统一为「万股图录（upupup）」：页眉与页脚品牌短标由 `DSA` 改为 `upupup`，中文品牌名改为 `万股图录`，底部仅保留品牌标识与风险声明。同步移除 `ShareImageBranding` 及 `SHARE_IMAGE_XIAOHONGSHU_URL/HANDLE/ID/QR_PATH` 配置项、`build_share_image_html`/`markdown_to_image` 转图链路的 `branding` 参数、内置小红书二维码资产与桌面打包的相关 `--add-data` 条目；转图引擎、最大长度与失败回退文本行为不变。
 - [修复] 普通成员（`member`）默认权限补齐历史报告并移除情报源：新增 `history.read`/`history.delete`、移除 `intelligence.read`，修复普通用户工作台不显示"今日分析"、"我的 → 历史报告"栏目缺失的问题；`member` 现默认开放常规功能栏目，仅排除系统设置、权限管理、Token 用量、情报源及外发通知/全局数据维护等管理员专属能力。该改动通过系统角色 seed 在服务启动时自动同步既有用户权限，需重新部署后端镜像方可生效。

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, BarChart3, Bell, BriefcaseBusiness, Gauge, Home, LayoutGrid, LogOut, MessageSquareQuote, Search, Settings2, ShieldCheck, TicketCheck } from 'lucide-react';
+import { Activity, BarChart3, Bell, BriefcaseBusiness, Flame, Gauge, Home, LayoutGrid, LogOut, MessageSquareQuote, Search, Settings2, ShieldCheck, TicketCheck, UserCog } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { getParsedApiError } from '../../api/error';
 import { SCREENING_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, screeningApi } from '../../api/screening';
@@ -36,6 +36,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'screening', labelKey: 'layout.nav.screening', to: '/screening', icon: Search, requiredPermissions: ['screening.read'] },
   { key: 'portfolio', labelKey: 'layout.nav.portfolio', to: '/portfolio', icon: BriefcaseBusiness, requiredPermissions: ['portfolio.read'] },
   { key: 'decision-signals', labelKey: 'layout.nav.decisionSignals', to: '/decision-signals', icon: Activity, requiredPermissions: ['decision_signals.read'] },
+  { key: 'tribulation', labelKey: 'layout.nav.tribulation', to: '/tribulation', icon: Flame, requiredPermissions: ['daily_reflections.read'] },
   { key: 'report-gallery', labelKey: 'layout.nav.reportGallery', to: '/report-gallery', icon: LayoutGrid, requiredPermissions: ['analysis.read'] },
   { key: 'backtest', labelKey: 'layout.nav.backtest', to: '/backtest', icon: BarChart3, requiredPermissions: ['backtest.read'] },
   { key: 'alerts', labelKey: 'layout.nav.alerts', to: '/alerts', icon: Bell, requiredPermissions: ['alerts.read'] },
@@ -43,6 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'feature-quotas', labelKey: 'layout.nav.featureQuotas', to: '/feature-quotas', icon: TicketCheck },
   { key: 'access-control', labelKey: 'layout.nav.accessControl', to: '/access-control', icon: ShieldCheck, requiredPermissions: ['rbac.manage'] },
   { key: 'settings', labelKey: 'layout.nav.settings', to: '/settings', icon: Settings2, requiredPermissions: ['system.manage'] },
+  { key: 'personal-settings', labelKey: 'layout.nav.personalSettings', to: '/personal-settings', icon: UserCog },
 ];
 
 export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNavigate, variant = 'default' }) => {
@@ -138,7 +140,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
           <BarChart3 className={cn(isRail ? 'h-[19px] w-[19px]' : 'h-5 w-5')} />
         </div>
         {!collapsed ? (
-          <p className={cn('min-w-0 truncate font-semibold text-foreground', isRail ? 'text-[0.95rem] leading-none' : 'text-sm')}>DSA</p>
+          <p className={cn('min-w-0 truncate font-semibold text-foreground', isRail ? 'text-[0.95rem] leading-none' : 'text-sm')}>{t('layout.brandName')}</p>
         ) : null}
       </div>
 

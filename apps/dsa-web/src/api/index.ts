@@ -8,6 +8,10 @@ export function setCsrfToken(token?: string): void {
   csrfToken = token || undefined;
 }
 
+export function getCsrfToken(): string | undefined {
+  return csrfToken;
+}
+
 export const FEATURE_QUOTA_CHANGED_EVENT = 'dsa:feature-quota-changed';
 
 export function notifyFeatureQuotaChanged(): void {

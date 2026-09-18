@@ -94,7 +94,7 @@ const LoginPage: React.FC = () => {
             label="邮箱"
             type="email"
             name="email"
-            autoComplete="username"
+            autoComplete="email"
             placeholder="you@example.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}

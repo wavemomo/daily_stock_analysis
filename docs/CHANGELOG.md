@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [改进] Web 端登录邮箱输入框的 `autocomplete` 由 `username` 改为 `email`，使浏览器/密码管理器按"邮箱"而非"用户名"提示与填充，与页面既有"邮箱密码登录"文案一致；登录流程与后端邮箱校验不变。
 - [改进] 报告分享图去除开源仓库标识与小红书二维码/账号信息，品牌统一为「万股图录（upupup）」：页眉与页脚品牌短标由 `DSA` 改为 `upupup`，中文品牌名改为 `万股图录`，底部仅保留品牌标识与风险声明。同步移除 `ShareImageBranding` 及 `SHARE_IMAGE_XIAOHONGSHU_URL/HANDLE/ID/QR_PATH` 配置项、`build_share_image_html`/`markdown_to_image` 转图链路的 `branding` 参数、内置小红书二维码资产与桌面打包的相关 `--add-data` 条目；转图引擎、最大长度与失败回退文本行为不变。
 - [修复] 普通成员（`member`）默认权限补齐历史报告并移除情报源：新增 `history.read`/`history.delete`、移除 `intelligence.read`，修复普通用户工作台不显示"今日分析"、"我的 → 历史报告"栏目缺失的问题；`member` 现默认开放常规功能栏目，仅排除系统设置、权限管理、Token 用量、情报源及外发通知/全局数据维护等管理员专属能力。该改动通过系统角色 seed 在服务启动时自动同步既有用户权限，需重新部署后端镜像方可生效。
 - [新功能] 报告邮件按报告归属用户投递：用户在小程序生成的个股分析报告，邮件只发送到该用户在「个人设置 → Web 登录邮箱」绑定的邮箱，不再统一发到全局 `EMAIL_RECEIVERS`。新增用户级开关"报告发送到邮箱"（小程序邮箱页 + Web 报告展览页均可切换），关闭或未绑定邮箱时跳过邮件、且不回退到全局收件人；定时任务/大盘复盘等全局归属报告维持原全局收件人行为。新增 `web_password_credentials.report_email_enabled` 列（默认开，含 SQLite 补列迁移）与端点 `PATCH /api/v1/miniapp/auth/email/report-delivery`；`GET /api/v1/miniapp/auth/email` 返回 `report_email_enabled`。通知层新增 `email_receivers_override`，按 owner 解析失败时 fail-closed 跳过邮件、绝不误发到全局管理员邮箱。

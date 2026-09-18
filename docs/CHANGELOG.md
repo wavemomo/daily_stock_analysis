@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 普通成员（`member`）默认权限补齐历史报告并移除情报源：新增 `history.read`/`history.delete`、移除 `intelligence.read`，修复普通用户工作台不显示"今日分析"、"我的 → 历史报告"栏目缺失的问题；`member` 现默认开放常规功能栏目，仅排除系统设置、权限管理、Token 用量、情报源及外发通知/全局数据维护等管理员专属能力。该改动通过系统角色 seed 在服务启动时自动同步既有用户权限，需重新部署后端镜像方可生效。
 - [新功能] 报告邮件按报告归属用户投递：用户在小程序生成的个股分析报告，邮件只发送到该用户在「个人设置 → Web 登录邮箱」绑定的邮箱，不再统一发到全局 `EMAIL_RECEIVERS`。新增用户级开关"报告发送到邮箱"（小程序邮箱页 + Web 报告展览页均可切换），关闭或未绑定邮箱时跳过邮件、且不回退到全局收件人；定时任务/大盘复盘等全局归属报告维持原全局收件人行为。新增 `web_password_credentials.report_email_enabled` 列（默认开，含 SQLite 补列迁移）与端点 `PATCH /api/v1/miniapp/auth/email/report-delivery`；`GET /api/v1/miniapp/auth/email` 返回 `report_email_enabled`。通知层新增 `email_receivers_override`，按 owner 解析失败时 fail-closed 跳过邮件、绝不误发到全局管理员邮箱。
 - [新功能] 新增"报告展览"：所有用户可查看当天其他用户生成的个股分析报告（排除大盘复盘），支持按股票代码/名称搜索，小程序与 Web 两端均提供入口。新增只读端点 `GET /api/v1/analysis/gallery`（分页 + 搜索，跨用户、仅当天、排除 code=MARKET/market_review）与 `GET /api/v1/analysis/gallery/{record_id}`（当天个股报告 Markdown 全文）；仅展示生成者昵称，不暴露 openid/unionid 等身份标识；权限沿用 `analysis.read`（普通成员可见）。
 - [改进] 统一 Web 端与小程序视觉品牌色：`apps/dsa-web` 浅色与深色主题主色由青色改为小程序靛蓝 `#4f46e5`、accent 改为紫罗兰 `#8b5cf6`，同步更新 `index.css` 令牌、`tailwind.config.js` 渐变/发光阴影及情绪仪表盘、饼图、404 页等硬编码色值；红涨绿跌语义保持不变。

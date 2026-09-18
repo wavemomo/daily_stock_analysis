@@ -37,12 +37,12 @@ MEMBER_PERMISSIONS = (
     'stocks.read',
     'agent.read', 'agent.execute', 'agent.manage',
     'analysis.read', 'analysis.execute',
+    'history.read', 'history.delete',
     'screening.read', 'screening.execute',
     'backtest.read', 'backtest.execute',
     'portfolio.read', 'portfolio.manage',
     'alerts.read', 'alerts.manage',
     'decision_signals.read',
-    'intelligence.read',
 )
 ROLES = {
     'member': {

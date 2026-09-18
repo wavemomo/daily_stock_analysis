@@ -88,7 +88,7 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 
 登录和 `/me` 的用户摘要包含 `roles` 与 `permissions`。内置角色语义如下：
 
-- `member`：新用户默认角色；只能维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析能力；高成本能力受服务端每日功能额度限制。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
+- `member`：新用户默认角色；可维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析、选股、回测、决策信号只读与历史（本人读/删，`history.read`/`history.delete`）能力；高成本能力受服务端每日功能额度限制。默认开放常规功能栏目，仅排除管理员专属能力——系统设置（`system.read`/`system.manage`）、权限管理（`rbac.manage`）、Token 用量（`usage.read`）、情报源（`intelligence.read`/`intelligence.manage`），以及外发通知（`alerts.notify`/`agent.share`）、全局数据维护（`stocks.manage`）等全局管控动作不授予普通成员。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
 - `operator`：受信任的运营分析员；拥有除 `system.manage`、`rbac.manage` 外的全部权限，包含 `alerts.notify` 与 `agent.share`。
 - `admin`：拥有全部权限，包含 `alerts.notify`、`system.manage` 与 `rbac.manage`；仍不绕过个人资源 owner scope。
 

@@ -285,21 +285,23 @@ export const DecisionSignalCard: React.FC<DecisionSignalCardProps> = ({ item, on
     return <div className={className}>{content}</div>;
   }
 
+  // 整卡可点：卡片带有 hover 高亮，用户会预期点击卡片任意处即可查看详情。
+  // 卡片内没有其它交互元素，做成 <button> 既能覆盖整卡点击，也不产生嵌套交互。
   return (
-    <div className={className}>
+    <button
+      type="button"
+      onClick={() => onSelect?.(item)}
+      className={className}
+      aria-label={t('decisionSignals.viewDetailsFor', { stock: item.stockName || item.stockCode })}
+    >
       {content}
       <div className="mt-4 flex justify-end">
-        <button
-          type="button"
-          onClick={() => onSelect?.(item)}
-          className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 !text-xs"
-          aria-label={t('decisionSignals.viewDetailsFor', { stock: item.stockName || item.stockCode })}
-        >
+        <span className="btn-secondary pointer-events-none inline-flex items-center gap-1.5 !px-3 !py-1.5 !text-xs">
           <PanelRightOpen className="h-3.5 w-3.5" />
           {t('common.details')}
-        </button>
+        </span>
       </div>
-    </div>
+    </button>
   );
 };
 

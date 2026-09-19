@@ -446,7 +446,8 @@ describe('DecisionSignalsPage', () => {
     expect(await screen.findByText('信号表现统计')).toBeInTheDocument();
     expect(screen.getByText('50%')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '查看 贵州茅台 AI 建议详情' })).toBeInTheDocument();
-    expect(screen.getByText('贵州茅台').closest('button')).toBeNull();
+    // 整卡可点：卡片内容位于可点击的 <button> 中。
+    expect(screen.getByText('贵州茅台').closest('button')).not.toBeNull();
     expect(screen.getByText('放量下跌风险')).toBeInTheDocument();
     expect(screen.getByText(formattedCreatedAt)).toBeInTheDocument();
     expect(screen.getByText('当前统计为全局已复盘 outcome 口径，不等于当前可见信号数量，也不随当前股票过滤。')).toBeInTheDocument();
@@ -1198,8 +1199,11 @@ describe('DecisionSignalsPage', () => {
     renderPage();
 
     expect(await screen.findByText('最近分析')).toBeInTheDocument();
+    // 整卡现在也是 <button>，其文本含股票代码；这里只统计候选 chips，排除信号卡详情按钮。
     const candidateButtons = screen.getAllByRole('button').filter((button) => (
-      button.textContent?.includes('600519') || button.textContent?.includes('AAPL')
+      !button.getAttribute('aria-label')?.includes('AI 建议详情') && (
+        button.textContent?.includes('600519') || button.textContent?.includes('AAPL')
+      )
     ));
 
     expect(candidateButtons.filter((button) => button.textContent?.includes('600519'))).toHaveLength(2);

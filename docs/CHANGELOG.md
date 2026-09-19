@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] Web「AI 建议」交互卡整卡点击无反应：此前 hover 高亮覆盖整卡但仅底部「详情」小按钮绑定了点击，点击卡片主体不触发查看；改为整卡为按钮、底部详情改为非交互提示，点击卡片任意处即可打开详情。
+- [新功能] 小程序「AI 建议」页与 Web 功能对齐：信号列表支持市场/操作/市场阶段/来源类型/来源报告 ID 的完整过滤；按股票代码查看该股票最新 active 建议（latest top5）；结果统计页新增决策风格校准（命中率/平均收益/未命中率/无法评估率/最大不利波动，可按周期或操作细分，样本不足按阈值提示）；重评估改为两步式（先 `persist=false` 预览动作/评分/入场止损目标/风控 raw→final，仅风控通过才出现「写入信号」按钮以 `persist=true` 落库）；新增「时间线」页，按股票代码 + 时间范围（30/90/180 天）+ 状态 + 决策风格查询并按时间排序展示。
+- [文档] `docs/miniapp.md` 补充小程序「AI 建议」页与 Web 的功能对齐说明（完整过滤器、最新建议、决策风格校准、两步式重评估、时间线）。
+- [测试] 扩展小程序 `decision-signals` 桩测：覆盖 `signalQuery` 全过滤组合、latest 拉取、`profile_calibration` 解析与 breakdown 切换、两步式 reassess、时间线查询。
 - [新功能] Token 用量新增「按用户」下钻：`GET /api/v1/usage/by-user`（`usage.read`）列出每位用户各自的调用次数与 token 消耗，定时分析、大盘复盘与后台扇出等不归属任何用户的消耗合并为一条平台条目，不摊到具体用户；数据层按 `owner_user_id` 聚合并关联用户昵称。
 - [改进] Token 用量页区分「我的用量」与「全平台」：所有用量响应新增 `scope` 字段，两端页面据此标注当前视图；持有 `usage.read` 的运营/管理员可在两个视图间切换，修复此前被锁死在平台视图、**看不到自己用量**的问题。普通成员仍固定为本人视图，权限在前端与后端双重收敛。
 - [修复] 智能导入不再写全局 `STOCK_LIST`：该功能已从 Web 系统设置移到工作台（与小程序一致），识别结果写入**本人个人自选**。此前它通过系统配置接口改写全局清单，而 `STOCK_LIST` 已从设置 UI 下线导致读到空值，合并会把服务器上真实的全局清单覆盖成仅含新代码；同时该写入需管理员权限、且不再驱动任何用户的定时分析。部分条目失败时只移除成功项，失败项保留供重试。

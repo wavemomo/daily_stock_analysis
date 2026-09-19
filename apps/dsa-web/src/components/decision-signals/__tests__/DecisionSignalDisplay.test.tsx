@@ -48,11 +48,12 @@ function renderCard(onSelect?: (item: DecisionSignalItem) => void) {
 }
 
 describe('DecisionSignalCard', () => {
-  it('uses a dedicated details button for interactive cards', () => {
+  it('makes the whole interactive card clickable to view details', () => {
     const onSelect = vi.fn();
     renderCard(onSelect);
 
-    expect(screen.getByText('贵州茅台').closest('button')).toBeNull();
+    // 整卡即可点：卡片内容（含股票名）位于一个可点击的 <button> 中。
+    expect(screen.getByText('贵州茅台').closest('button')).not.toBeNull();
     expect(screen.getByText('72%')).toBeInTheDocument();
     expect(screen.getByText('风格: 进取')).toBeInTheDocument();
     expect(screen.getByText('1600 - 1620')).toBeInTheDocument();

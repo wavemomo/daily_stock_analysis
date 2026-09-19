@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Languages, LogOut, Mail, User } from 'lucide-react';
+import { CalendarClock, Languages, LogOut, Mail, User } from 'lucide-react';
 import { AppPage, Button, Card, ConfirmDialog, InlineAlert, Input, PageHeader } from '../components/common';
 import {
   accountApi,
@@ -9,6 +9,7 @@ import {
   type AccountProfile,
   type EmailBinding,
 } from '../api/account';
+import { watchlistApi, type WatchlistItem } from '../api/watchlist';
 import { getParsedApiError } from '../api/error';
 import { API_BASE_URL } from '../utils/constants';
 
@@ -58,6 +59,12 @@ export default function PersonalSettingsPage() {
   const [resend, setResend] = useState(0);
   const resendTimer = useRef<number | undefined>(undefined);
 
+  // 定时分析（分析池 = 个人自选）
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleItems, setScheduleItems] = useState<WatchlistItem[]>([]);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleMsg, setScheduleMsg] = useState<Feedback>(null);
+
   // 退出登录
   const [showLogout, setShowLogout] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -81,9 +88,59 @@ export default function PersonalSettingsPage() {
     }
   }, [t]);
 
+  const loadSchedule = useCallback(async () => {
+    // 独立加载，缺少 watchlist 权限时不影响页面其余部分。
+    try {
+      const [pref, items] = await Promise.all([
+        watchlistApi.getSchedulePref(),
+        watchlistApi.listItems(),
+      ]);
+      setScheduleEnabled(!!pref.scheduled_analysis_enabled);
+      setScheduleItems(items);
+    } catch {
+      // 忽略：无权限或暂不可用时不展示定时分析管理。
+    }
+  }, []);
+
   useEffect(() => {
     void loadAll();
-  }, [loadAll]);
+    void loadSchedule();
+  }, [loadAll, loadSchedule]);
+
+  const handleToggleSchedulePref = async () => {
+    if (scheduleSaving) {
+      return;
+    }
+    setScheduleSaving(true);
+    setScheduleMsg(null);
+    try {
+      const next = await watchlistApi.setSchedulePref(!scheduleEnabled);
+      setScheduleEnabled(!!next.scheduled_analysis_enabled);
+    } catch (err) {
+      setScheduleMsg({ variant: 'danger', text: getParsedApiError(err).message || t('personalSettings.scheduleFailed') });
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
+  const handleToggleStockScheduled = async (item: WatchlistItem) => {
+    if (scheduleSaving) {
+      return;
+    }
+    const nextScheduled = !item.scheduled;
+    setScheduleSaving(true);
+    setScheduleMsg(null);
+    try {
+      await watchlistApi.setScheduled(item.stock_code, nextScheduled);
+      setScheduleItems((rows) =>
+        rows.map((row) => (row.stock_code === item.stock_code ? { ...row, scheduled: nextScheduled } : row)),
+      );
+    } catch (err) {
+      setScheduleMsg({ variant: 'danger', text: getParsedApiError(err).message || t('personalSettings.scheduleFailed') });
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (resend <= 0) {
@@ -411,6 +468,55 @@ export default function PersonalSettingsPage() {
                   {language === 'zh' ? 'English' : '中文'}
                 </Button>
               </div>
+            </Card>
+
+            {/* 定时分析（分析池 = 个人自选） */}
+            <Card className="space-y-4">
+              <div className="flex items-center gap-2">
+                <CalendarClock className="h-5 w-5 text-cyan" aria-hidden="true" />
+                <h2 className="text-base font-semibold text-foreground">{t('personalSettings.scheduleSection')}</h2>
+              </div>
+              <p className="text-sm text-secondary-text">{t('personalSettings.scheduleDesc')}</p>
+              <label className="flex items-center justify-between gap-3 rounded-xl border border-border/60 px-4 py-3">
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-foreground">{t('personalSettings.scheduleEnableLabel')}</span>
+                  <span className="mt-1 block text-xs text-secondary-text">{t('personalSettings.scheduleEnableDesc')}</span>
+                </span>
+                <input
+                  type="checkbox"
+                  className="h-5 w-5 accent-[hsl(var(--primary))]"
+                  checked={scheduleEnabled}
+                  disabled={scheduleSaving}
+                  onChange={() => void handleToggleSchedulePref()}
+                />
+              </label>
+              {scheduleEnabled ? (
+                scheduleItems.length ? (
+                  <div className="space-y-2">
+                    <p className="text-xs text-secondary-text">{t('personalSettings.scheduleStocksHint')}</p>
+                    <ul className="divide-y divide-border/50 rounded-xl border border-border/60">
+                      {scheduleItems.map((item) => (
+                        <li key={item.stock_code} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                          <span className="min-w-0 truncate text-sm text-foreground">
+                            {item.stock_name ? `${item.stock_name} · ${item.stock_code}` : item.stock_code}
+                          </span>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-[hsl(var(--primary))]"
+                            checked={item.scheduled}
+                            disabled={scheduleSaving}
+                            onChange={() => void handleToggleStockScheduled(item)}
+                            aria-label={item.stock_code}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">{t('personalSettings.scheduleNoStocks')}</p>
+                )
+              ) : null}
+              {scheduleMsg ? <InlineAlert variant={scheduleMsg.variant} message={scheduleMsg.text} /> : null}
             </Card>
 
             {/* 退出登录 */}

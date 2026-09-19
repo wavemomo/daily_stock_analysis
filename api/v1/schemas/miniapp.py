@@ -119,6 +119,8 @@ class MiniappWatchlistItem(BaseModel):
     id: int
     stock_code: str
     stock_name: str = ""
+    # 是否纳入本人定时分析池（默认纳入）。
+    scheduled: bool = True
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -126,6 +128,26 @@ class MiniappWatchlistItem(BaseModel):
 class MiniappWatchlistMutateRequest(BaseModel):
     stock_code: str = Field(..., min_length=1, max_length=32)
     stock_name: str = Field("", max_length=64)
+
+
+class MiniappWatchlistScheduledRequest(BaseModel):
+    """勾选/取消某只自选是否参与本人定时分析。"""
+
+    stock_code: str = Field(..., min_length=1, max_length=32)
+    scheduled: bool
+
+
+class MiniappSchedulePrefResponse(BaseModel):
+    """本人定时分析参与状态。"""
+
+    scheduled_analysis_enabled: bool = False
+    scheduled_count: int = 0
+
+
+class MiniappSchedulePrefRequest(BaseModel):
+    """开启/关闭本人定时分析参与开关。"""
+
+    enabled: bool
 
 
 class MiniappWatchlistListResponse(BaseModel):

@@ -71,6 +71,11 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 - `GET /api/v1/miniapp/watchlist`：列出当前用户的个人自选股（owner-scope，返回 `items` 与 `stock_codes`）。
 - `POST /api/v1/miniapp/watchlist/add`：将 `{ stock_code, stock_name? }` 加入当前用户自选；代码非法返回 `400`，HK 等价变体按归一 key 去重，单用户上限 200。
 - `POST /api/v1/miniapp/watchlist/remove`：从当前用户自选移除 `{ stock_code }`，返回移除后的最新列表。
+- `POST /api/v1/miniapp/watchlist/scheduled`：设置某只自选是否纳入本人定时分析池 `{ stock_code, scheduled }`；`items[].scheduled` 表示是否参与（默认 `true`）。
+- `GET /api/v1/miniapp/watchlist/schedule-pref`：查询本人定时分析参与状态，返回 `{ scheduled_analysis_enabled, scheduled_count }`。
+- `PUT /api/v1/miniapp/watchlist/schedule-pref`：开启/关闭本人定时分析参与 `{ enabled }`（默认关闭，opt-in）。
+- 以上自选与定时分析偏好端点同时挂在中性前缀 `/api/v1/watchlist*`，Web Cookie 与小程序 Bearer 复用同一处理逻辑与 RBAC（`watchlist.read`/`watchlist.manage`）。「分析池」按用户维护：定时分析聚合所有“已开启定时分析且勾选股票”的用户，跨用户同一只股票当轮只分析一次（analyze-once/persist-many），再按各归属用户分别落库与投递（owner=该用户）；全局 `STOCK_LIST` 不再作为分析 universe；调度时间仍由管理员在系统设置维护。
+- 每位用户当轮可分析的股票数量由 `scheduled_analysis` 功能额度控制（默认每日 10 只，管理员可按用户/套餐/白名单/全局默认在「权限与额度」中调节；`0` 即关闭该用户定时分析、白名单为不限量），额度按自选顺序分配、不足则只分析前 N 只；休市过滤或分析失败的股票会退还额度。该额度与按需「个股分析」额度相互独立，定时分析不会占用用户的手动分析额度。
 - `GET /api/v1/analysis/gallery`：报告展览——跨用户列出当天生成的个股分析报告（排除大盘复盘 `code=MARKET`/`report_type=market_review`），支持 `search`（股票代码或名称）、`page`、`limit`（≤50）；仅返回摘要与生成者昵称，不含 openid/unionid。需 `analysis.read`（普通成员可见）。
 - `GET /api/v1/analysis/gallery/{record_id}`：报告展览详情——按主键返回当天个股报告的 Markdown 全文（跨用户可见，排除大盘复盘）。
 - `GET /api/v1/miniapp/daily-reflections`：分页列出当前用户心得。

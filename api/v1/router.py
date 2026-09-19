@@ -68,6 +68,12 @@ router.include_router(
     prefix="/miniapp/watchlist",
     tags=["MiniappWatchlist"],
 )
+# 中性前缀：本人自选股，供 Web Cookie 与小程序 Bearer 复用同一处理逻辑。
+router.include_router(
+    miniapp_watchlist.router,
+    prefix="/watchlist",
+    tags=["Watchlist"],
+)
 router.include_router(agent.router, prefix="/agent", tags=["Agent"])
 router.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
 router.include_router(history.router, prefix="/history", tags=["History"])

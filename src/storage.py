@@ -1373,6 +1373,8 @@ class MiniappWatchlistRecord(Base):
     stock_code = Column(String(32), nullable=False)
     match_key = Column(String(32), nullable=False)
     stock_name = Column(String(64), nullable=False, default='')
+    # 是否纳入该用户的定时分析池（默认纳入，可按只关闭以控成本）。
+    scheduled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=local_naive_now, nullable=False, index=True)
     updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False, index=True)
 
@@ -1380,6 +1382,28 @@ class MiniappWatchlistRecord(Base):
         UniqueConstraint('user_id', 'match_key', name='uix_miniapp_watchlist_user_key'),
         Index('ix_miniapp_watchlist_user_created', 'user_id', 'created_at'),
     )
+
+
+class UserSchedulePrefRecord(Base):
+    """按用户的定时分析偏好：是否让本人自选参与每日定时分析。
+
+    调度时间等运行参数仍由管理员在系统设置维护；本表只存用户自助的参与开关。
+    """
+
+    __tablename__ = 'user_schedule_prefs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    # 是否参与定时分析（默认关闭，用户显式开启后其勾选的自选才进入定时分析池）。
+    scheduled_analysis_enabled = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=local_naive_now, nullable=False)
+    updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
 
 
 class AlertRuleRecord(Base):
@@ -1862,6 +1886,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_miniapp_resource_owner_columns()
             self._ensure_analysis_history_owner_columns()
             self._ensure_web_password_credential_columns()
+            self._ensure_miniapp_watchlist_scheduled_column()
             self._ensure_fundamental_snapshot_owner_columns()
             self._ensure_screening_run_owner_columns()
             self._ensure_llm_usage_telemetry_columns()
@@ -2234,6 +2259,36 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         if column_name not in verified_columns:
             raise RuntimeError(
                 "web password credential report-email migration verification failed: "
+                f"columns={sorted(verified_columns)}"
+            )
+
+    def _ensure_miniapp_watchlist_scheduled_column(self) -> None:
+        """Add the per-stock scheduled-analysis flag to existing SQLite watchlists."""
+        if not self._is_sqlite_engine:
+            return
+        table_name = MiniappWatchlistRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        column_name = "scheduled"
+        if column_name not in columns:
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD COLUMN {column_name} BOOLEAN NOT NULL DEFAULT 1"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+        verified_columns = {
+            column["name"]
+            for column in inspect(self._engine).get_columns(table_name)
+        }
+        if column_name not in verified_columns:
+            raise RuntimeError(
+                "miniapp watchlist scheduled-column migration verification failed: "
                 f"columns={sorted(verified_columns)}"
             )
 

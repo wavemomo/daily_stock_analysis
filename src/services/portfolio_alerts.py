@@ -147,7 +147,7 @@ def expand_symbol_targets(
     """
 
     if target_scope == "watchlist":
-        symbols = _watchlist_symbols(config)
+        symbols = _watchlist_symbols(config, portfolio_scope)
         display_prefix = "自选股"
     elif target_scope == "portfolio_holdings":
         symbols = _portfolio_holding_symbols(
@@ -356,14 +356,28 @@ def aggregate_dry_run_results(rule_id: int, target_scope: str, results: List[Dic
     }
 
 
-def _watchlist_symbols(config: Any) -> List[str]:
-    refresh = getattr(config, "refresh_stock_list", None)
-    if callable(refresh):
-        try:
-            refresh()
-        except Exception as exc:
-            logger.warning("[portfolio_alerts] Failed to refresh watchlist symbols: %s", exc)
-    return list(getattr(config, "stock_list", []) or [])
+def _watchlist_symbols(
+    config: Any,
+    portfolio_scope: object = UNSET_PORTFOLIO_SCOPE,
+) -> List[str]:
+    """告警 ``target_scope="watchlist"`` 目标：解析规则所属用户的个人自选。
+
+    多用户改造后不再回退全局 STOCK_LIST：无用户归属（legacy/global/未指定）时
+    返回空列表，避免把某规则误扩展到全局清单。``config`` 保留以兼容签名。
+    """
+    owner_id: Optional[str] = None
+    if isinstance(portfolio_scope, PortfolioScope) and portfolio_scope.kind == "user":
+        owner_id = portfolio_scope.owner_id
+    if not owner_id:
+        return []
+    try:
+        from src.services.miniapp_watchlist_service import MiniappWatchlistService
+
+        payload = MiniappWatchlistService().list(user_id=int(owner_id))
+        return list(payload.get("stock_codes") or [])
+    except Exception as exc:
+        logger.warning("[portfolio_alerts] Failed to load user watchlist symbols: %s", exc)
+        return []
 
 
 def _portfolio_holding_symbols(

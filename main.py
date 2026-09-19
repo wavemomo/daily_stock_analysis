@@ -72,6 +72,7 @@ from datetime import date, datetime, timezone, timedelta
 from src.webui_frontend import prepare_webui_frontend_assets
 from src.config import get_config, Config
 from src.logging_config import setup_logging
+from src.analysis_ownership import AnalysisOwner
 from src.brokers.futu.portfolio import FutuPortfolioError
 from data_provider.base import canonical_stock_code
 from src.services.stock_list_parser import (
@@ -727,6 +728,238 @@ def _run_auto_backtest(config: Config) -> None:
         logger.warning(f"自动回测失败（已忽略）: {exc}")
 
 
+def _child_scheduled_args(
+    args: argparse.Namespace,
+    *,
+    no_market_review: Optional[bool] = None,
+) -> argparse.Namespace:
+    """派生一份 args 副本用于按用户/大盘子调用，避免改动共享的原始 args。"""
+    import copy as _copy
+
+    child = _copy.copy(args)
+    if no_market_review is not None:
+        setattr(child, 'no_market_review', bool(no_market_review))
+    return child
+
+
+_SCHEDULED_ANALYSIS_FEATURE = 'scheduled_analysis'
+
+
+def _allocate_scheduled_pools(pools: list):
+    """按各用户的 ``scheduled_analysis`` 功能额度分配定时分析名额，并跨用户去重。
+
+    返回 ``(fanout_owners_by_code, granted_by_user, reservation_period_start)``：
+    - ``fanout_owners_by_code``: {归一 code: [AnalysisOwner.user(uid)]}，同一只股票被多个
+      用户勾选时只出现一次（analyze-once/persist-many 的去重键）；
+    - ``granted_by_user``: {user_id: [归一 code]}，本轮已为该用户预留额度的股票，供失败回收；
+    - ``reservation_period_start``: 预留所用的记账日，回收补偿必须用同一日。
+
+    额度规则（与整套 RBAC 额度体系一致，管理员可按用户/套餐/白名单/全局默认调节）：
+    unlimited → 全给；disabled/0 → 跳过；否则按自选顺序取前 ``remaining`` 只。
+    额度不足或读取失败一律 fail-closed（少分析或不分析），绝不超额。
+    """
+    from data_provider.base import normalize_stock_code
+    from src.services.feature_quota_service import (
+        FeatureQuotaExceededError,
+        FeatureQuotaService,
+    )
+
+    quota_service = FeatureQuotaService()
+    reservation_period_start = quota_service.current_period_start()
+
+    fanout_owners_by_code: Dict[str, List[AnalysisOwner]] = {}
+    granted_by_user: Dict[int, List[str]] = {}
+
+    for pool in pools:
+        try:
+            user_id = int(pool.get('user_id'))
+        except (TypeError, ValueError):
+            continue
+
+        # 归一并按自选顺序去重（同一用户内），保持稳定的优先级。
+        ordered_keys: List[str] = []
+        seen_keys = set()
+        for entry in pool.get('codes', []):
+            raw = (entry.get('stock_code') or '').strip()
+            if not raw:
+                continue
+            key = normalize_stock_code(raw) or raw
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            ordered_keys.append(key)
+        if not ordered_keys:
+            continue
+
+        entitlement = None
+        try:
+            for ent in quota_service.get_entitlements_for_user(user_id):
+                if ent.feature_code == _SCHEDULED_ANALYSIS_FEATURE:
+                    entitlement = ent
+                    break
+        except Exception:
+            logger.exception("定时分析：读取用户 #%s 定时分析额度失败，跳过该用户。", user_id)
+            continue
+        if entitlement is None or entitlement.disabled:
+            logger.info("定时分析：用户 #%s 定时分析额度为 0 或不可用，跳过。", user_id)
+            continue
+
+        if entitlement.unlimited:
+            grant = len(ordered_keys)
+        else:
+            remaining = entitlement.remaining or 0
+            grant = min(remaining, len(ordered_keys))
+        if grant <= 0:
+            logger.info("定时分析：用户 #%s 今日定时分析额度已用尽，跳过。", user_id)
+            continue
+
+        granted_keys = ordered_keys[:grant]
+        try:
+            quota_service.reserve_many_for_user(
+                user_id,
+                _SCHEDULED_ANALYSIS_FEATURE,
+                amount=grant,
+                period_start=reservation_period_start,
+            )
+        except FeatureQuotaExceededError:
+            # 并发变更导致预留失败（单调度器下罕见）：fail-closed 跳过该用户，绝不超额。
+            logger.warning("定时分析：用户 #%s 预留定时分析额度失败，跳过该用户本轮。", user_id)
+            continue
+
+        if len(granted_keys) < len(ordered_keys):
+            logger.info(
+                "定时分析：用户 #%s 勾选 %d 只，按额度分配 %d 只（按自选顺序取前 %d 只）。",
+                user_id, len(ordered_keys), grant, grant,
+            )
+        owner = AnalysisOwner.user(user_id)
+        granted_by_user[user_id] = granted_keys
+        for key in granted_keys:
+            fanout_owners_by_code.setdefault(key, []).append(owner)
+
+    return fanout_owners_by_code, granted_by_user, reservation_period_start
+
+
+def _release_unanalyzed_scheduled_quota(
+    granted_by_user: Dict[int, List[str]],
+    analyzed_codes: set,
+    reservation_period_start,
+) -> None:
+    """回收未成功分析的定时分析额度（休市过滤/分析失败的股票不应计费）。
+
+    ``analyzed_codes`` 为本轮成功产出报告的归一 code 集合；对每个用户，凡已预留但不在
+    该集合中的股票各退还 1 个额度。补偿必须与预留使用同一记账日。回收失败不影响主流程。
+    """
+    from src.services.feature_quota_service import FeatureQuotaService
+
+    quota_service = FeatureQuotaService()
+    for user_id, granted_keys in granted_by_user.items():
+        failed = [key for key in granted_keys if key not in analyzed_codes]
+        if not failed:
+            continue
+        try:
+            quota_service.release_many_for_user(
+                user_id,
+                _SCHEDULED_ANALYSIS_FEATURE,
+                amount=len(failed),
+                period_start=reservation_period_start,
+            )
+            logger.info(
+                "定时分析：用户 #%s 有 %d 只未成功分析，已退还定时分析额度。",
+                user_id, len(failed),
+            )
+        except Exception:
+            logger.exception("定时分析：用户 #%s 退还定时分析额度失败（已忽略）。", user_id)
+
+
+def _run_per_user_scheduled_analysis(
+    config: Config,
+    args: argparse.Namespace,
+    *,
+    raise_errors: bool = False,
+) -> bool:
+    """定时分析池：跨用户同股去重（analyze-once/persist-many）+ 按功能额度分配。
+
+    - 大盘复盘与用户无关，全局只跑一次；
+    - 聚合所有"已开启定时分析且有勾选自选"的用户，按各自 ``scheduled_analysis`` 功能额度
+      分配名额（管理员可调），跨用户同一只股票仅分析一次、再按各 owner 分别落库+通知；
+    - 休市过滤或分析失败的股票退还额度；空池用户由服务层过滤；
+    - 自动回测全局只跑一次（子调用不各自触发）。
+    """
+    from src.services.miniapp_watchlist_service import MiniappWatchlistService
+
+    overall = True
+
+    market_review_requested = (
+        getattr(config, 'market_review_enabled', False)
+        and not getattr(args, 'no_market_review', False)
+    )
+    if market_review_requested:
+        review_args = _child_scheduled_args(args, no_market_review=False)
+        try:
+            review_ok = run_full_analysis(
+                config,
+                review_args,
+                stock_codes=[],
+                raise_errors=raise_errors,
+                _per_user_child=True,
+            )
+            overall = overall and (review_ok is not False)
+        except Exception:
+            logger.exception("定时分析：全局大盘复盘执行失败")
+            overall = False
+
+    try:
+        pools = MiniappWatchlistService().iter_scheduled_pools()
+    except Exception:
+        logger.exception("定时分析：读取用户定时分析池失败")
+        _run_auto_backtest(config)
+        return False
+
+    if not pools:
+        logger.info("定时分析：暂无已开启定时分析且有勾选自选的用户，跳过按用户个股分析。")
+        _run_auto_backtest(config)
+        return overall
+
+    fanout_owners_by_code, granted_by_user, reservation_period_start = (
+        _allocate_scheduled_pools(pools)
+    )
+    union_codes = list(fanout_owners_by_code.keys())
+    if not union_codes:
+        logger.info("定时分析：所有用户额度不足或不可用，无股票需要分析。")
+        _run_auto_backtest(config)
+        return overall
+
+    logger.info(
+        "定时分析：聚合 %d 位用户后共 %d 只去重股票，按 analyze-once/persist-many 执行。",
+        len(granted_by_user), len(union_codes),
+    )
+    analyzed_codes: set = set()
+    fanout_args = _child_scheduled_args(args, no_market_review=True)
+    try:
+        fanout_ok = run_full_analysis(
+            config,
+            fanout_args,
+            stock_codes=union_codes,
+            raise_errors=False,
+            fanout_owners_by_code=fanout_owners_by_code,
+            analyzed_input_codes=analyzed_codes,
+            _per_user_child=True,
+        )
+        overall = overall and (fanout_ok is not False)
+    except Exception:
+        logger.exception("定时分析：去重扇出分析执行失败")
+        overall = False
+
+    # 未成功分析（休市过滤/失败）的股票退还额度，避免误扣。
+    _release_unanalyzed_scheduled_quota(
+        granted_by_user, analyzed_codes, reservation_period_start
+    )
+
+    # 自动回测全局只跑一次（子调用已被 _per_user_child 抑制）。
+    _run_auto_backtest(config)
+    return overall
+
+
 def run_full_analysis(
     config: Config,
     args: argparse.Namespace,
@@ -734,9 +967,19 @@ def run_full_analysis(
     *,
     raise_errors: bool = False,
     analysis_targets: Optional[List[AnalysisTarget]] = None,
+    owner: Optional[AnalysisOwner] = None,
+    fanout_owners_by_code: Optional[Dict[str, List[AnalysisOwner]]] = None,
+    analyzed_input_codes: Optional[set] = None,
+    _per_user_child: bool = False,
 ) -> bool:
     """
     执行完整的分析流程（个股 + 大盘复盘）
+
+    多用户模式：默认定时/启动批量（未显式指定 ``--stocks``、未走券商持仓、
+    未指定 ``owner``）不再使用全局 STOCK_LIST，而是按用户遍历各自“参与定时分析”
+    且勾选的个人自选（``owner=AnalysisOwner.user``），大盘复盘全局只跑一次。
+    ``owner`` 显式传入时报告/信号归属该用户；``_per_user_child`` 为内部递归标记，
+    防止按用户分发再次进入用户遍历分支。
 
     这是定时任务调用的主函数。Futu 持仓解析失败始终传播给调用方；
     ``raise_errors`` 只控制持仓解析成功后的分析流程异常语义。
@@ -748,6 +991,15 @@ def run_full_analysis(
     # existing run_full_analysis return-value semantics.
     portfolio_stock_codes = _resolve_portfolio_stock_codes(args)
     portfolio_is_empty = portfolio_stock_codes == []
+    # 多用户分析池：默认定时/启动批量（无 --stocks、无券商持仓、未指定 owner）改为
+    # 按用户遍历各自勾选的个人自选，废弃全局 STOCK_LIST 作为分析 universe。
+    if (
+        stock_codes is None
+        and portfolio_stock_codes is None
+        and owner is None
+        and not _per_user_child
+    ):
+        return _run_per_user_scheduled_analysis(config, args, raise_errors=raise_errors)
     market_review_requested = (
         getattr(config, 'market_review_enabled', False)
         and not getattr(args, 'no_market_review', False)
@@ -769,7 +1021,9 @@ def run_full_analysis(
     _LAST_ANALYSIS_FAILURE_REASON = None
 
     def _return_with_auto_backtest(result: bool) -> bool:
-        _run_auto_backtest(config)
+        # 按用户分发的子调用不各自触发自动回测；由 _run_per_user_scheduled_analysis 统一跑一次。
+        if not _per_user_child:
+            _run_auto_backtest(config)
         return result
 
     try:
@@ -895,6 +1149,7 @@ def run_full_analysis(
             save_context_snapshot=save_context_snapshot,
             daily_market_context_enabled=should_use_daily_market_context,
             daily_market_context_allow_generate=should_use_daily_market_context,
+            owner=owner,
         )
         if should_use_daily_market_context:
             # Prompt-side context can reuse historical summaries, while full-merge
@@ -937,6 +1192,8 @@ def run_full_analysis(
                 merge_notification=merge_notification,
                 current_time=analysis_reference_time,
                 analysis_targets=analysis_targets,
+                fanout_owners_by_code=fanout_owners_by_code,
+                analyzed_input_codes=analyzed_input_codes,
             )
 
         if should_use_daily_market_context and not market_context_summary:

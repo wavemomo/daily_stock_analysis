@@ -134,7 +134,9 @@ class MainPortfolioTest(unittest.TestCase):
         pipeline.run.assert_called_once()
         run_auto_backtest.assert_called_once_with(config)
 
-    def test_run_full_analysis_returns_false_when_stock_list_is_empty_without_market_review(self):
+    def test_run_full_analysis_skips_when_no_scheduled_users_and_no_market_review(self):
+        # 多用户模式：默认定时批量改为按用户遍历。无已开启定时分析的用户且未启用大盘复盘时，
+        # 不再以 empty_stock_list 失败，而是跳过个股分析、成功返回，并只跑一次自动回测。
         args = SimpleNamespace(
             portfolio=None,
             single_notify=False,
@@ -157,12 +159,9 @@ class MainPortfolioTest(unittest.TestCase):
             backtest_enabled=False,
         )
 
-        with patch.object(main, "_refresh_stock_index_cache_for_analysis"), patch.object(
-            main,
-            "_compute_trading_day_filter",
-            side_effect=AssertionError("empty STOCK_LIST must fail before trading-day filter"),
-        ), patch(
-            "src.core.market_review.run_market_review",
+        with patch(
+            "src.services.miniapp_watchlist_service.MiniappWatchlistService.iter_scheduled_pools",
+            return_value=[],
         ), patch(
             "src.core.pipeline.StockAnalysisPipeline",
         ) as pipeline_cls, patch.object(
@@ -171,8 +170,7 @@ class MainPortfolioTest(unittest.TestCase):
         ) as run_auto_backtest:
             result = main.run_full_analysis(config, args)
 
-        self.assertFalse(result)
-        self.assertEqual(main._LAST_ANALYSIS_FAILURE_REASON, "empty_stock_list")
+        self.assertTrue(result)
         pipeline_cls.assert_not_called()
         run_auto_backtest.assert_called_once_with(config)
 

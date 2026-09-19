@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [改进] 定时分析跨用户去重（analyze-once/persist-many）：不再对每位用户各跑一批，而是先聚合所有「已开启定时分析且勾选股票」的用户，按归一股票代码去重，同一只股票当轮只做一次昂贵计算（数据抓取 + 指标 + 新闻 + LLM），再按各归属用户分别落库分析历史、决策信号并按其「报告发送到邮箱」偏好投递合并报告；多用户重叠自选时显著降低重复的算力与外部调用成本。大盘复盘与自动回测每轮仍全局各跑一次。
+- [新功能] 定时分析名额改由独立功能额度 `scheduled_analysis` 控制（默认每日 10 只），替代原硬编码的每用户上限 50：管理员可在「权限与额度」按用户/套餐/白名单/全局默认调节（`0` 关闭该用户定时分析、白名单不限量），额度按自选顺序分配、不足只分析前 N 只，休市过滤或分析失败的股票自动退还额度；该额度与按需「个股分析」额度相互独立，定时分析不会占用用户的手动分析额度。
+- [新功能] 「分析池」改为按用户隔离：定时分析不再使用全局 `STOCK_LIST` 作为分析范围，而是按「已开启定时分析且勾选股票」的用户执行（`owner=该用户`，空池用户跳过、单用户失败不影响其他人）；报告/信号归属该用户并按用户「报告发送到邮箱」偏好投递。`--stocks` 手动分析与券商持仓分析维持原全局行为。调度时间仍由管理员在系统设置维护。
+- [新功能] 用户可自助管理定时分析：新增按用户「参与定时分析」总开关（默认关闭，opt-in）与每只自选是否纳入分析池的勾选；小程序在工作台「我的自选」、Web 在「个人设置 → 定时分析」提供一致入口。新增中性前缀端点 `POST /api/v1/watchlist/scheduled`、`GET`/`PUT /api/v1/watchlist/schedule-pref`（同时挂 `/api/v1/miniapp/watchlist/*`，Web Cookie 与小程序 Bearer 复用，权限 `watchlist.read`/`watchlist.manage`）；`miniapp_watchlist` 增 `scheduled` 列并新增 `user_schedule_prefs` 表（含 SQLite 迁移）。
+- [改进] 下线全局自选队列 HTTP 端点 `GET/POST /api/v1/stocks/watchlist*`（获取/加入/移除），及其读写 `STOCK_LIST` 的辅助逻辑：多用户改造后无客户端使用（Web 与小程序均已切到按用户 `/api/v1/watchlist*`）；小程序 `stocksApi.watchlist*` 冗余方法一并移除。`STOCK_LIST` 环境变量仅剩机器人 `/batch`、`/status` 命令与诊断脚本读取，不再驱动每日定时分析。
+- [改进] 全局 `STOCK_LIST` 从系统设置界面下线：多用户模式下分析池按用户维护，`STOCK_LIST` 字段从系统配置 schema 移除（两端系统设置不再展示），空值不再作为 setup 首次试跑门槛与 `validate_structured` 的错误（降级为 info）；环境变量 `STOCK_LIST` 仍可被兼容读取，`.env.example` 默认置空并说明。
+- [修复] 告警 `target_scope="watchlist"` 的目标由全局 `STOCK_LIST` 改为规则所属用户的个人自选（`/api/v1/miniapp/watchlist`）；无个人自选时为空，不再回退到全局清单。
+- [改进] Web 端「自选」统一为按用户隔离，与小程序共用同一存储：后端将本人自选端点（list/add/remove）额外挂到中性前缀 `/api/v1/watchlist*`（复用 `MiniappWatchlistService` 与同一 RBAC `watchlist.read`/`watchlist.manage`），Web 首页与问股页「加入自选」由原全局 `STOCK_LIST`（`/api/v1/stocks/watchlist*`）改为按当前登录用户的个人自选；小程序 `/api/v1/miniapp/watchlist*` 保持不变。全局默认股票池（每日分析范围）仍由 `/api/v1/stocks/watchlist*` 管理，两者语义分离。
+- [修复] 小程序个股详情页与选股页「加入自选」此前写入全局默认股票池、不会出现在工作台「我的自选」：改为写入按用户的个人自选（`/api/v1/miniapp/watchlist*`，权限 `watchlist.manage`），与工作台「我的自选」同源，加入后即可在工作台看到。
+- [改进] 移除小程序个股详情页冗余的「历史报告」按钮（原仅滚动到本页已有的分析历史区块、无实际跳转），分析历史区块保留。
+- [新功能] 小程序权限管理补齐「配额套餐」创建/编辑：额度分区新增套餐新建/编辑入口（按功能逐项设置每日额度，留空表示继承全局默认），与 Web「权限与额度」页能力一致；并将按用户白名单撤销对齐为支持指定 `feature_code`。
 - [修复] 小程序系统设置项在中文界面下未显示中文：新增与 Web 端一致的配置项本地化映射（`upupup/utils/system-config-i18n.js`），系统设置的分类标题、字段标题/说明与下拉选项按当前界面语言显示（中文使用本地映射，英文回退后端 schema 原文），切换语言即时刷新且保留未保存的编辑。
 - [修复] Web 端 Cookie 写请求同源时被误判为 CSRF 失败：`_validate_web_csrf` 的来源校验在配置白名单之外额外信任「同源请求」（`Origin` host 等于浏览器访问的 Host，支持反代 `X-Forwarded-Host`），修复保存昵称等所有 Web 写操作在部署域名未写入 `CORS_ORIGINS` 时返回 `Invalid Origin or CSRF token`（`csrf_failed`）的问题；跨源请求仍需显式加入 `CORS_ORIGINS` 白名单，绑定 HttpOnly 会话的双提交 CSRF token 仍为主要防护，安全强度不降低。该修复作用于统一中间件，覆盖设置保存、持仓、告警、退出登录、个人设置等全部 Web 写入口。
 - [改进] 小程序「个人信息」页精简为仅头像与昵称：昵称默认只读，右侧「修改」按钮点击后进入可编辑态且按钮文案变为「保存」；头像框贴合头像尺寸展示；编辑视图隐藏微信登录态等冗余提示（登录与首次完善资料流程不受影响）。

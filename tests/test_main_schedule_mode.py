@@ -2065,6 +2065,8 @@ class MainScheduleModeTestCase(unittest.TestCase):
             merge_notification=True,
             current_time=unittest.mock.ANY,
             analysis_targets=None,
+            fanout_owners_by_code=None,
+            analyzed_input_codes=None,
         )
         notifier_message = pipeline.notifier.send.call_args.args[0]
         self.assertIn("## 完整大盘复盘", notifier_message)
@@ -2393,7 +2395,9 @@ class MainScheduleModeTestCase(unittest.TestCase):
 
     def test_run_full_analysis_import_failure_propagates(self) -> None:
         """P1: import failures in run_full_analysis must propagate, not be swallowed."""
-        args = self._make_args()
+        # 显式 --stocks 走单批量路径（会导入 pipeline）；默认无 --stocks 的定时路径改为
+        # 按用户遍历，无已开启用户时不会触达 pipeline 导入。
+        args = self._make_args(stocks="600519")
         config = self._make_config()
 
         with patch("main.parse_arguments", return_value=args), \

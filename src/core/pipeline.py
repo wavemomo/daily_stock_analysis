@@ -21,7 +21,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import List, Dict, Any, Optional, Set, Tuple, Callable
 
 import pandas as pd
 
@@ -471,6 +471,7 @@ class StockAnalysisPipeline:
         query_id: str,
         current_time: Optional[datetime] = None,
         analysis_target: Optional[AnalysisTarget] = None,
+        fanout_owners: Optional[List[AnalysisOwner]] = None,
     ) -> Optional[AnalysisResult]:
         """
         分析单只股票（增强版：含量比、换手率、筹码分析、多维度情报）
@@ -709,6 +710,7 @@ class StockAnalysisPipeline:
                     portfolio_context=portfolio_context,
                     market_structure_context=market_structure_context,
                     analysis_target=analysis_target,
+                    fanout_owners=fanout_owners,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -973,7 +975,7 @@ class StockAnalysisPipeline:
             if result:
                 self._append_daily_data_source(result, context, analysis_target)
 
-            # Step 8: 保存分析历史记录
+            # Step 8: 保存分析历史记录（analyze-once/persist-many：计算一次，按各 owner 分别落库）
             if result and result.success:
                 try:
                     self._emit_progress(97, f"{stock_name}：正在保存分析报告")
@@ -987,43 +989,26 @@ class StockAnalysisPipeline:
                         market_phase_summary=market_phase_summary,
                     )
                     result.diagnostic_context_snapshot = context_snapshot
-                    saved_history_id = self.repo.save(
-                        result=result,
-                        query_id=query_id,
-                        report_type=report_type.value,
-                        news_content=news_context,
-                        context_snapshot=context_snapshot,
-                        save_snapshot=self.save_context_snapshot,
-                    )
-                    valid_saved_history_id = (
-                        isinstance(saved_history_id, int)
-                        and not isinstance(saved_history_id, bool)
-                        and saved_history_id > 0
-                    )
-                    record_history_run(
-                        report_saved=bool(saved_history_id),
-                        metadata_saved=bool(saved_history_id),
-                        analysis_history_id=(
-                            saved_history_id if valid_saved_history_id else None
-                        ),
-                    )
-                    if valid_saved_history_id:
-                        self._extract_decision_signal_after_history_save(
-                            result=result,
-                            query_id=query_id,
-                            source_report_id=saved_history_id,
-                            report_type=report_type.value,
-                            context_snapshot=context_snapshot,
-                            portfolio_context=portfolio_context,
-                            analysis_target=analysis_target,
-                        )
                 except Exception as e:
                     record_history_run(
                         report_saved=False,
                         metadata_saved=False,
                         error_message=e,
                     )
-                    logger.warning(f"{stock_name}({code}) 保存分析历史失败: {e}")
+                    logger.warning(f"{stock_name}({code}) 构建分析上下文快照失败: {e}")
+                else:
+                    for persist_owner in self._resolve_persist_owners(fanout_owners):
+                        self._persist_analysis_result_for_owner(
+                            owner=persist_owner,
+                            result=result,
+                            query_id=query_id,
+                            report_type_value=report_type.value,
+                            news_content=news_context,
+                            context_snapshot=context_snapshot,
+                            portfolio_context=portfolio_context,
+                            analysis_target=analysis_target,
+                            save_snapshot=self.save_context_snapshot,
+                        )
 
             return result
 
@@ -1507,6 +1492,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         market_structure_context: Optional[Dict[str, Any]] = None,
         analysis_target: Optional[AnalysisTarget] = None,
+        fanout_owners: Optional[List[AnalysisOwner]] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
@@ -1913,53 +1899,36 @@ class StockAnalysisPipeline:
                     )
                     result.diagnostic_context_snapshot = agent_context_snapshot
                     agent_context_snapshot["stock_name"] = resolved_stock_name
-                    saved_history_id = self.repo.save(
-                        result=result,
-                        query_id=query_id,
-                        report_type=report_type.value,
-                        news_content=None,
-                        context_snapshot=agent_context_snapshot,
-                        save_snapshot=self.save_context_snapshot,
-                    )
-                    valid_saved_history_id = (
-                        isinstance(saved_history_id, int)
-                        and not isinstance(saved_history_id, bool)
-                        and saved_history_id > 0
-                    )
-                    record_history_run(
-                        report_saved=bool(saved_history_id),
-                        metadata_saved=bool(saved_history_id),
-                        analysis_history_id=(
-                            saved_history_id if valid_saved_history_id else None
-                        ),
-                    )
-                    if valid_saved_history_id:
-                        self._persist_skill_opinion_samples_after_history_save(
-                            runtime_facts=getattr(agent_result, "runtime_facts", None),
-                            analysis_history_id=saved_history_id,
-                            stock_code=code,
-                            analysis_context_pack_overview=analysis_context_pack_overview,
-                        )
-                        self._extract_decision_signal_after_history_save(
-                            result=result,
-                            query_id=query_id,
-                            source_report_id=saved_history_id,
-                            report_type=report_type.value,
-                            context_snapshot=agent_context_snapshot,
-                            portfolio_context=portfolio_context,
-                            analysis_target=analysis_target,
-                        )
-                    latest_diagnostic_snapshot = current_diagnostic_snapshot()
-                    if latest_diagnostic_snapshot is not None:
-                        agent_context_snapshot["diagnostics"] = latest_diagnostic_snapshot
-                        result.diagnostic_context_snapshot = agent_context_snapshot
                 except Exception as e:
                     record_history_run(
                         report_saved=False,
                         metadata_saved=False,
                         error_message=e,
                     )
-                    logger.warning(f"[{code}] 保存 Agent 分析历史失败: {e}")
+                    logger.warning(f"[{code}] 构建 Agent 分析上下文快照失败: {e}")
+                else:
+                    # analyze-once/persist-many：Agent 计算一次，按各 owner 分别落库。
+                    for persist_owner in self._resolve_persist_owners(fanout_owners):
+                        self._persist_analysis_result_for_owner(
+                            owner=persist_owner,
+                            result=result,
+                            query_id=query_id,
+                            report_type_value=report_type.value,
+                            news_content=None,
+                            context_snapshot=agent_context_snapshot,
+                            portfolio_context=portfolio_context,
+                            analysis_target=analysis_target,
+                            save_snapshot=self.save_context_snapshot,
+                            skill_opinion_runtime_facts=getattr(
+                                agent_result, "runtime_facts", None
+                            ),
+                            analysis_context_pack_overview=analysis_context_pack_overview,
+                            log_label="Agent 分析",
+                        )
+                    latest_diagnostic_snapshot = current_diagnostic_snapshot()
+                    if latest_diagnostic_snapshot is not None:
+                        agent_context_snapshot["diagnostics"] = latest_diagnostic_snapshot
+                        result.diagnostic_context_snapshot = agent_context_snapshot
 
             return result
 
@@ -2920,6 +2889,101 @@ class StockAnalysisPipeline:
                 type(exc).__name__,
             )
 
+    def _repo_for_owner(self, owner: Optional[AnalysisOwner]) -> AnalysisRepository:
+        """返回绑定到指定 owner 的历史仓库；与实例 owner 一致时复用 ``self.repo``。
+
+        analyze-once/persist-many 扇出对同一份计算结果按多个 owner 分别落库，每个
+        非实例 owner 使用独立的 ``AnalysisRepository``，避免污染 ``self.repo``。
+        """
+        if owner is not None and owner == self.owner:
+            return self.repo
+        return AnalysisRepository(self.db, owner=owner)
+
+    def _persist_analysis_result_for_owner(
+        self,
+        *,
+        owner: Optional[AnalysisOwner],
+        result: AnalysisResult,
+        query_id: str,
+        report_type_value: str,
+        news_content: Optional[str],
+        context_snapshot: Dict[str, Any],
+        portfolio_context: Optional[Dict[str, Any]] = None,
+        analysis_target: Optional[AnalysisTarget] = None,
+        save_snapshot: bool = True,
+        skill_opinion_runtime_facts: Any = None,
+        analysis_context_pack_overview: Optional[Dict[str, Any]] = None,
+        log_label: str = "分析",
+    ) -> Optional[int]:
+        """将一份已算完的分析结果按指定 owner 落库（历史 + 技能样本 + 决策信号）。
+
+        扇出（analyze-once/persist-many）时对每个 owner 调用一次；单 owner 落库失败
+        只记该 owner，不抛出，保证其他 owner 不受影响。返回有效 history_id 或 None。
+        """
+        try:
+            repo = self._repo_for_owner(owner)
+            saved_history_id = repo.save(
+                result=result,
+                query_id=query_id,
+                report_type=report_type_value,
+                news_content=news_content,
+                context_snapshot=context_snapshot,
+                save_snapshot=save_snapshot,
+            )
+            valid_saved_history_id = (
+                isinstance(saved_history_id, int)
+                and not isinstance(saved_history_id, bool)
+                and saved_history_id > 0
+            )
+            record_history_run(
+                report_saved=bool(saved_history_id),
+                metadata_saved=bool(saved_history_id),
+                analysis_history_id=(
+                    saved_history_id if valid_saved_history_id else None
+                ),
+            )
+            if valid_saved_history_id:
+                if skill_opinion_runtime_facts is not None:
+                    self._persist_skill_opinion_samples_after_history_save(
+                        runtime_facts=skill_opinion_runtime_facts,
+                        analysis_history_id=saved_history_id,
+                        stock_code=getattr(result, "code", None) or "",
+                        analysis_context_pack_overview=analysis_context_pack_overview,
+                    )
+                self._extract_decision_signal_after_history_save(
+                    result=result,
+                    query_id=query_id,
+                    source_report_id=saved_history_id,
+                    report_type=report_type_value,
+                    context_snapshot=context_snapshot,
+                    portfolio_context=portfolio_context,
+                    analysis_target=analysis_target,
+                    owner=owner,
+                )
+            return saved_history_id if valid_saved_history_id else None
+        except Exception as e:
+            record_history_run(
+                report_saved=False,
+                metadata_saved=False,
+                error_message=e,
+            )
+            logger.warning(
+                "%s(%s) 保存%s历史失败: %s",
+                getattr(result, "name", None) or getattr(result, "code", None) or "",
+                getattr(result, "code", None) or "",
+                log_label,
+                e,
+            )
+            return None
+
+    def _resolve_persist_owners(
+        self, fanout_owners: Optional[List[AnalysisOwner]]
+    ) -> List[Optional[AnalysisOwner]]:
+        """扇出目标 owner 列表；未指定扇出时退回实例级单 owner。"""
+        if fanout_owners:
+            return list(fanout_owners)
+        return [self.owner]
+
     def _extract_decision_signal_after_history_save(
         self,
         *,
@@ -2930,8 +2994,13 @@ class StockAnalysisPipeline:
         context_snapshot: Dict[str, Any],
         portfolio_context: Optional[Dict[str, Any]] = None,
         analysis_target: Optional[AnalysisTarget] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> None:
-        """Best-effort DecisionSignal extraction after analysis history is saved."""
+        """Best-effort DecisionSignal extraction after analysis history is saved.
+
+        ``owner`` 显式传入时，信号归属该 owner（analyze-once/persist-many 扇出场景
+        对同一份计算结果按多个 owner 分别落库）；缺省沿用实例级 ``self.owner``。
+        """
 
         assert (
             isinstance(source_report_id, int)
@@ -2964,7 +3033,7 @@ class StockAnalysisPipeline:
                 profile_source="auto_default",
                 market_override=market_override,
                 # 信号继承产出它的分析报告的 owner，保持与 analysis_history 一致的归属。
-                owner=self.owner,
+                owner=owner if owner is not None else self.owner,
             )
             if isinstance(signal_result, dict):
                 summary = summarize_decision_signal(signal_result.get("item"))
@@ -3340,6 +3409,7 @@ class StockAnalysisPipeline:
         analysis_query_id: Optional[str] = None,
         current_time: Optional[datetime] = None,
         analysis_target: Optional[AnalysisTarget] = None,
+        fanout_owners: Optional[List[AnalysisOwner]] = None,
     ) -> Optional[AnalysisResult]:
         """
         处理单只股票的完整流程
@@ -3404,6 +3474,8 @@ class StockAnalysisPipeline:
                 analyze_kwargs["current_time"] = current_time
             if analysis_target is not None:
                 analyze_kwargs["analysis_target"] = analysis_target
+            if fanout_owners:
+                analyze_kwargs["fanout_owners"] = fanout_owners
             result = self.analyze_stock(code, report_type, **analyze_kwargs)
             
             if result and result.success:
@@ -3442,6 +3514,8 @@ class StockAnalysisPipeline:
         merge_notification: bool = False,
         current_time: Optional[datetime] = None,
         analysis_targets: Optional[List[AnalysisTarget]] = None,
+        fanout_owners_by_code: Optional[Dict[str, List[AnalysisOwner]]] = None,
+        analyzed_input_codes: Optional[Set[str]] = None,
     ) -> List[AnalysisResult]:
         """
         运行完整的分析流程
@@ -3555,7 +3629,10 @@ class StockAnalysisPipeline:
             )
         
         results: List[AnalysisResult] = []
-        
+        # 扇出模式下按输入 code 索引成功结果，供按 owner 分组通知（result.code 可能被归一，
+        # 因此用提交时的输入 code 作为键，与 fanout_owners_by_code 的键保持一致）。
+        result_by_input_code: Dict[str, AnalysisResult] = {}
+
         # 使用线程池并发处理
         # 注意：max_workers 设置较低（默认3）以避免触发反爬
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -3576,6 +3653,10 @@ class StockAnalysisPipeline:
                 }
                 if target is not None:
                     submit_kwargs["analysis_target"] = target
+                if fanout_owners_by_code is not None:
+                    code_owners = fanout_owners_by_code.get(code)
+                    if code_owners:
+                        submit_kwargs["fanout_owners"] = code_owners
                 future = executor.submit(
                     self.process_single_stock,
                     code,
@@ -3590,7 +3671,16 @@ class StockAnalysisPipeline:
                     result = future.result()
                     if result and result.success:
                         results.append(result)
-                        if single_stock_notify and send_notification and not dry_run:
+                        result_by_input_code[code] = result
+                        if analyzed_input_codes is not None:
+                            analyzed_input_codes.add(code)
+                        # 扇出模式的通知在收尾按 owner 合并发送，这里不做单股推送。
+                        if (
+                            single_stock_notify
+                            and send_notification
+                            and not dry_run
+                            and fanout_owners_by_code is None
+                        ):
                             self._send_single_stock_notification(
                                 result,
                                 report_type=report_type,
@@ -3649,7 +3739,12 @@ class StockAnalysisPipeline:
             self._save_local_report(results, report_type)
 
         # 发送通知（单股推送模式下跳过汇总推送，避免重复）
-        if results and send_notification and not dry_run:
+        if results and send_notification and not dry_run and fanout_owners_by_code is not None:
+            # 扇出模式：每个 owner 各收到一份仅含自己获配股票的合并报告，邮件按 owner 邮箱路由。
+            self._dispatch_fanout_owner_reports(
+                result_by_input_code, report_type, fanout_owners_by_code
+            )
+        elif results and send_notification and not dry_run:
             if single_stock_notify:
                 # 单股推送模式：只保存汇总报告，不再重复推送
                 logger.info("单股推送模式：跳过汇总推送，仅保存报告到本地")
@@ -3663,16 +3758,20 @@ class StockAnalysisPipeline:
         
         return results
 
-    def _resolve_owner_email_receivers(self) -> Optional[List[str]]:
+    def _resolve_owner_email_receivers(
+        self, owner: Optional[AnalysisOwner] = None
+    ) -> Optional[List[str]]:
         """按报告 owner 解析邮件收件人。
 
         - 全局 owner（定时任务/大盘复盘/后台）：返回 None，沿用全局或分组收件人。
         - 用户 owner：返回该用户"报告接收邮箱"列表；无绑定邮箱或已关闭"报告发送到
           邮箱"开关时返回空列表（表示跳过邮件，且绝不回退到全局收件人）。
 
+        ``owner`` 显式传入时按该 owner 解析（扇出场景每个 owner 发到各自邮箱）；
+        缺省沿用实例级 ``self.owner``。
         解析失败一律 fail-closed 返回空列表，避免把某用户的报告误发到全局管理员邮箱。
         """
-        owner = getattr(self, "owner", None)
+        owner = owner if owner is not None else getattr(self, "owner", None)
         if owner is None or getattr(owner, "scope", None) != "user":
             return None
         user_id = getattr(owner, "user_id", None)
@@ -3799,6 +3898,109 @@ class StockAnalysisPipeline:
                     notification_run=notification_run,
                 )
                 logger.error(f"[{stock_code}] 单股推送异常: {e}")
+
+    def _send_owner_report(
+        self,
+        results: List[AnalysisResult],
+        report_type: ReportType,
+        owner: AnalysisOwner,
+    ) -> None:
+        """扇出定时分析：把某个 owner 名下的合并报告发送给该 owner。
+
+        - 邮件按该 owner 的"报告接收邮箱"路由；无绑定邮箱或关闭开关则跳过邮件，
+          绝不回退到全局收件人（与 ``_resolve_owner_email_receivers`` 一致）。
+        - dedup/cooldown key 带 owner 后缀，避免多个 owner 的同批报告互相抑制。
+        - 本地留档文件名带 owner，避免多 owner 覆盖同名文件。
+        - 单个 owner 通知失败只记录并降级，不影响其他 owner。
+        """
+        if not results:
+            return
+        owner_key = getattr(owner, "key", "global") or "global"
+        try:
+            report_content = self._generate_aggregate_report(results, report_type)
+        except Exception as exc:
+            logger.warning("生成 owner=%s 合并报告失败，跳过通知: %s", owner_key, exc)
+            return
+
+        save_report = getattr(self.notifier, "save_report_to_file", None)
+        if callable(save_report):
+            try:
+                date_str = datetime.now().strftime('%Y%m%d')
+                safe_owner = owner_key.replace(':', '_')
+                save_report(
+                    report_content,
+                    filename=f"report_{date_str}_scheduled_{safe_owner}.md",
+                )
+            except Exception as exc:
+                logger.warning("owner=%s 合并报告本地保存失败: %s", owner_key, exc)
+
+        if not self.notifier.is_available():
+            return
+
+        dedup_key = f"report:scheduled:{owner_key}:{report_type.value}"
+        send_kwargs: Dict[str, Any] = {
+            "email_stock_codes": [
+                getattr(r, "code", None) for r in results if getattr(r, "code", None)
+            ],
+            "route_type": "report",
+            "severity": "info",
+            "dedup_key": dedup_key,
+            "cooldown_key": dedup_key,
+        }
+        if len(results) == 1 and _supports_explicit_keyword(
+            self.notifier.send, "structured_payload"
+        ):
+            send_kwargs["structured_payload"] = _share_image_payload(results[0])
+        owner_email_receivers = self._resolve_owner_email_receivers(owner)
+        if owner_email_receivers is not None and _supports_explicit_keyword(
+            self.notifier.send, "email_receivers_override"
+        ):
+            send_kwargs["email_receivers_override"] = owner_email_receivers
+
+        try:
+            sent = self.notifier.send(report_content, **send_kwargs)
+            record_notification_run(
+                channel="report",
+                status="success" if sent else "failed",
+                success=sent,
+            )
+            if sent:
+                logger.info(
+                    "定时分析 owner=%s 合并报告已发送（%d 只）", owner_key, len(results)
+                )
+            else:
+                logger.warning("定时分析 owner=%s 合并报告发送失败", owner_key)
+        except Exception as exc:
+            record_notification_run(
+                channel="report",
+                status="failed",
+                success=False,
+                error_message=exc,
+            )
+            logger.warning("定时分析 owner=%s 合并报告发送异常: %s", owner_key, exc)
+
+    def _dispatch_fanout_owner_reports(
+        self,
+        result_by_code: Dict[str, AnalysisResult],
+        report_type: ReportType,
+        fanout_owners_by_code: Dict[str, List[AnalysisOwner]],
+    ) -> None:
+        """把扇出结果按 owner 分组，每个 owner 各发一份仅含其获配股票的合并报告。
+
+        以提交时的输入 code 为键关联结果与 owner；某个 owner 通知失败不影响其他 owner。
+        """
+        owner_codes: Dict[AnalysisOwner, List[str]] = {}
+        for code, owners in fanout_owners_by_code.items():
+            if code not in result_by_code:
+                continue
+            for owner in owners or []:
+                bucket = owner_codes.setdefault(owner, [])
+                if code not in bucket:
+                    bucket.append(code)
+        for owner, codes in owner_codes.items():
+            owner_results = [result_by_code[c] for c in codes if c in result_by_code]
+            if owner_results:
+                self._send_owner_report(owner_results, report_type, owner)
 
     def _save_local_report(
         self,

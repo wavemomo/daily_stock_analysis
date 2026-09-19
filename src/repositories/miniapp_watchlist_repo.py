@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import and_, delete, desc, func, select
@@ -91,6 +90,50 @@ class MiniappWatchlistRepository:
             session.commit()
             session.refresh(row)
             return row
+
+    def set_scheduled(
+        self,
+        *,
+        user_id: int,
+        match_key: str,
+        scheduled: bool,
+    ) -> Optional[MiniappWatchlistRecord]:
+        """Toggle whether a watchlist item joins the user's scheduled pool."""
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(MiniappWatchlistRecord)
+                .where(
+                    MiniappWatchlistRecord.user_id == user_id,
+                    MiniappWatchlistRecord.match_key == match_key,
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            row.scheduled = bool(scheduled)
+            row.updated_at = local_naive_now()
+            session.commit()
+            session.refresh(row)
+            return row
+
+    def list_scheduled_rows(self, *, user_id: int) -> List[MiniappWatchlistRecord]:
+        """Watchlist rows flagged for scheduled analysis, oldest first (stable order)."""
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(MiniappWatchlistRecord)
+                .where(
+                    MiniappWatchlistRecord.user_id == user_id,
+                    MiniappWatchlistRecord.scheduled.is_(True),
+                )
+                .order_by(
+                    MiniappWatchlistRecord.created_at,
+                    MiniappWatchlistRecord.id,
+                )
+            ).scalars().all()
+            return list(rows)
+
+    def list_scheduled_codes(self, *, user_id: int) -> List[str]:
+        return [row.stock_code for row in self.list_scheduled_rows(user_id=user_id)]
 
     def remove(self, *, user_id: int, match_key: str) -> bool:
         with self.db.get_session() as session:

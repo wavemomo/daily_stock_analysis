@@ -11,9 +11,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps import require_permission
 from api.v1.schemas.miniapp import (
+    MiniappSchedulePrefRequest,
+    MiniappSchedulePrefResponse,
     MiniappWatchlistItem,
     MiniappWatchlistListResponse,
     MiniappWatchlistMutateRequest,
+    MiniappWatchlistScheduledRequest,
 )
 from src.services.miniapp_watchlist_service import (
     MiniappWatchlistService,
@@ -60,3 +63,51 @@ def remove_watchlist(
         raise HTTPException(status_code=400, detail=str(exc))
     payload = service.list(user_id=principal.user.id)
     return MiniappWatchlistListResponse(**payload)
+
+
+@router.post(
+    "/scheduled",
+    response_model=MiniappWatchlistItem,
+    summary="设置某只自选是否参与本人定时分析",
+)
+def set_watchlist_scheduled(
+    request: MiniappWatchlistScheduledRequest,
+    principal: MiniappPrincipal = Depends(require_permission('watchlist.manage')),
+) -> MiniappWatchlistItem:
+    try:
+        payload = MiniappWatchlistService().set_scheduled(
+            user_id=principal.user.id,
+            stock_code=request.stock_code,
+            scheduled=request.scheduled,
+        )
+        return MiniappWatchlistItem(**payload)
+    except WatchlistValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get(
+    "/schedule-pref",
+    response_model=MiniappSchedulePrefResponse,
+    summary="查询本人定时分析参与状态",
+)
+def get_schedule_pref(
+    principal: MiniappPrincipal = Depends(require_permission('watchlist.read')),
+) -> MiniappSchedulePrefResponse:
+    payload = MiniappWatchlistService().get_schedule_pref(user_id=principal.user.id)
+    return MiniappSchedulePrefResponse(**payload)
+
+
+@router.put(
+    "/schedule-pref",
+    response_model=MiniappSchedulePrefResponse,
+    summary="开启/关闭本人定时分析参与",
+)
+def set_schedule_pref(
+    request: MiniappSchedulePrefRequest,
+    principal: MiniappPrincipal = Depends(require_permission('watchlist.manage')),
+) -> MiniappSchedulePrefResponse:
+    payload = MiniappWatchlistService().set_schedule_pref(
+        user_id=principal.user.id,
+        enabled=request.enabled,
+    )
+    return MiniappSchedulePrefResponse(**payload)

@@ -28,6 +28,7 @@ from src.portfolio_ownership import PortfolioScope
 from src.repositories.alert_repo import AlertRepository
 from src.repositories.miniapp_user_repo import MiniappUserRepository
 from src.services.alert_service import AlertService
+from src.services.miniapp_watchlist_service import MiniappWatchlistService
 from src.services.portfolio_service import PortfolioService
 from src.storage import AlertCooldownRecord, AlertNotificationRecord, AlertTriggerRecord, Base, DatabaseManager
 
@@ -399,6 +400,8 @@ class AlertApiTestCase(unittest.TestCase):
             self.assertEqual(resp.json()["error"], "validation_error")
 
     def test_p6_watchlist_dry_run_aggregates_targets_without_stock_code_validation(self) -> None:
+        # 多用户模式：watchlist 目标解析规则所属用户的个人自选，需先为该用户添加自选。
+        MiniappWatchlistService().add(user_id=self.principal.user.id, stock_code="600519")
         rule = self._create_rule({
             "name": "Watchlist breakout",
             "target_scope": "watchlist",
@@ -422,6 +425,7 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(payload["target_results"][0]["target"], "600519")
 
     def test_p6_watchlist_dry_run_timeout_counts_target_as_skipped(self) -> None:
+        MiniappWatchlistService().add(user_id=self.principal.user.id, stock_code="600519")
         rule = self._create_rule({
             "name": "Watchlist slow",
             "target_scope": "watchlist",

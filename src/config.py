@@ -3160,10 +3160,12 @@ class Config:
         issues: List[ConfigIssue] = []
 
         # --- Stock list ---
+        # 多用户模式：分析池按用户维护（个人自选），全局 STOCK_LIST 可留空，
+        # 不再作为硬性错误阻断校验。
         if not self.stock_list:
             issues.append(ConfigIssue(
-                severity="error",
-                message="未配置 STOCK_LIST。请设置至少一个股票代码，例如：600519,hk00700,AAPL。",
+                severity="info",
+                message="未配置全局 STOCK_LIST。多用户模式下分析池按用户维护（个人自选），全局清单可留空。",
                 field="STOCK_LIST",
             ))
         elif self.stock_email_groups:

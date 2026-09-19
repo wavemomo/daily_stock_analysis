@@ -138,12 +138,20 @@ class SystemConfigApiTestCase(unittest.TestCase):
 
     def test_get_config_schema_includes_help_metadata(self) -> None:
         payload = system_config.get_system_config(include_schema=True, service=self.service).model_dump(by_alias=True)
-        item_map = {item["key"]: item for item in payload["items"]}
-        stock_schema = item_map["STOCK_LIST"]["schema"]
-
-        self.assertEqual(stock_schema["help_key"], "settings.base.STOCK_LIST")
-        self.assertTrue(stock_schema["examples"])
-        self.assertTrue(stock_schema["docs"])
+        # 任取一个带完整帮助元数据的字段，验证 schema 暴露 help_key/examples/docs
+        # （STOCK_LIST 已在多用户改造中从系统设置下线，不再作为断言目标）。
+        schemas = [
+            item["schema"]
+            for item in payload["items"]
+            if item.get("schema")
+            and item["schema"].get("help_key")
+            and item["schema"].get("examples")
+            and item["schema"].get("docs")
+        ]
+        self.assertTrue(schemas, "expected at least one field to expose help metadata")
+        self.assertTrue(schemas[0]["help_key"])
+        self.assertTrue(schemas[0]["examples"])
+        self.assertTrue(schemas[0]["docs"])
 
     def test_get_config_schema_exposes_generation_backend_bounds_and_agent_options(self) -> None:
         payload = system_config.get_system_config(include_schema=True, service=self.service).model_dump(by_alias=True)

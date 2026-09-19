@@ -858,7 +858,7 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             '{"title":$title_json,"content":$content_json}',
         )
 
-    def test_refresh_stock_list_preserves_empty_required_config(self) -> None:
+    def test_refresh_stock_list_empty_is_optional_info(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"
             env_path.write_text("STOCK_LIST=\n", encoding="utf-8")
@@ -868,8 +868,12 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
                 config.refresh_stock_list()
 
         self.assertEqual(config.stock_list, [])
+        # 多用户模式：分析池按用户维护，全局 STOCK_LIST 为空降级为 info，不再是 error。
         issues = config.validate_structured()
         self.assertTrue(
+            any(issue.severity == "info" and issue.field == "STOCK_LIST" for issue in issues)
+        )
+        self.assertFalse(
             any(issue.severity == "error" and issue.field == "STOCK_LIST" for issue in issues)
         )
 

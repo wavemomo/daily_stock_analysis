@@ -17,7 +17,7 @@ import re
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, Depends
 
-from api.deps import get_request_analysis_owner_context, get_system_config_service
+from api.deps import get_request_analysis_owner_context
 
 from api.v1.schemas.stocks import (
     ExtractFromImageResponse,
@@ -27,7 +27,7 @@ from api.v1.schemas.stocks import (
     StockProfileResponse,
     StockQuote,
 )
-from api.v1.schemas.history import WatchlistRequest, WatchlistResponse
+
 from api.v1.schemas.common import ErrorResponse
 from src.services.feature_quota_service import FeatureQuotaService
 from src.services.image_stock_extractor import (
@@ -44,8 +44,6 @@ from src.services.stock_service import StockService
 from src.services.stock_profile_service import InvalidStockProfileCode, StockProfileService
 from src.services.history_service import HistoryService
 from src.services.run_diagnostics import sanitize_diagnostic_text
-from src.services.stock_list_parser import split_stock_list
-from src.services.system_config_service import SystemConfigService
 from data_provider.base import normalize_stock_code
 
 logger = logging.getLogger(__name__)
@@ -54,29 +52,6 @@ router = APIRouter()
 
 # 须在 /{stock_code} 路由之前定义
 ALLOWED_MIME_STR = ", ".join(ALLOWED_MIME)
-
-
-def _read_watchlist_codes(service: SystemConfigService) -> list:
-    """Read STOCK_LIST codes as-is (no normalization)."""
-    config_data = service.get_config(include_schema=False)
-    stock_list_str = ""
-    for item in config_data.get("items", []):
-        if item.get("key") == "STOCK_LIST":
-            stock_list_str = str(item.get("value", ""))
-            break
-    return split_stock_list(stock_list_str)
-
-
-def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
-    """Persist stock codes to STOCK_LIST as-is (no normalization)."""
-    config_data = service.get_config(include_schema=False)
-    config_version = config_data.get("config_version", "")
-    service.update(
-        config_version=config_version,
-        items=[{"key": "STOCK_LIST", "value": ",".join(codes)}],
-        mask_token="******",
-        reload_now=True,
-    )
 
 
 # Stock code validation patterns (aligned with frontend validateStockCode)
@@ -116,14 +91,6 @@ def _validate_and_normalize_stock_code(code: str) -> str:
             },
         )
     return normalize_stock_code(stripped)
-
-
-def _watchlist_match_key(code: str) -> str:
-    """Return the equivalence key used for watchlist add/remove matching."""
-    normalized = normalize_stock_code(code.strip())
-    if re.fullmatch(r"\d{5}", normalized):
-        return f"HK{normalized}"
-    return normalized.upper()
 
 
 @router.post(
@@ -323,96 +290,8 @@ async def parse_import(request: Request) -> ExtractFromImageResponse:
     return ExtractFromImageResponse(codes=codes, items=extract_items, raw_text=None)
 
 
-@router.get(
-    "/watchlist",
-    response_model=WatchlistResponse,
-    responses={
-        200: {"description": "当前自选队列"},
-        500: {"description": "服务器错误", "model": ErrorResponse},
-    },
-    summary="获取自选队列",
-    description="返回当前 STOCK_LIST 配置中的所有股票代码。",
-)
-def get_watchlist(
-    service: SystemConfigService = Depends(get_system_config_service),
-) -> WatchlistResponse:
-    try:
-        codes = _read_watchlist_codes(service)
-        return WatchlistResponse(stock_codes=codes, message=f"当前自选 {len(codes)} 只股票")
-    except Exception as e:
-        logger.error(f"获取自选队列失败: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "internal_error", "message": f"获取自选队列失败: {str(e)}"},
-        )
-
-
-@router.post(
-    "/watchlist/add",
-    response_model=WatchlistResponse,
-    responses={
-        200: {"description": "已加入自选"},
-        400: {"description": "参数错误", "model": ErrorResponse},
-        500: {"description": "服务器错误", "model": ErrorResponse},
-    },
-    summary="加入自选队列",
-    description="将指定股票代码加入 STOCK_LIST。",
-)
-def add_to_watchlist(
-    request: WatchlistRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
-) -> WatchlistResponse:
-    try:
-        validated = _validate_and_normalize_stock_code(request.stock_code)
-        codes = _read_watchlist_codes(service)
-        existing_keys = [_watchlist_match_key(c) for c in codes]
-        if _watchlist_match_key(validated) not in existing_keys:
-            codes.append(request.stock_code.strip())
-            _write_watchlist_codes(service, codes)
-        return WatchlistResponse(stock_codes=codes, message=f"已加入 {request.stock_code.strip()}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"加入自选失败: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "internal_error", "message": f"加入自选失败: {str(e)}"},
-        )
-
-
-@router.post(
-    "/watchlist/remove",
-    response_model=WatchlistResponse,
-    responses={
-        200: {"description": "已从自选删除"},
-        400: {"description": "参数错误", "model": ErrorResponse},
-        500: {"description": "服务器错误", "model": ErrorResponse},
-    },
-    summary="从自选队列删除",
-    description="从 STOCK_LIST 中移除指定股票代码。",
-)
-def remove_from_watchlist(
-    request: WatchlistRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
-) -> WatchlistResponse:
-    try:
-        validated = _validate_and_normalize_stock_code(request.stock_code)
-        codes = _read_watchlist_codes(service)
-        existing_keys = [_watchlist_match_key(c) for c in codes]
-        requested_key = _watchlist_match_key(validated)
-        if requested_key in existing_keys:
-            idx = existing_keys.index(requested_key)
-            codes.pop(idx)
-            _write_watchlist_codes(service, codes)
-        return WatchlistResponse(stock_codes=codes, message=f"已移除 {request.stock_code.strip()}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"从自选删除失败: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "internal_error", "message": f"从自选删除失败: {str(e)}"},
-        )
+# 全局 STOCK_LIST 自选队列端点（GET/POST /watchlist*）已随多用户改造下线：
+# 分析池按用户维护，客户端改用中性前缀 /api/v1/watchlist*（个人自选）。
 
 
 @router.get(

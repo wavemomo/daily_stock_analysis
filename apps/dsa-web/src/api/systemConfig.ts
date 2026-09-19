@@ -339,30 +339,34 @@ export const systemConfigApi = {
   },
 
   /**
-   * 获取自选队列股票代码列表
+   * 获取本人自选股代码列表（按用户隔离，与小程序共用同一存储）。
+   * 走中性前缀 /api/v1/watchlist，由 Cookie 会话解析当前用户。
    */
   getWatchlist: async (): Promise<string[]> => {
-    const response = await apiClient.get<Record<string, unknown>>('/api/v1/stocks/watchlist');
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/watchlist');
     const data = toCamelCase<{ stockCodes: string[] }>(response.data);
     return data.stockCodes || [];
   },
 
   /**
-   * 添加股票到自选队列
+   * 添加股票到本人自选。
+   * 后端新增接口返回单条记录，因此新增后重新拉取完整列表以返回最新代码集合。
    */
   addToWatchlist: async (stockCode: string): Promise<string[]> => {
-    const response = await apiClient.post<Record<string, unknown>>('/api/v1/stocks/watchlist/add', {
+    await apiClient.post('/api/v1/watchlist/add', {
       stock_code: stockCode,
+      stock_name: '',
     });
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/watchlist');
     const data = toCamelCase<{ stockCodes: string[] }>(response.data);
     return data.stockCodes || [];
   },
 
   /**
-   * 从自选队列移除股票
+   * 从本人自选移除股票（后端返回移除后的完整列表）。
    */
   removeFromWatchlist: async (stockCode: string): Promise<string[]> => {
-    const response = await apiClient.post<Record<string, unknown>>('/api/v1/stocks/watchlist/remove', {
+    const response = await apiClient.post<Record<string, unknown>>('/api/v1/watchlist/remove', {
       stock_code: stockCode,
     });
     const data = toCamelCase<{ stockCodes: string[] }>(response.data);

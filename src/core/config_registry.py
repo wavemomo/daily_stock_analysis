@@ -93,36 +93,9 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
 }
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
-    "STOCK_LIST": {
-        "title": "Stock List",
-        "description": "Watchlist stock codes. English commas are recommended; common pasted separators are normalized on save.",
-        "category": "base",
-        "data_type": "array",
-        "ui_control": "textarea",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": True,
-        "default_value": "600519,300750,002594",
-        "options": [],
-        "validation": {"min_items": 1},
-        "display_order": 10,
-        "help_key": "settings.base.STOCK_LIST",
-        "examples": [
-            "STOCK_LIST=600519,300750,002594",
-            "STOCK_LIST=600519,hk00700,AAPL",
-        ],
-        "docs": [
-            {
-                "label": "完整指南：环境变量完整列表",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
-            },
-            {
-                "label": "Tushare 股票列表指南",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/TUSHARE_STOCK_LIST_GUIDE.md",
-            },
-        ],
-        "warning_codes": [],
-    },
+    # STOCK_LIST（全局分析池）已在多用户改造中从系统设置下线：分析池按用户维护
+    # （个人自选，/api/v1/watchlist*）。环境变量 STOCK_LIST 仍可被 Config 读取用于
+    # 兼容旧部署，但不再作为可编辑的系统设置项对用户暴露。
     # ------------------------------------------------------------------
     # AI Model – LiteLLM unified config
     # ------------------------------------------------------------------

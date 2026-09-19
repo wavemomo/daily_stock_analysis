@@ -47,6 +47,7 @@ FEATURE_QUOTA_DEFINITIONS: tuple[FeatureQuotaDefinition, ...] = (
     FeatureQuotaDefinition('decision_signal_reassess', '决策信号重评估', '重新评估一份历史报告。', 5),
     FeatureQuotaDefinition('decision_signal_outcomes', '决策信号后验', '批量计算决策信号后验结果。', 3),
     FeatureQuotaDefinition('image_stock_extract', '图片识股', '使用 Vision LLM 从图片提取股票代码。', 10),
+    FeatureQuotaDefinition('scheduled_analysis', '定时分析', '每日定时分析一只参与定时的自选股。', 10),
 )
 FEATURE_QUOTA_BY_CODE: Dict[str, FeatureQuotaDefinition] = {
     definition.code: definition for definition in FEATURE_QUOTA_DEFINITIONS

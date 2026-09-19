@@ -616,10 +616,11 @@ class SystemConfigService:
             for check in checks
             if check["required"] and check["status"] == "needs_action"
         ]
+        # 多用户模式下分析池按用户维护，stock_list 不再阻断首次试跑就绪判定。
         smoke_blocking_missing = [
             check["key"]
             for check in checks
-            if check["key"] in {"llm_primary", "stock_list"}
+            if check["key"] in {"llm_primary"}
             and check["status"] == "needs_action"
         ]
         return {
@@ -3830,24 +3831,19 @@ class SystemConfigService:
         )
 
     def _build_setup_stock_list_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:
+        # 多用户模式：分析池按用户维护（个人自选），全局 STOCK_LIST 不再是首次试跑的必配项。
         stocks = split_stock_list(effective_map.get("STOCK_LIST") or "")
         if stocks:
-            return self._setup_check(
-                "stock_list",
-                "自选股",
-                "base",
-                True,
-                "configured",
-                f"已配置 {len(stocks)} 只股票。",
-            )
+            message = f"已配置 {len(stocks)} 只全局默认股票（可选）。"
+        else:
+            message = "分析池按用户维护（个人自选），无需配置全局 STOCK_LIST。"
         return self._setup_check(
             "stock_list",
             "自选股",
             "base",
-            True,
-            "needs_action",
-            "当前 STOCK_LIST 为空。",
-            "请至少添加 1 只股票用于首次试跑。",
+            False,
+            "configured",
+            message,
         )
 
     def _build_setup_notification_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:

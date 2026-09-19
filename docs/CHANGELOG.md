@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [新功能] 新增 `scripts/deploy_remote.sh` 一键远程部署：本地构建 `linux/amd64` 镜像后流式传输到服务器 `docker load`，自动打回滚标签、重建容器并做健康检查，支持 `--dry-run`/`--skip-tests`/`--list`/`--rollback`；同步源码时显式排除服务器侧的 `.env` 与 `docker/docker-compose.yml`，避免覆盖生产配置与端口绑定。文档见 `docs/DEPLOY.md`。
 - [改进] 定时分析跨用户去重（analyze-once/persist-many）：不再对每位用户各跑一批，而是先聚合所有「已开启定时分析且勾选股票」的用户，按归一股票代码去重，同一只股票当轮只做一次昂贵计算（数据抓取 + 指标 + 新闻 + LLM），再按各归属用户分别落库分析历史、决策信号并按其「报告发送到邮箱」偏好投递合并报告；多用户重叠自选时显著降低重复的算力与外部调用成本。大盘复盘与自动回测每轮仍全局各跑一次。
 - [新功能] 定时分析名额改由独立功能额度 `scheduled_analysis` 控制（默认每日 10 只），替代原硬编码的每用户上限 50：管理员可在「权限与额度」按用户/套餐/白名单/全局默认调节（`0` 关闭该用户定时分析、白名单不限量），额度按自选顺序分配、不足只分析前 N 只，休市过滤或分析失败的股票自动退还额度；该额度与按需「个股分析」额度相互独立，定时分析不会占用用户的手动分析额度。
 - [新功能] 「分析池」改为按用户隔离：定时分析不再使用全局 `STOCK_LIST` 作为分析范围，而是按「已开启定时分析且勾选股票」的用户执行（`owner=该用户`，空池用户跳过、单用户失败不影响其他人）；报告/信号归属该用户并按用户「报告发送到邮箱」偏好投递。`--stocks` 手动分析与券商持仓分析维持原全局行为。调度时间仍由管理员在系统设置维护。

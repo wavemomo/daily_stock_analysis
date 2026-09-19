@@ -15,6 +15,64 @@
 
 ---
 
+## 🚀 一键部署到远程服务器（本地构建镜像）
+
+已有服务器在跑本项目时，用 `scripts/deploy_remote.sh` 完成「本地构建 → 传输镜像 → 重建容器」，
+无需在服务器上编译（服务器内存有限、跨架构构建慢时尤其有用）。
+
+```bash
+# 完整部署（含本地测试门禁）
+scripts/deploy_remote.sh
+
+# 只看将要执行什么，不改动远端
+scripts/deploy_remote.sh --dry-run
+
+# 跳过测试门禁
+scripts/deploy_remote.sh --skip-tests
+
+# 列出远端可用镜像标签
+scripts/deploy_remote.sh --list
+
+# 回滚（默认回到最近一个 rollback-* 标签）
+scripts/deploy_remote.sh --rollback
+scripts/deploy_remote.sh --rollback rollback-20260919T013416Z
+```
+
+### 可覆盖的环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `REMOTE_HOST` | `root@124.221.191.229` | SSH 目标 |
+| `REMOTE_DIR` | `/opt/daily-stock-analysis` | 服务器项目目录 |
+| `IMAGE_NAME` | `daily-stock-analysis-server` | 必须与 compose 推导出的镜像名一致 |
+| `PLATFORM` | `linux/amd64` | 服务器架构；本机为 Apple Silicon 时需跨架构构建 |
+| `API_PORT` | `8000` | 仅用于健康检查地址 |
+| `KEEP_IMAGES` | `6` | 远端保留的历史镜像标签数量 |
+| `HEALTH_TIMEOUT` | `180` | 健康检查等待秒数 |
+
+### 脚本做了什么
+
+1. **预检**：本地 docker/buildx 可用、远端目录与 `.env` 存在、远端有 docker compose。
+2. **测试门禁**：跑 `pytest -m "not network"`；未全绿时要求显式输入 `yes` 才继续。
+3. **构建**：`docker buildx build --platform linux/amd64`，镜像标签为 `deploy-<UTC时间戳>-<git短哈希>`。
+4. **传输**：`docker save | gzip | ssh 'docker load'` 流式传输，不在本地留 3GB 临时文件。
+5. **同步源码**：rsync 到服务器。`strategies/` 会以只读方式挂载进容器，必须同步。
+6. **切换**：先把当前 `latest` 打成 `rollback-<时间戳>` 作为回滚点，再切换并重建容器。
+7. **健康检查**：轮询容器 health 状态并直连 `/api/health`；失败时打印日志并提示回滚。
+8. **清理**：只保留最近 `KEEP_IMAGES` 个历史标签。
+
+### 服务器侧不会被覆盖的文件
+
+这些文件在服务器上有本机化改动，脚本显式排除，**不会**被本地版本覆盖：
+
+- `.env` 与 `.env.*`（生产密钥与配置）
+- `docker/docker-compose.yml`（端口仅绑定 `127.0.0.1`，由 Caddy 反代对外提供 HTTPS）
+- `data/`、`logs/`、`reports/`、`longbridge_tokens/`（运行时数据，均为 bind mount）
+
+> 若确实需要变更服务器的 compose 或 `.env`，请手动改服务器上的文件，或先在服务器留备份再同步。
+
+---
+
 ## 🐳 方案一：Docker Compose 部署（推荐）
 
 ### 1. 安装 Docker

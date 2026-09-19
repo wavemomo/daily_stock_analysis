@@ -12,7 +12,6 @@ import { ApiErrorAlert, Button, ConfirmDialog, EmptyState } from '../components/
 import {
   AgentBackendStatusPanel,
   GenerationBackendStatusPanel,
-  IntelligentImport,
   LLMChannelEditor,
   NotificationTestPanel,
   SettingsCategoryNav,
@@ -1525,25 +1524,6 @@ const SettingsPage: React.FC = () => {
                     <SettingsAlert title={t('settings.actionSuccess')} message={envBackupActionSuccess} variant="success" />
                   ) : null}
                 </div>
-              </SettingsSectionCard>
-            ) : null}
-            {activeCategory === 'base' ? (
-              <SettingsSectionCard
-                title={t('settings.intelligentImport')}
-                description={t('settings.intelligentImportDescription')}
-              >
-                <IntelligentImport
-                  stockListValue={
-                    (activeItems.find((i) => i.key === 'STOCK_LIST')?.value as string) ?? ''
-                  }
-                  configVersion={configVersion}
-                  maskToken={maskToken}
-                  onMerged={async () => {
-                    await refreshAfterExternalSave(['STOCK_LIST']);
-                    void refreshSetupStatus();
-                  }}
-                  disabled={isSaving || isLoading}
-                />
               </SettingsSectionCard>
             ) : null}
             {activeCategory === 'ai_model' ? (

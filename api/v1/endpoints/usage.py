@@ -10,7 +10,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 
 from api.deps import get_database_manager, get_request_analysis_owner_context
-from api.v1.schemas.usage import UsageDashboardResponse, UsageSummaryResponse
+from api.v1.schemas.usage import (
+    UsageByUserResponse,
+    UsageDashboardResponse,
+    UsageSummaryResponse,
+)
 from src.storage import DatabaseManager, local_naive_now
 
 logger = logging.getLogger(__name__)
@@ -48,11 +52,25 @@ def _enrich_call_record(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_summary_payload(period: str, from_dt: datetime, to_dt: datetime, data: dict[str, Any]) -> dict[str, Any]:
+def _build_summary_payload(
+    period: str,
+    from_dt: datetime,
+    to_dt: datetime,
+    data: dict[str, Any],
+    *,
+    scope: str,
+) -> dict[str, Any]:
+    """Build the usage payload.
+
+    ``scope`` 必须由调用方显式传入（``'self'`` 或 ``'platform'``）：两类端点
+    的响应结构相同，没有这个标识前端无法区分「本人用量」与「全平台聚合」，
+    也就无法在 UI 上正确标注当前视图。
+    """
     return {
         "period": period,
         "from_date": from_dt.date().isoformat(),
         "to_date": to_dt.date().isoformat(),
+        "scope": scope,
         "total_calls": data.get("total_calls", 0),
         "total_prompt_tokens": data.get("total_prompt_tokens", 0),
         "total_completion_tokens": data.get("total_completion_tokens", 0),
@@ -76,7 +94,7 @@ def get_usage_summary(
     normalized_period = _normalize_period(period)
     from_dt, to_dt = _date_range(normalized_period)
     data = db_manager.get_llm_usage_summary(from_dt, to_dt, include_all_owners=True)
-    return UsageSummaryResponse(**_build_summary_payload(normalized_period, from_dt, to_dt, data))
+    return UsageSummaryResponse(**_build_summary_payload(normalized_period, from_dt, to_dt, data, scope="platform"))
 
 
 @router.get(
@@ -97,7 +115,7 @@ def get_my_usage_summary(
         to_dt,
         owner=get_request_analysis_owner_context(http_request),
     )
-    return UsageSummaryResponse(**_build_summary_payload(normalized_period, from_dt, to_dt, data))
+    return UsageSummaryResponse(**_build_summary_payload(normalized_period, from_dt, to_dt, data, scope="self"))
 
 
 @router.get(
@@ -117,7 +135,7 @@ def get_my_usage_dashboard(
     owner = get_request_analysis_owner_context(http_request)
     data = db_manager.get_llm_usage_summary(from_dt, to_dt, owner=owner)
     records = db_manager.get_llm_usage_records(from_dt, to_dt, limit=limit, owner=owner)
-    payload = _build_summary_payload(normalized_period, from_dt, to_dt, data)
+    payload = _build_summary_payload(normalized_period, from_dt, to_dt, data, scope="self")
     payload["recent_calls"] = [_enrich_call_record(row) for row in records]
     return UsageDashboardResponse(**payload)
 
@@ -138,6 +156,44 @@ def get_usage_dashboard(
     from_dt, to_dt = _date_range(normalized_period)
     data = db_manager.get_llm_usage_summary(from_dt, to_dt, include_all_owners=True)
     records = db_manager.get_llm_usage_records(from_dt, to_dt, limit=limit, include_all_owners=True)
-    payload = _build_summary_payload(normalized_period, from_dt, to_dt, data)
+    payload = _build_summary_payload(normalized_period, from_dt, to_dt, data, scope="platform")
     payload["recent_calls"] = [_enrich_call_record(row) for row in records]
     return UsageDashboardResponse(**payload)
+
+
+@router.get(
+    "/by-user",
+    response_model=UsageByUserResponse,
+    summary="按用户维度的 LLM token 用量",
+    description=(
+        "平台级下钻：列出每个用户各自消耗的 token 与调用次数，"
+        "定时任务/大盘复盘/后台扇出等非用户归属的消耗合并为一条平台条目。"
+        "RBAC 限制为 usage.read（运营/管理员）。"
+    ),
+)
+def get_usage_by_user(
+    period: str = Query("month", description="'today' | 'month' | 'all'"),
+    limit: int = Query(100, ge=1, le=500, description="Maximum owner rows to return"),
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> UsageByUserResponse:
+    """按归属聚合的平台级用量，供管理员核对各用户消耗。"""
+    normalized_period = _normalize_period(period)
+    from_dt, to_dt = _date_range(normalized_period)
+    owners = db_manager.get_llm_usage_by_owner(from_dt, to_dt, limit=limit)
+    return UsageByUserResponse(
+        period=normalized_period,
+        from_date=from_dt.date().isoformat(),
+        to_date=to_dt.date().isoformat(),
+        scope="platform",
+        owners=[
+            {
+                **row,
+                "last_called_at": (
+                    row["last_called_at"].isoformat()
+                    if isinstance(row.get("last_called_at"), datetime)
+                    else (str(row["last_called_at"]) if row.get("last_called_at") else None)
+                ),
+            }
+            for row in owners
+        ],
+    )

@@ -25,6 +25,7 @@ import {
 } from '../components/watchlist/HomeStockWorkspace';
 import { useDashboardLifecycle, useHomeDashboardState } from '../hooks';
 import { useWatchlist } from '../hooks/useWatchlist';
+import { IntelligentImport } from '../components/settings';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import type { SetupStatusResponse } from '../types/systemConfig';
 import { normalizeReportLanguage } from '../utils/reportLanguage';
@@ -1744,6 +1745,23 @@ const HomePage: React.FC = () => {
                 />
               </div>
             ) : null}
+
+            {/* 智能导入写入本人个人自选；与本页其它自选操作一致，权限由后端强制。 */}
+            <details className="dashboard-card mb-3 rounded-xl p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-foreground">
+                {t('settings.intelligentImport')}
+                <span className="ml-2 text-xs font-normal text-secondary-text">
+                  {t('settings.intelligentImportDescription')}
+                </span>
+              </summary>
+              <div className="mt-3">
+                <IntelligentImport
+                  onMerged={async () => {
+                    await refreshWatchlist();
+                  }}
+                />
+              </div>
+            </details>
 
             {marketReviewReport ? (
               <MarketReviewReportView

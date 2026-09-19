@@ -114,4 +114,90 @@ describe('usageApi', () => {
       params: { period: 'month', limit: 50 },
     });
   });
+
+  it('exposes the scope reported by the backend so the UI can label the view', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        period: 'month',
+        from_date: '2026-06-01',
+        to_date: '2026-06-14',
+        scope: 'self',
+        total_calls: 0,
+        total_prompt_tokens: 0,
+        total_completion_tokens: 0,
+        total_tokens: 0,
+        by_call_type: [],
+        by_model: [],
+        recent_calls: [],
+      },
+    });
+
+    const result = await usageApi.getDashboard();
+
+    expect(result.scope).toBe('self');
+  });
+
+  it('requests the per-user drill-down and camelCases owner rows', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        period: 'month',
+        from_date: '2026-06-01',
+        to_date: '2026-06-14',
+        scope: 'platform',
+        owners: [
+          {
+            user_id: 42,
+            nickname: 'Alice',
+            owner_scope: 'user',
+            calls: 3,
+            prompt_tokens: 100,
+            completion_tokens: 200,
+            total_tokens: 300,
+            last_called_at: '2026-06-14T09:30:00',
+          },
+          {
+            user_id: null,
+            nickname: null,
+            owner_scope: 'global',
+            calls: 1,
+            prompt_tokens: 5,
+            completion_tokens: 5,
+            total_tokens: 10,
+            last_called_at: null,
+          },
+        ],
+      },
+    });
+
+    const result = await usageApi.getByUser({ period: 'month', limit: 25 });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/by-user', {
+      params: { period: 'month', limit: 25 },
+    });
+    expect(result.scope).toBe('platform');
+    expect(result.owners[0].userId).toBe(42);
+    expect(result.owners[0].ownerScope).toBe('user');
+    expect(result.owners[0].lastCalledAt).toBe('2026-06-14T09:30:00');
+    expect(result.owners[1].userId).toBeNull();
+    expect(result.owners[1].ownerScope).toBe('global');
+    expect(result.owners[1].lastCalledAt).toBeNull();
+  });
+
+  it('uses month and 100 as default per-user query params', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        period: 'month',
+        from_date: '2026-06-01',
+        to_date: '2026-06-14',
+        scope: 'platform',
+        owners: [],
+      },
+    });
+
+    await usageApi.getByUser();
+
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/by-user', {
+      params: { period: 'month', limit: 100 },
+    });
+  });
 });

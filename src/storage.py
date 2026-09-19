@@ -40,6 +40,7 @@ from sqlalchemy import (
     select,
     and_,
     or_,
+    case,
     delete,
     desc,
     event,
@@ -5884,6 +5885,73 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 "completion_tokens": r.completion_tokens,
                 "total_tokens": r.total_tokens,
                 "called_at": r.called_at,
+            }
+            for r in rows
+        ]
+
+    def get_llm_usage_by_owner(
+        self,
+        from_dt: datetime,
+        to_dt: datetime,
+        *,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Return per-owner token usage for the platform-level admin view.
+
+        这是**显式的平台级下钻**：按 ``owner_user_id`` / ``owner_scope`` 分组，
+        让管理员看到「每个用户各消耗了多少 token」。归属为 global/legacy 的行
+        合并成一条平台条目（``owner_scope='global'``，``user_id=None``），
+        因为它们来自定时任务、大盘复盘与后台扇出，不属于任何单一用户。
+
+        仅供 ``usage.read`` 端点调用；不接受 owner 过滤参数，避免与本人视图
+        （``get_llm_usage_summary(owner=...)``）语义混淆。
+        """
+        normalized_limit = max(1, min(int(limit or 100), 500))
+        with self.session_scope() as session:
+            # 平台条目：owner_scope 非 'user' 的行（global 或 legacy NULL）统一归口。
+            owner_bucket = case(
+                (LLMUsage.owner_scope == "user", LLMUsage.owner_user_id),
+                else_=None,
+            )
+            rows = session.execute(
+                select(
+                    owner_bucket.label("user_id"),
+                    UserRecord.nickname.label("nickname"),
+                    func.count(LLMUsage.id).label("calls"),
+                    func.coalesce(func.sum(LLMUsage.prompt_tokens), 0).label("prompt_tokens"),
+                    func.coalesce(func.sum(LLMUsage.completion_tokens), 0).label("completion_tokens"),
+                    func.coalesce(func.sum(LLMUsage.total_tokens), 0).label("tokens"),
+                    func.max(LLMUsage.called_at).label("last_called_at"),
+                )
+                .select_from(LLMUsage)
+                .outerjoin(
+                    UserRecord,
+                    and_(
+                        LLMUsage.owner_scope == "user",
+                        UserRecord.id == LLMUsage.owner_user_id,
+                    ),
+                )
+                .where(
+                    and_(
+                        LLMUsage.called_at >= from_dt,
+                        LLMUsage.called_at <= to_dt,
+                    )
+                )
+                .group_by(owner_bucket, UserRecord.nickname)
+                .order_by(desc(func.sum(LLMUsage.total_tokens)))
+                .limit(normalized_limit)
+            ).all()
+
+        return [
+            {
+                "user_id": r.user_id,
+                "nickname": r.nickname,
+                "owner_scope": "user" if r.user_id is not None else "global",
+                "calls": r.calls,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "total_tokens": r.tokens,
+                "last_called_at": r.last_called_at,
             }
             for r in rows
         ]

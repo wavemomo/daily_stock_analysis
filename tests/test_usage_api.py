@@ -24,6 +24,32 @@ class FakeUsageDbManager:
         # 记录端点传入的归属参数，用于断言平台级与本人视图的区分。
         self.summary_calls = []
         self.record_calls = []
+        self.by_owner_calls = []
+
+    def get_llm_usage_by_owner(self, from_dt, to_dt, *, limit=100):
+        self.by_owner_calls.append({"limit": limit})
+        return [
+            {
+                "user_id": 42,
+                "nickname": "Alice",
+                "owner_scope": "user",
+                "calls": 3,
+                "prompt_tokens": 30,
+                "completion_tokens": 70,
+                "total_tokens": 100,
+                "last_called_at": datetime(2026, 6, 11, 9, 30, 0),
+            },
+            {
+                "user_id": None,
+                "nickname": None,
+                "owner_scope": "global",
+                "calls": 1,
+                "prompt_tokens": 5,
+                "completion_tokens": 5,
+                "total_tokens": 10,
+                "last_called_at": None,
+            },
+        ]
 
     def get_llm_usage_summary(self, from_dt, to_dt, *, owner=None, include_all_owners=False):
         self.summary_calls.append({"owner": owner, "include_all_owners": include_all_owners})
@@ -237,6 +263,65 @@ class UsageDashboardApiTestCase(unittest.TestCase):
 
     def test_my_usage_rejects_anonymous_request(self):
         response = self.client.get("/api/v1/usage/me/summary")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_platform_views_report_platform_scope(self):
+        """平台级响应必须自报 scope=platform，前端据此标注当前视图。"""
+        for path in ("/api/v1/usage/summary", "/api/v1/usage/dashboard"):
+            response = self.client.get(
+                f"{path}?period=today",
+                headers=self._bearer_headers("usage-test-token"),
+            )
+
+            self.assertEqual(response.status_code, 200, path)
+            self.assertEqual(response.json()["scope"], "platform", path)
+
+    def test_self_views_report_self_scope(self):
+        """本人视图必须自报 scope=self，避免与全平台聚合混淆。"""
+        for path in ("/api/v1/usage/me/summary", "/api/v1/usage/me/dashboard"):
+            response = self.client.get(
+                f"{path}?period=today",
+                headers=self._bearer_headers("member-token"),
+            )
+
+            self.assertEqual(response.status_code, 200, path)
+            self.assertEqual(response.json()["scope"], "self", path)
+
+    def test_by_user_lists_each_owner_for_operator(self):
+        """管理员可按用户下钻；非用户归属的消耗合并为一条平台条目。"""
+        response = self.client.get(
+            "/api/v1/usage/by-user?period=month&limit=50",
+            headers=self._bearer_headers("usage-test-token"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["scope"], "platform")
+        self.assertEqual(self.fake_db.by_owner_calls, [{"limit": 50}])
+        owners = payload["owners"]
+        self.assertEqual(len(owners), 2)
+        self.assertEqual(owners[0]["user_id"], 42)
+        self.assertEqual(owners[0]["nickname"], "Alice")
+        self.assertEqual(owners[0]["owner_scope"], "user")
+        self.assertEqual(owners[0]["total_tokens"], 100)
+        self.assertEqual(owners[0]["last_called_at"], "2026-06-11T09:30:00")
+        self.assertIsNone(owners[1]["user_id"])
+        self.assertEqual(owners[1]["owner_scope"], "global")
+        self.assertIsNone(owners[1]["last_called_at"])
+
+    def test_by_user_rejects_member_without_usage_read(self):
+        """按用户下钻是平台级能力，普通成员不得读取他人用量。"""
+        response = self.client.get(
+            "/api/v1/usage/by-user",
+            headers=self._bearer_headers("member-token"),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.fake_db.by_owner_calls, [])
+
+    def test_by_user_rejects_anonymous_request(self):
+        response = self.client.get("/api/v1/usage/by-user")
 
         self.assertEqual(response.status_code, 401)
 

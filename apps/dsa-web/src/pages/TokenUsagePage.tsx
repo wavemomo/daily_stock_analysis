@@ -1,6 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, Clock3, Cpu, Database, Gauge, RefreshCw } from 'lucide-react';
-import { usageApi, type UsageDashboard, type UsageModelBreakdown, type UsagePeriod } from '../api/usage';
+import { Activity, Clock3, Cpu, Database, Gauge, RefreshCw, Users } from 'lucide-react';
+import {
+  usageApi,
+  type UsageByUser,
+  type UsageDashboard,
+  type UsageModelBreakdown,
+  type UsageOwnerBreakdown,
+  type UsagePeriod,
+  type UsageScope,
+} from '../api/usage';
 import type { ParsedApiError } from '../api/error';
 import { ApiErrorAlert, AppPage, Card, EmptyState, PageHeader, StatCard } from '../components/common';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
@@ -11,6 +19,13 @@ import { cn } from '../utils/cn';
 type Translate = (key: UiTextKey, params?: UiTextParams) => string;
 
 const PERIOD_OPTIONS: UsagePeriod[] = ['today', 'month', 'all'];
+
+const SCOPE_OPTIONS: UsageScope[] = ['self', 'platform'];
+
+const SCOPE_LABEL_KEYS: Record<UsageScope, UiTextKey> = {
+  self: 'usage.scope.self',
+  platform: 'usage.scope.platform',
+};
 
 const PERIOD_LABEL_KEYS: Record<UsagePeriod, UiTextKey> = {
   today: 'usage.period.today',
@@ -100,16 +115,92 @@ const ModelUsageCard: React.FC<{ model: UsageModelBreakdown; language: UiLanguag
   );
 };
 
+function formatOwnerLabel(owner: UsageOwnerBreakdown, t: Translate): string {
+  if (owner.ownerScope !== 'user') {
+    return t('usage.byUser.globalOwner');
+  }
+  const nickname = (owner.nickname || '').trim();
+  if (nickname) {
+    return nickname;
+  }
+  return t('usage.byUser.unnamedUser', { id: String(owner.userId ?? '-') });
+}
+
+const UsageByUserTable: React.FC<{
+  owners: UsageOwnerBreakdown[];
+  language: UiLanguage;
+  t: Translate;
+}> = ({ owners, language, t }) => {
+  // 后端字段缺失不应让整页白屏：按空列表渲染空态，仍如实呈现「没有数据」。
+  const rows = Array.isArray(owners) ? owners : [];
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-foreground">{t('usage.byUser.title')}</h2>
+          <p className="mt-1 text-sm text-secondary-text">{t('usage.byUser.titleDescription')}</p>
+        </div>
+        <Users className="h-5 w-5 text-secondary-text" />
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-border/70 bg-card/75 shadow-soft-card">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-border/70 text-sm">
+            <thead className="bg-surface-2/70 text-left text-xs uppercase tracking-[0.16em] text-secondary-text">
+              <tr>
+                <th className="px-4 py-3 font-medium">{t('usage.byUser.user')}</th>
+                <th className="px-4 py-3 text-right font-medium">{t('usage.totalCalls')}</th>
+                <th className="px-4 py-3 text-right font-medium">Prompt</th>
+                <th className="px-4 py-3 text-right font-medium">Completion</th>
+                <th className="px-4 py-3 text-right font-medium">Total</th>
+                <th className="px-4 py-3 font-medium">{t('usage.byUser.lastCalled')}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {rows.length ? rows.map((owner) => (
+                <tr key={`${owner.ownerScope}:${owner.userId ?? 'platform'}`} className="hover:bg-hover/60">
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-foreground">{formatOwnerLabel(owner, t)}</div>
+                    {owner.ownerScope === 'user' && owner.userId !== null ? (
+                      <div className="text-xs text-secondary-text">#{owner.userId}</div>
+                    ) : null}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-right text-secondary-text">{formatNumber(owner.calls, language)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-right text-secondary-text">{formatNumber(owner.promptTokens, language)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-right text-secondary-text">{formatNumber(owner.completionTokens, language)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-right font-medium text-foreground">{formatNumber(owner.totalTokens, language)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-secondary-text">
+                    {owner.lastCalledAt ? formatDateTime(owner.lastCalledAt, language) : '-'}
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-secondary-text">{t('usage.byUser.empty')}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+};
+
 const TokenUsagePage: React.FC = () => {
   const { language, t } = useUiLanguage();
   const { hasPermission } = useAuth();
-  // 多用户隔离：有 usage.read 的运营/管理员看平台级聚合，普通成员只看本人用量。
+  // 多用户隔离：只有 usage.read 的运营/管理员才能看平台级聚合与按用户下钻；
+  // 普通成员固定在本人视图。管理员默认进平台视图，但可以切回自己的用量。
   const canViewPlatformUsage = hasPermission('usage.read');
+  const [scope, setScope] = useState<UsageScope>(canViewPlatformUsage ? 'platform' : 'self');
   const [period, setPeriod] = useState<UsagePeriod>('month');
   const [dashboard, setDashboard] = useState<UsageDashboard | null>(null);
+  const [byUser, setByUser] = useState<UsageByUser | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
   const [loading, setLoading] = useState(true);
   const requestSeqRef = useRef(0);
+
+  // 权限变化（如登出后切换账号）时把无权访问的平台视图收敛回本人视图。
+  const effectiveScope: UsageScope = canViewPlatformUsage ? scope : 'self';
 
   const loadDashboard = useCallback(async () => {
     const requestSeq = requestSeqRef.current + 1;
@@ -120,12 +211,16 @@ const TokenUsagePage: React.FC = () => {
       const data = await usageApi.getDashboard({
         period,
         limit: 50,
-        scope: canViewPlatformUsage ? 'platform' : 'self',
+        scope: effectiveScope,
       });
+      const owners = effectiveScope === 'platform'
+        ? await usageApi.getByUser({ period, limit: 100 })
+        : null;
       if (requestSeq !== requestSeqRef.current) {
         return;
       }
       setDashboard(data);
+      setByUser(owners);
     } catch (err) {
       if (requestSeq !== requestSeqRef.current) {
         return;
@@ -136,7 +231,7 @@ const TokenUsagePage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [period, t, canViewPlatformUsage]);
+  }, [period, t, effectiveScope]);
 
   useEffect(() => {
     void loadDashboard();
@@ -155,9 +250,31 @@ const TokenUsagePage: React.FC = () => {
         <PageHeader
           eyebrow={t('usage.eyebrow')}
           title={t('usage.title')}
-          description={t('usage.description')}
+          description={`${t('usage.description')} ${
+            effectiveScope === 'platform' ? t('usage.scope.platformHint') : t('usage.scope.selfHint')
+          }`}
           actions={(
             <div className="flex flex-wrap items-center gap-2">
+              {canViewPlatformUsage ? (
+                <div className="inline-flex rounded-xl border border-border/70 bg-card/70 p-1">
+                  {SCOPE_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => setScope(option)}
+                      aria-pressed={effectiveScope === option}
+                      className={cn(
+                        'rounded-lg px-3 py-1.5 text-sm transition-colors',
+                        effectiveScope === option
+                          ? 'bg-cyan text-background shadow-soft-card'
+                          : 'text-secondary-text hover:bg-hover hover:text-foreground'
+                      )}
+                    >
+                      {t(SCOPE_LABEL_KEYS[option])}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <div className="inline-flex rounded-xl border border-border/70 bg-card/70 p-1">
                 {PERIOD_OPTIONS.map((option) => (
                   <button
@@ -206,6 +323,10 @@ const TokenUsagePage: React.FC = () => {
               <StatCard label={t('usage.promptTokens')} value={formatNumber(dashboard.totalPromptTokens, language)} hint={t('usage.promptTokensHint')} icon={<Cpu className="h-5 w-5" />} />
               <StatCard label={t('usage.completionTokens')} value={formatNumber(dashboard.totalCompletionTokens, language)} hint={t('usage.completionTokensHint')} icon={<Gauge className="h-5 w-5" />} />
             </div>
+
+            {effectiveScope === 'platform' && byUser ? (
+              <UsageByUserTable owners={byUser.owners} language={language} t={t} />
+            ) : null}
 
             {dashboard.totalCalls === 0 ? (
               <EmptyState title={t('usage.emptyTitle')} description={t('usage.emptyDescription')} />

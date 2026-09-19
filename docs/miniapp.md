@@ -89,11 +89,17 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 
 小程序设置页只调用受限的 `/api/v1/miniapp/system/*` surface，提供经掩码的配置读取、schema/状态查询、校验与受版本保护的非 raw 更新。高风险系统、密钥、导入导出、调度、外部渠道测试和模型发现必须由各自独立、明确的权限策略保护；它们不因 Cookie、角色名或登录通道获得隐式放行。页面可按权限显示只读或可编辑状态，但后端仍执行最终权限校验。
 
+两端能力保持一致，用户可见命名与描述以 Web 端为准：
+
+- **首次启动配置检查**：两端都从 `GET .../system/config/setup/status` 读取同一份检查结果（模型、问股模型、自选股、通知、存储），在系统设置页顶部展示缺失项与逐项状态；接口失败时降级为「暂无法判断配置状态」，不阻断设置页其余内容。Web 端额外提供「简短试跑」。
+- **智能导入**（图片识股 / 文本与文件导入）：属于每位用户自己的能力，两端都放在工作台而不是系统设置。识别结果写入**本人个人自选**（`/watchlist/add`），不再改写全局 `STOCK_LIST`；部分条目失败时只移除成功项，失败项保留在待确认列表供重试。
+- **AI 建议**（决策信号）：两端统一使用「AI 建议」这一名称，入口分别是 Web 侧栏与小程序「我的」菜单及个股详情页。
+
 ## RBAC 与功能额度
 
 登录和 `/me` 的用户摘要包含 `roles` 与 `permissions`。内置角色语义如下：
 
-- `member`：新用户默认角色；可维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析、选股、回测、决策信号只读与历史（本人读/删，`history.read`/`history.delete`）能力；高成本能力受服务端每日功能额度限制。默认开放常规功能栏目，仅排除管理员专属能力——系统设置（`system.read`/`system.manage`）、权限管理（`rbac.manage`）、平台级 Token 用量聚合（`usage.read`）、情报源（`intelligence.read`/`intelligence.manage`），以及外发通知（`alerts.notify`/`agent.share`）、全局数据维护（`stocks.manage`）等全局管控动作不授予普通成员。Token 用量按用户隔离：成员凭 `account.self` 可通过 `/api/v1/usage/me/summary`、`/api/v1/usage/me/dashboard` 查看**本人**消耗，`usage.read` 才能读取 `/api/v1/usage/summary`、`/api/v1/usage/dashboard` 的**全平台**聚合；两端 Token 用量页按权限自动切换数据源。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
+- `member`：新用户默认角色；可维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析、选股、回测、决策信号只读与历史（本人读/删，`history.read`/`history.delete`）能力；高成本能力受服务端每日功能额度限制。默认开放常规功能栏目，仅排除管理员专属能力——系统设置（`system.read`/`system.manage`）、权限管理（`rbac.manage`）、平台级 Token 用量聚合（`usage.read`）、情报源（`intelligence.read`/`intelligence.manage`），以及外发通知（`alerts.notify`/`agent.share`）、全局数据维护（`stocks.manage`）等全局管控动作不授予普通成员。Token 用量按用户隔离：成员凭 `account.self` 可通过 `/api/v1/usage/me/summary`、`/api/v1/usage/me/dashboard` 查看**本人**消耗；`usage.read` 才能读取 `/api/v1/usage/summary`、`/api/v1/usage/dashboard` 的**全平台**聚合，以及 `/api/v1/usage/by-user` 的**按用户下钻**（列出每位用户各自的调用次数与 token，定时分析、大盘复盘与后台扇出等不归属任何用户的消耗合并为一条平台条目，不摊到具体用户）。所有用量响应都带 `scope` 字段（`self` / `platform`），两端 Token 用量页据此标注当前视图；持有 `usage.read` 的运营/管理员可在两个视图间切换，因此也能查看自己的消耗。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，并作为该用户的定时分析池；全局 `STOCK_LIST` 已从设置 UI 下线，仅保留给 `--stocks` 手动分析与券商持仓等全局路径。
 - `operator`：受信任的运营分析员；拥有除 `system.manage`、`rbac.manage` 外的全部权限，包含 `alerts.notify` 与 `agent.share`。
 - `admin`：拥有全部权限，包含 `alerts.notify`、`system.manage` 与 `rbac.manage`；仍不绕过个人资源 owner scope。
 

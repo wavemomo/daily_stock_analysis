@@ -122,11 +122,6 @@ vi.mock('../../utils/constants', async () => {
 });
 
 vi.mock('../../components/settings', () => ({
-  IntelligentImport: ({ onMerged }: { onMerged: (value: string) => void }) => (
-    <button type="button" onClick={() => onMerged('SZ000001,SZ000002')}>
-      merge stock list
-    </button>
-  ),
   LLMChannelEditor: ({
     items,
     onSaved,
@@ -791,14 +786,21 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce(initialStatus)
       .mockImplementationOnce(() => staleRefresh.promise)
       .mockImplementationOnce(() => latestRefresh.promise);
-    useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
+    // 第三次刷新用「保存配置」触发：保存成功后也会重新拉取首次启动检查状态。
+    save.mockResolvedValue({ success: true });
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({
+      activeCategory: 'base',
+      hasDirty: true,
+      dirtyCount: 1,
+      getChangedItems: () => [{ key: 'LOG_LEVEL', value: 'DEBUG' }],
+    }));
 
     renderSettingsPage();
 
     expect(await screen.findByText('初始状态')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '刷新检查' }));
-    fireEvent.click(screen.getByRole('button', { name: 'merge stock list' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存配置 (1)' }));
 
     await waitFor(() => expect(getSetupStatus).toHaveBeenCalledTimes(3));
 
@@ -1260,17 +1262,6 @@ describe('SettingsPage', () => {
     expect(resetDraft).toHaveBeenCalledTimes(1);
     expect(load).not.toHaveBeenCalled();
     expect(save).not.toHaveBeenCalled();
-  });
-
-  it('refreshes server state after intelligent import merges stock list', async () => {
-    useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
-
-    renderSettingsPage();
-
-    fireEvent.click(screen.getByRole('button', { name: 'merge stock list' }));
-
-    expect(refreshAfterExternalSave).toHaveBeenCalledWith(['STOCK_LIST']);
-    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes server state after llm channel editor saves', async () => {

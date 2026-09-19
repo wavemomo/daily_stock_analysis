@@ -1,11 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntelligentImport } from '../IntelligentImport';
-import { SystemConfigConflictError } from '../../../api/systemConfig';
 
-const { parseImport, update, onMerged } = vi.hoisted(() => ({
+const { parseImport, addItem, onMerged } = vi.hoisted(() => ({
   parseImport: vi.fn(),
-  update: vi.fn(),
+  addItem: vi.fn(),
   onMerged: vi.fn(),
 }));
 
@@ -16,16 +15,23 @@ vi.mock('../../../api/stocks', () => ({
   },
 }));
 
-vi.mock('../../../api/systemConfig', async () => {
-  const actual = await vi.importActual<typeof import('../../../api/systemConfig')>('../../../api/systemConfig');
-  return {
-    ...actual,
-    systemConfigApi: {
-      ...actual.systemConfigApi,
-      update,
-    },
-  };
-});
+vi.mock('../../../api/watchlist', () => ({
+  watchlistApi: {
+    addItem,
+  },
+}));
+
+async function parseOneCode(code: string, name = 'Test Stock') {
+  parseImport.mockResolvedValue({
+    items: [{ code, name, confidence: 'high' }],
+    codes: [],
+  });
+  fireEvent.change(screen.getByPlaceholderText('或粘贴 CSV/Excel 复制的文本...'), {
+    target: { value: code },
+  });
+  fireEvent.click(screen.getByRole('button', { name: '解析' }));
+  await screen.findByText(code);
+}
 
 describe('IntelligentImport', () => {
   beforeEach(() => {
@@ -33,29 +39,15 @@ describe('IntelligentImport', () => {
   });
 
   it('opens the matching hidden file input when the picker buttons are clicked', () => {
-    const { container } = render(
-      <IntelligentImport
-        stockListValue="SH600000"
-        configVersion="v1"
-        maskToken="******"
-        onMerged={onMerged}
-      />,
-    );
+    const { container } = render(<IntelligentImport onMerged={onMerged} />);
 
     const inputs = container.querySelectorAll('input[type="file"]');
     expect(inputs).toHaveLength(2);
 
     const imageClick = vi.fn();
     const dataClick = vi.fn();
-
-    Object.defineProperty(inputs[0], 'click', {
-      value: imageClick,
-      configurable: true,
-    });
-    Object.defineProperty(inputs[1], 'click', {
-      value: dataClick,
-      configurable: true,
-    });
+    Object.defineProperty(inputs[0], 'click', { value: imageClick, configurable: true });
+    Object.defineProperty(inputs[1], 'click', { value: dataClick, configurable: true });
 
     fireEvent.click(screen.getByRole('button', { name: '选择图片' }));
     fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
@@ -65,30 +57,15 @@ describe('IntelligentImport', () => {
   });
 
   it('does not open hidden file inputs when the import actions are disabled', () => {
-    const { container } = render(
-      <IntelligentImport
-        stockListValue="SH600000"
-        configVersion="v1"
-        maskToken="******"
-        onMerged={onMerged}
-        disabled
-      />,
-    );
+    const { container } = render(<IntelligentImport onMerged={onMerged} disabled />);
 
     const inputs = container.querySelectorAll('input[type="file"]');
     expect(inputs).toHaveLength(2);
 
     const imageClick = vi.fn();
     const dataClick = vi.fn();
-
-    Object.defineProperty(inputs[0], 'click', {
-      value: imageClick,
-      configurable: true,
-    });
-    Object.defineProperty(inputs[1], 'click', {
-      value: dataClick,
-      configurable: true,
-    });
+    Object.defineProperty(inputs[0], 'click', { value: imageClick, configurable: true });
+    Object.defineProperty(inputs[1], 'click', { value: dataClick, configurable: true });
 
     fireEvent.click(screen.getByRole('button', { name: '选择图片' }));
     fireEvent.click(screen.getByRole('button', { name: '选择文件' }));
@@ -97,77 +74,53 @@ describe('IntelligentImport', () => {
     expect(dataClick).not.toHaveBeenCalled();
   });
 
-  it('refreshes config state after a config version conflict', async () => {
-    parseImport.mockResolvedValue({
-      items: [{ code: 'SZ000001', name: 'Ping An Bank', confidence: 'high' }],
-      codes: [],
-    });
-    update.mockRejectedValue(
-      new SystemConfigConflictError('配置版本冲突', 'v2'),
-    );
+  it('adds parsed codes to the caller own watchlist instead of the global stock list', async () => {
+    addItem.mockResolvedValue({ id: 1, stock_code: 'HK00700', stock_name: 'Tencent', scheduled: true });
 
-    render(
-      <IntelligentImport
-        stockListValue="SH600000"
-        configVersion="v1"
-        maskToken="******"
-        onMerged={onMerged}
-      />,
-    );
-
-    fireEvent.change(screen.getByPlaceholderText('或粘贴 CSV/Excel 复制的文本...'), {
-      target: { value: '000001' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: '解析' }));
-
-    await screen.findByText('SZ000001');
+    render(<IntelligentImport onMerged={onMerged} />);
+    await parseOneCode('HK00700', 'Tencent');
 
     fireEvent.click(screen.getByRole('button', { name: '合并到自选股' }));
 
     await waitFor(() => {
-      expect(update).toHaveBeenCalled();
+      expect(addItem).toHaveBeenCalledWith('HK00700', 'Tencent');
     });
     await waitFor(() => {
-      expect(onMerged).toHaveBeenCalledWith('SH600000,SZ000001');
+      expect(onMerged).toHaveBeenCalledWith(['HK00700']);
     });
-    expect(await screen.findByText('配置已更新，请再次点击「合并到自选股」')).toBeInTheDocument();
+    // 导入成功后条目从待确认列表移除。
+    expect(screen.queryByText('HK00700')).not.toBeInTheDocument();
   });
 
-  it('normalizes existing mixed separators when merging into watchlist', async () => {
-    parseImport.mockResolvedValue({
-      items: [{ code: 'HK00700', name: 'Tencent', confidence: 'high' }],
-      codes: [],
-    });
-    update.mockResolvedValue({ success: true });
+  it('keeps failed codes in the list and reports how many could not be added', async () => {
+    addItem.mockRejectedValue(new Error('quota exceeded'));
 
-    render(
-      <IntelligentImport
-        stockListValue="SH600000，SH600519 AAPL"
-        configVersion="v1"
-        maskToken="******"
-        onMerged={onMerged}
-      />,
-    );
-
-    fireEvent.change(screen.getByPlaceholderText('或粘贴 CSV/Excel 复制的文本...'), {
-      target: { value: 'HK00700' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: '解析' }));
-
-    await screen.findByText('HK00700');
+    render(<IntelligentImport onMerged={onMerged} />);
+    await parseOneCode('SZ000001', 'Ping An Bank');
 
     fireEvent.click(screen.getByRole('button', { name: '合并到自选股' }));
 
     await waitFor(() => {
-      expect(update).toHaveBeenCalledWith({
-        configVersion: 'v1',
-        maskToken: '******',
-        reloadNow: true,
-        items: [{ key: 'STOCK_LIST', value: 'SH600000,SH600519,AAPL,HK00700' }],
-      });
+      expect(addItem).toHaveBeenCalledTimes(1);
     });
+    // 全部失败时不应回调 onMerged，条目保留供重试。
+    expect(onMerged).not.toHaveBeenCalled();
+    expect(screen.getByText('SZ000001')).toBeInTheDocument();
+    expect(await screen.findByText('quota exceeded')).toBeInTheDocument();
+  });
+
+  it('never writes the global stock list config', async () => {
+    addItem.mockResolvedValue({ id: 2, stock_code: 'SH600519', stock_name: '', scheduled: true });
+
+    render(<IntelligentImport onMerged={onMerged} />);
+    await parseOneCode('SH600519', '');
+
+    fireEvent.click(screen.getByRole('button', { name: '合并到自选股' }));
+
     await waitFor(() => {
-      expect(onMerged).toHaveBeenCalledWith('SH600000,SH600519,AAPL,HK00700');
+      expect(onMerged).toHaveBeenCalledWith(['SH600519']);
     });
+    // 多用户隔离：不得再触达系统配置写接口。
+    expect(addItem).toHaveBeenCalledWith('SH600519', '');
   });
 });

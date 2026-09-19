@@ -21,6 +21,14 @@ export const watchlistApi = {
     return data.items ?? [];
   },
 
+  async addItem(stockCode: string, stockName = ''): Promise<WatchlistItem> {
+    const { data } = await apiClient.post<WatchlistItem>('/api/v1/watchlist/add', {
+      stock_code: stockCode,
+      stock_name: stockName,
+    });
+    return data;
+  },
+
   async setScheduled(stockCode: string, scheduled: boolean): Promise<WatchlistItem> {
     const { data } = await apiClient.post<WatchlistItem>('/api/v1/watchlist/scheduled', {
       stock_code: stockCode,

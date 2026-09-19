@@ -2,11 +2,10 @@ import type React from 'react';
 import { useCallback, useRef, useState } from 'react';
 import { getParsedApiError } from '../../api/error';
 import { stocksApi, type ExtractItem } from '../../api/stocks';
-import { systemConfigApi, SystemConfigConflictError } from '../../api/systemConfig';
 import { Badge, Button, InlineAlert } from '../common';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiLanguage } from '../../i18n/uiText';
-import { parseStockListValue } from '../../utils/stockList';
+import { watchlistApi } from '../../api/watchlist';
 
 const IMG_EXT = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const IMG_MAX = 5 * 1024 * 1024; // 5MB
@@ -14,10 +13,8 @@ const FILE_MAX = 2 * 1024 * 1024; // 2MB
 const TEXT_MAX = 100 * 1024; // 100KB
 
 interface IntelligentImportProps {
-  stockListValue: string;
-  configVersion: string;
-  maskToken: string;
-  onMerged: (newValue: string) => void | Promise<void>;
+  /** 成功加入个人自选后的回调，参数为本次实际加入的股票代码。 */
+  onMerged: (addedCodes: string[]) => void | Promise<void>;
   disabled?: boolean;
 }
 
@@ -98,9 +95,6 @@ function mergeItems(
 }
 
 export const IntelligentImport: React.FC<IntelligentImportProps> = ({
-  stockListValue,
-  configVersion,
-  maskToken,
   onMerged,
   disabled,
 }) => {
@@ -113,10 +107,6 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
   const [pasteText, setPasteText] = useState('');
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const dataFileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const parseCurrentList = useCallback(() => {
-    return parseStockListValue(stockListValue);
-  }, [stockListValue]);
 
   const addItems = useCallback((newItems: ExtractItem[]) => {
     setItems((prev) => mergeItems(prev, newItems));
@@ -255,37 +245,41 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
   const mergeToWatchlist = useCallback(async () => {
     const toMerge = items.filter((i) => i.checked && i.code).map((i) => i.code!);
     if (toMerge.length === 0) return;
-    if (!configVersion) {
-      setError(t('settings.intelligentImportLoadConfigFirst'));
-      return;
-    }
-    const current = parseCurrentList();
-    const merged = [...new Set([...current, ...toMerge])];
-    const value = merged.join(',');
 
     setIsMerging(true);
     setError(null);
     try {
-      await systemConfigApi.update({
-        configVersion,
-        maskToken,
-        reloadNow: true,
-        items: [{ key: 'STOCK_LIST', value }],
-      });
-      setItems([]);
-      setPasteText('');
-      await onMerged(value);
-    } catch (e) {
-      if (e instanceof SystemConfigConflictError) {
-        await onMerged(value);
-        setError(t('settings.intelligentImportConfigUpdated'));
-      } else {
-        setError(e instanceof Error ? e.message : t('settings.intelligentImportMergeFailed'));
+      // 多用户隔离：导入结果写入**本人个人自选**（= 本人定时分析池），
+      // 不再改动全局 STOCK_LIST（该项已从系统设置下线，且写入需管理员权限）。
+      const nameByCode = new Map(items.filter((i) => i.code).map((i) => [i.code!, i.name ?? '']));
+      const results = await Promise.allSettled(
+        toMerge.map((code) => watchlistApi.addItem(code, nameByCode.get(code) ?? '')),
+      );
+      const added = toMerge.filter((_, index) => results[index].status === 'fulfilled');
+      const failedCount = toMerge.length - added.length;
+
+      if (added.length === 0) {
+        const firstRejection = results.find((r) => r.status === 'rejected');
+        const reason = firstRejection && firstRejection.status === 'rejected' ? firstRejection.reason : null;
+        setError(getParsedApiError(reason).message || t('settings.intelligentImportMergeFailed'));
+        return;
       }
+
+      // 只清掉成功加入的条目，失败的留在列表里供重试。
+      const addedSet = new Set(added);
+      setItems((prev) => prev.filter((i) => !(i.code && addedSet.has(i.code))));
+      if (failedCount > 0) {
+        setError(t('settings.intelligentImportPartialFailure', { count: failedCount }));
+      } else {
+        setPasteText('');
+      }
+      await onMerged(added);
+    } catch (e) {
+      setError(getParsedApiError(e).message || t('settings.intelligentImportMergeFailed'));
     } finally {
       setIsMerging(false);
     }
-  }, [items, configVersion, maskToken, onMerged, parseCurrentList, t]);
+  }, [items, onMerged, t]);
 
   const validCount = items.filter((i) => i.code).length;
   const checkedCount = items.filter((i) => i.checked && i.code).length;

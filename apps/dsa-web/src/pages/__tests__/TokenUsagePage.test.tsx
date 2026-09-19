@@ -75,6 +75,45 @@ const dashboardResponse = {
   ],
 };
 
+const byUserResponse = {
+  period: 'month',
+  from_date: '2026-06-01',
+  to_date: '2026-06-11',
+  scope: 'platform',
+  owners: [
+    {
+      user_id: 42,
+      nickname: 'Alice',
+      owner_scope: 'user',
+      calls: 3,
+      prompt_tokens: 100,
+      completion_tokens: 200,
+      total_tokens: 300,
+      last_called_at: '2026-06-11T09:30:00',
+    },
+    {
+      user_id: null,
+      nickname: null,
+      owner_scope: 'global',
+      calls: 1,
+      prompt_tokens: 20,
+      completion_tokens: 80,
+      total_tokens: 100,
+      last_called_at: null,
+    },
+  ],
+};
+
+/** 按 URL 分派：平台视图会同时请求 dashboard 与 by-user。 */
+function mockUsageEndpoints() {
+  get.mockImplementation((url: string) => {
+    if (url === '/api/v1/usage/by-user') {
+      return Promise.resolve({ data: byUserResponse });
+    }
+    return Promise.resolve({ data: dashboardResponse });
+  });
+}
+
 function makeDashboardResponse(overrides: Partial<typeof dashboardResponse> = {}) {
   return {
     ...dashboardResponse,
@@ -104,7 +143,7 @@ beforeEach(() => {
   window.localStorage.clear();
   window.localStorage.setItem('dsa.uiLanguage', 'zh');
   vi.clearAllMocks();
-  get.mockResolvedValue({ data: dashboardResponse });
+  mockUsageEndpoints();
   // 默认按普通成员渲染：只允许查看本人用量。
   useAuthMock.mockReturnValue({ hasPermission: () => false });
 });
@@ -144,7 +183,58 @@ describe('TokenUsagePage', () => {
     expect(get).toHaveBeenCalledWith('/api/v1/usage/dashboard', {
       params: { period: 'month', limit: 50 },
     });
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/by-user', {
+      params: { period: 'month', limit: 100 },
+    });
     expect(get).not.toHaveBeenCalledWith('/api/v1/usage/me/dashboard', expect.anything());
+  });
+
+  it('labels the current scope so members know they are seeing their own usage', async () => {
+    renderPage();
+
+    await screen.findByRole('heading', { name: 'Token 用量监控' });
+    expect(screen.getByText(/当前仅展示你自己触发的用量/)).toBeInTheDocument();
+    // 成员没有 usage.read，不应出现视图切换器。
+    expect(screen.queryByRole('button', { name: '全平台' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '我的用量' })).not.toBeInTheDocument();
+  });
+
+  it('lets an operator switch back to their own usage view', async () => {
+    useAuthMock.mockReturnValue({ hasPermission: (permission: string) => permission === 'usage.read' });
+
+    renderPage();
+
+    await screen.findByRole('heading', { name: 'Token 用量监控' });
+    expect(screen.getByText(/当前展示全体用户的合计用量/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '我的用量' }));
+
+    await waitFor(() => {
+      expect(get).toHaveBeenCalledWith('/api/v1/usage/me/dashboard', {
+        params: { period: 'month', limit: 50 },
+      });
+    });
+    expect(screen.getByText(/当前仅展示你自己触发的用量/)).toBeInTheDocument();
+  });
+
+  it('renders per-user usage rows for the platform view', async () => {
+    useAuthMock.mockReturnValue({ hasPermission: (permission: string) => permission === 'usage.read' });
+
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: '按用户用量' })).toBeInTheDocument();
+    expect(screen.getByText('Alice')).toBeInTheDocument();
+    expect(screen.getByText('#42')).toBeInTheDocument();
+    // 不归属用户的后台消耗单列一行，不摊到具体用户。
+    expect(screen.getByText('平台任务（定时分析 / 大盘复盘 / 后台）')).toBeInTheDocument();
+  });
+
+  it('hides the per-user table from members', async () => {
+    renderPage();
+
+    await screen.findByRole('heading', { name: 'Token 用量监控' });
+    expect(screen.queryByRole('heading', { name: '按用户用量' })).not.toBeInTheDocument();
+    expect(get).not.toHaveBeenCalledWith('/api/v1/usage/by-user', expect.anything());
   });
 
   it('renders English copy when the UI language is English', async () => {

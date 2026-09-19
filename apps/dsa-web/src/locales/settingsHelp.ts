@@ -310,7 +310,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
   'settings.base.SCREENING_ENABLED': {
     title: '选股',
     summary: '控制是否启用选股页；实现参考 AlphaSift。',
-    usage: '默认关闭。设为 true 后显示选股入口并启用选股策略。',
+    usage: '默认开启。设为 false 后隐藏选股入口并停用选股策略。',
     valueNotes: ['选股结果仅用于研究辅助，不构成投资建议。'],
     impact: ['影响 Web 选股入口、策略读取和选股 API。'],
     notes: ['关闭时不影响原有分析、报告和通知流程。'],
@@ -1545,7 +1545,7 @@ const settingsHelpEnUS: SettingsHelpMap = {
   'settings.base.SCREENING_ENABLED': {
     title: 'Screening',
     summary: 'Controls the Screening page, implemented with reference to AlphaSift.',
-    usage: 'Disabled by default. Set it to true to show Screening and enable screening strategies.',
+    usage: 'Enabled by default. Set it to false to hide Screening and disable screening strategies.',
     valueNotes: ['Screening output is for research support only and is not investment advice.'],
     impact: ['Affects the Web screening entry, strategy loading, and screening API.'],
     notes: ['Disabling it does not affect existing analysis, reports, or notifications.'],

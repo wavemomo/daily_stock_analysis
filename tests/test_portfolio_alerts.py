@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import date
+from unittest.mock import patch
 
 from src.portfolio_ownership import (
     LEGACY_GLOBAL_PORTFOLIO_SCOPE,
@@ -260,7 +260,9 @@ class PortfolioAlertsTestCase(unittest.TestCase):
             ],
         )
 
-    def test_watchlist_expansion_refreshes_stock_list(self) -> None:
+    def test_watchlist_expansion_uses_rule_owner_personal_watchlist(self) -> None:
+        """watchlist 目标展开为规则所属用户的个人自选，且不再读取全局 STOCK_LIST。"""
+
         class Config:
             stock_list = ["600519", "600519", "aapl"]
 
@@ -269,17 +271,46 @@ class PortfolioAlertsTestCase(unittest.TestCase):
 
             def refresh_stock_list(self):
                 self.refreshed = True
-                self.stock_list = ["000001", "000001", "hk00700"]
 
         config = Config()
+
+        class _WatchlistService:
+            def list(self, *, user_id):  # noqa: A003 - 对齐服务端方法名
+                assert user_id == 77
+                return {"stock_codes": ["000001", "000001", "hk00700"]}
+
+        with patch(
+            "src.services.miniapp_watchlist_service.MiniappWatchlistService",
+            return_value=_WatchlistService(),
+        ):
+            targets, overflow = expand_symbol_targets(
+                target_scope="watchlist",
+                target="default",
+                config=config,
+                portfolio_scope=PortfolioScope.user("77"),
+            )
+
+        self.assertFalse(config.refreshed)
+        self.assertEqual([item.symbol for item in targets], ["000001", "HK00700"])
+        self.assertEqual(overflow, 0)
+
+    def test_watchlist_expansion_without_user_scope_is_empty(self) -> None:
+        """无用户归属的 watchlist 规则不再回退全局清单，返回空目标。"""
+
+        class Config:
+            stock_list = ["600519", "aapl"]
+
+            def refresh_stock_list(self):  # pragma: no cover - 不应被调用
+                raise AssertionError("watchlist 展开不应读取全局 STOCK_LIST")
+
         targets, overflow = expand_symbol_targets(
             target_scope="watchlist",
             target="default",
-            config=config,
+            config=Config(),
+            portfolio_scope=LEGACY_GLOBAL_PORTFOLIO_SCOPE,
         )
 
-        self.assertTrue(config.refreshed)
-        self.assertEqual([item.symbol for item in targets], ["000001", "HK00700"])
+        self.assertEqual(targets, [])
         self.assertEqual(overflow, 0)
 
 

@@ -4,6 +4,7 @@ import { usageApi, type UsageDashboard, type UsageModelBreakdown, type UsagePeri
 import type { ParsedApiError } from '../api/error';
 import { ApiErrorAlert, AppPage, Card, EmptyState, PageHeader, StatCard } from '../components/common';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
+import { useAuth } from '../hooks';
 import type { UiLanguage, UiTextKey, UiTextParams } from '../i18n/uiText';
 import { cn } from '../utils/cn';
 
@@ -101,6 +102,9 @@ const ModelUsageCard: React.FC<{ model: UsageModelBreakdown; language: UiLanguag
 
 const TokenUsagePage: React.FC = () => {
   const { language, t } = useUiLanguage();
+  const { hasPermission } = useAuth();
+  // 多用户隔离：有 usage.read 的运营/管理员看平台级聚合，普通成员只看本人用量。
+  const canViewPlatformUsage = hasPermission('usage.read');
   const [period, setPeriod] = useState<UsagePeriod>('month');
   const [dashboard, setDashboard] = useState<UsageDashboard | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
@@ -113,7 +117,11 @@ const TokenUsagePage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await usageApi.getDashboard({ period, limit: 50 });
+      const data = await usageApi.getDashboard({
+        period,
+        limit: 50,
+        scope: canViewPlatformUsage ? 'platform' : 'self',
+      });
       if (requestSeq !== requestSeqRef.current) {
         return;
       }
@@ -128,7 +136,7 @@ const TokenUsagePage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [period, t]);
+  }, [period, t, canViewPlatformUsage]);
 
   useEffect(() => {
     void loadDashboard();

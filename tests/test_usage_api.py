@@ -20,7 +20,13 @@ from src.storage import DatabaseManager
 
 
 class FakeUsageDbManager:
-    def get_llm_usage_summary(self, from_dt, to_dt):
+    def __init__(self):
+        # 记录端点传入的归属参数，用于断言平台级与本人视图的区分。
+        self.summary_calls = []
+        self.record_calls = []
+
+    def get_llm_usage_summary(self, from_dt, to_dt, *, owner=None, include_all_owners=False):
+        self.summary_calls.append({"owner": owner, "include_all_owners": include_all_owners})
         return {
             "total_calls": 2,
             "total_prompt_tokens": 30,
@@ -47,7 +53,8 @@ class FakeUsageDbManager:
             ],
         }
 
-    def get_llm_usage_records(self, from_dt, to_dt, limit=50):
+    def get_llm_usage_records(self, from_dt, to_dt, limit=50, *, owner=None, include_all_owners=False):
+        self.record_calls.append({"owner": owner, "include_all_owners": include_all_owners})
         return [
             {
                 "id": 7,
@@ -118,7 +125,8 @@ class UsageDashboardApiTestCase(unittest.TestCase):
         self.auth_patch.start()
 
         self.app = create_app(static_dir=Path(self.temp_dir.name))
-        self.app.dependency_overrides[get_database_manager] = lambda: FakeUsageDbManager()
+        self.fake_db = FakeUsageDbManager()
+        self.app.dependency_overrides[get_database_manager] = lambda: self.fake_db
         self.client = TestClient(self.app)
 
     def tearDown(self) -> None:
@@ -184,6 +192,53 @@ class UsageDashboardApiTestCase(unittest.TestCase):
         self.assertTrue(p05a_internal_fields.isdisjoint(body["recent_calls"][0]))
         self.assertNotIn("context_window", body["recent_calls"][0])
         self.assertNotIn("context_usage_ratio", body["recent_calls"][0])
+
+    # ------------------------------------------------------------------
+    # 多用户隔离：平台级用量 vs 本人用量
+    # ------------------------------------------------------------------
+
+    def test_platform_dashboard_aggregates_all_owners(self):
+        """管理员/运营的平台视图必须显式跨全体用户聚合。"""
+        response = self.client.get(
+            "/api/v1/usage/dashboard?period=today&limit=10",
+            headers=self._bearer_headers("usage-test-token"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.fake_db.summary_calls)
+        self.assertTrue(all(call["include_all_owners"] for call in self.fake_db.summary_calls))
+        self.assertTrue(all(call["include_all_owners"] for call in self.fake_db.record_calls))
+        self.assertTrue(all(call["owner"] is None for call in self.fake_db.summary_calls))
+
+    def test_member_can_read_own_usage_scoped_to_self(self):
+        """普通成员可读本人用量，且查询必须按其 owner 收敛、不得跨用户聚合。"""
+        response = self.client.get(
+            "/api/v1/usage/me/dashboard?period=today&limit=10",
+            headers=self._bearer_headers("member-token"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.fake_db.summary_calls)
+        for call in self.fake_db.summary_calls + self.fake_db.record_calls:
+            self.assertFalse(call["include_all_owners"])
+            self.assertIsNotNone(call["owner"])
+            self.assertEqual(call["owner"].scope, "user")
+            self.assertEqual(call["owner"].user_id, self.user.id)
+
+    def test_member_can_read_own_usage_summary(self):
+        response = self.client.get(
+            "/api/v1/usage/me/summary?period=month",
+            headers=self._bearer_headers("member-token"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total_tokens"], 100)
+        self.assertEqual(self.fake_db.summary_calls[0]["owner"].user_id, self.user.id)
+
+    def test_my_usage_rejects_anonymous_request(self):
+        response = self.client.get("/api/v1/usage/me/summary")
+
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

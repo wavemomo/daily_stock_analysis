@@ -140,7 +140,26 @@ def _authorize_principal(request: Request, principal, *, auth_kind: str) -> Opti
     request.state.auth_kind = auth_kind
     request.state.miniapp_principal = principal
     request.state.required_permission = required
+    _bind_request_analysis_owner(principal)
     return None
+
+
+def _bind_request_analysis_owner(principal) -> None:
+    """把已认证用户绑定到运行期 owner 上下文，供深层横切逻辑读取归属。
+
+    仅用于无法逐层传参的横切关注点（Agent 记忆注入、LLM Token 计费）：
+    仓库/服务层的查询与写入仍必须显式接收 owner。contextvar 按 asyncio 任务隔离，
+    每个请求各自一份，不会跨请求泄漏；同步端点由 anyio 复制上下文后同样可见。
+    """
+    try:
+        from src.analysis_ownership import AnalysisOwner
+        from src.analysis_owner_context import bind_current_analysis_owner
+
+        user_id = getattr(getattr(principal, "user", None), "id", None)
+        if isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0:
+            bind_current_analysis_owner(AnalysisOwner.user(user_id))
+    except Exception:  # noqa: BLE001 - 绑定失败只应降级为 fail-closed 的 global 归属
+        logger.warning("Failed to bind request analysis owner context", exc_info=True)
 
 
 def _request_host(request: Request) -> str:
@@ -241,6 +260,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return csrf_response
             request.state.auth_kind = "web_user"
             request.state.miniapp_principal = web_principal
+            _bind_request_analysis_owner(web_principal)
             return await call_next(request)
 
         if web_principal is not None:

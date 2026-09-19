@@ -9,7 +9,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from api.deps import get_database_manager
+from api.deps import get_database_manager, get_request_analysis_owner_context
 from api.v1.schemas.backtest import (
     BacktestRunRequest,
     BacktestRunResponse,
@@ -61,7 +61,9 @@ def run_backtest(
 ) -> BacktestRunResponse:
     try:
         _validate_analysis_date_range(request.analysis_date_from, request.analysis_date_to)
-        service = BacktestService(db_manager)
+        service = BacktestService(
+            db_manager, owner=get_request_analysis_owner_context(http_request)
+        )
         service.validate_run_request(
             code=request.code,
             eval_window_days=request.eval_window_days,
@@ -108,6 +110,7 @@ def run_backtest(
     description="分页获取回测结果，支持按股票代码过滤",
 )
 def get_backtest_results(
+    http_request: Request,
     code: Optional[str] = Query(None, description="股票代码筛选"),
     eval_window_days: Optional[int] = Query(None, ge=1, le=120, description="评估窗口过滤"),
     analysis_date_from: Optional[date] = Query(None, description="分析日期起始（含）"),
@@ -119,7 +122,9 @@ def get_backtest_results(
 ) -> BacktestResultsResponse:
     try:
         _validate_analysis_date_range(analysis_date_from, analysis_date_to)
-        service = BacktestService(db_manager)
+        service = BacktestService(
+            db_manager, owner=get_request_analysis_owner_context(http_request)
+        )
         data = service.get_recent_evaluations(
             code=code,
             eval_window_days=eval_window_days,
@@ -163,6 +168,7 @@ def get_backtest_results(
     summary="获取整体回测表现",
 )
 def get_overall_performance(
+    http_request: Request,
     eval_window_days: Optional[int] = Query(None, ge=1, le=120, description="评估窗口过滤"),
     analysis_date_from: Optional[date] = Query(None, description="分析日期起始（含）"),
     analysis_date_to: Optional[date] = Query(None, description="分析日期结束（含）"),
@@ -171,7 +177,9 @@ def get_overall_performance(
 ) -> PerformanceMetrics:
     try:
         _validate_analysis_date_range(analysis_date_from, analysis_date_to)
-        service = BacktestService(db_manager)
+        service = BacktestService(
+            db_manager, owner=get_request_analysis_owner_context(http_request)
+        )
         summary = service.get_summary(
             scope="overall",
             code=None,
@@ -213,6 +221,7 @@ def get_overall_performance(
     summary="获取单股回测表现",
 )
 def get_stock_performance(
+    http_request: Request,
     code: str,
     eval_window_days: Optional[int] = Query(None, ge=1, le=120, description="评估窗口过滤"),
     analysis_date_from: Optional[date] = Query(None, description="分析日期起始（含）"),
@@ -222,7 +231,9 @@ def get_stock_performance(
 ) -> PerformanceMetrics:
     try:
         _validate_analysis_date_range(analysis_date_from, analysis_date_to)
-        service = BacktestService(db_manager)
+        service = BacktestService(
+            db_manager, owner=get_request_analysis_owner_context(http_request)
+        )
         summary = service.get_summary(
             scope="stock",
             code=code,

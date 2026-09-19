@@ -58,7 +58,7 @@ describe('usageApi', () => {
 
     const result = await usageApi.getDashboard({ period: 'today', limit: 10 });
 
-    expect(get).toHaveBeenCalledWith('/api/v1/usage/dashboard', {
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/me/dashboard', {
       params: { period: 'today', limit: 10 },
     });
     expect(result.fromDate).toBe('2026-06-14');
@@ -86,6 +86,29 @@ describe('usageApi', () => {
     });
 
     await usageApi.getDashboard();
+
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/me/dashboard', {
+      params: { period: 'month', limit: 50 },
+    });
+  });
+
+  it('targets the platform-wide endpoint only when the platform scope is requested', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        period: 'month',
+        from_date: '2026-06-01',
+        to_date: '2026-06-14',
+        total_calls: 0,
+        total_prompt_tokens: 0,
+        total_completion_tokens: 0,
+        total_tokens: 0,
+        by_call_type: [],
+        by_model: [],
+        recent_calls: [],
+      },
+    });
+
+    await usageApi.getDashboard({ scope: 'platform' });
 
     expect(get).toHaveBeenCalledWith('/api/v1/usage/dashboard', {
       params: { period: 'month', limit: 50 },

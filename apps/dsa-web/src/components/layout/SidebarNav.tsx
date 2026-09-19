@@ -40,7 +40,8 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'report-gallery', labelKey: 'layout.nav.reportGallery', to: '/report-gallery', icon: LayoutGrid, requiredPermissions: ['analysis.read'] },
   { key: 'backtest', labelKey: 'layout.nav.backtest', to: '/backtest', icon: BarChart3, requiredPermissions: ['backtest.read'] },
   { key: 'alerts', labelKey: 'layout.nav.alerts', to: '/alerts', icon: Bell, requiredPermissions: ['alerts.read'] },
-  { key: 'usage', labelKey: 'layout.nav.usage', to: '/usage', icon: Gauge, requiredPermissions: ['usage.read'] },
+  // Token 用量按用户隔离：成员可查看本人用量（/usage/me/*），运营/管理员额外看平台级聚合。
+  { key: 'usage', labelKey: 'layout.nav.usage', to: '/usage', icon: Gauge, requiredPermissions: ['account.self'] },
   { key: 'feature-quotas', labelKey: 'layout.nav.featureQuotas', to: '/feature-quotas', icon: TicketCheck },
   { key: 'access-control', labelKey: 'layout.nav.accessControl', to: '/access-control', icon: ShieldCheck, requiredPermissions: ['rbac.manage'] },
   { key: 'settings', labelKey: 'layout.nav.settings', to: '/settings', icon: Settings2, requiredPermissions: ['system.manage'] },

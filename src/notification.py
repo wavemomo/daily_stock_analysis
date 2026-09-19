@@ -2661,6 +2661,7 @@ class NotificationService(
         cooldown_key: Optional[str] = None,
         structured_payload: Optional[Dict[str, Any]] = None,
         email_receivers_override: Optional[List[str]] = None,
+        owner_scoped: bool = False,
     ) -> NotificationDispatchResult:
         """
         Send a notification and return per-channel diagnostics.
@@ -2730,6 +2731,22 @@ class NotificationService(
             )
 
         target_channels = self.get_channels_for_route(route_type)
+        if owner_scoped:
+            # 多用户隔离：归属某个用户的私有内容（个人报告/个人告警）只能走该用户自己的
+            # 投递渠道（当前仅邮件，收件人由 email_receivers_override 指定），绝不广播到
+            # 全局静态渠道（企业微信/Webhook/ntfy 等），否则其他用户与管理员会看到他人私有内容。
+            restricted = [ch for ch in target_channels if ch == NotificationChannel.EMAIL]
+            if len(restricted) != len(target_channels):
+                skipped = [
+                    ChannelDetector.get_channel_name(ch)
+                    for ch in target_channels
+                    if ch != NotificationChannel.EMAIL
+                ]
+                logger.info(
+                    "用户归属通知：已跳过全局广播渠道 %s，仅向该用户自己的邮箱投递",
+                    ', '.join(skipped) or '(无)',
+                )
+            target_channels = restricted
         if not target_channels:
             if context_success:
                 logger.info("已通过消息上下文渠道完成推送（路由后无其他通知渠道）")
@@ -2881,6 +2898,7 @@ class NotificationService(
         cooldown_key: Optional[str] = None,
         structured_payload: Optional[Dict[str, Any]] = None,
         email_receivers_override: Optional[List[str]] = None,
+        owner_scoped: bool = False,
     ) -> bool:
         """
         统一发送接口 - 向所有已配置的渠道发送。
@@ -2898,6 +2916,7 @@ class NotificationService(
             cooldown_key=cooldown_key,
             structured_payload=structured_payload,
             email_receivers_override=email_receivers_override,
+            owner_scoped=owner_scoped,
         )
         return bool(result.success)
 

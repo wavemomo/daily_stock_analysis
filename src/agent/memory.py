@@ -24,7 +24,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from src.analysis_ownership import AnalysisOwner
 
 logger = logging.getLogger(__name__)
 
@@ -71,20 +74,30 @@ class AgentMemory:
         cal = memory.get_calibration("technical", stock_code="600519")
     """
 
-    def __init__(self, enabled: bool = False, min_samples: int = _MIN_CALIBRATION_SAMPLES):
+    def __init__(
+        self,
+        enabled: bool = False,
+        min_samples: int = _MIN_CALIBRATION_SAMPLES,
+        owner: Optional["AnalysisOwner"] = None,
+    ):
         self.enabled = enabled
         self.min_samples = min_samples
+        # 记忆会把历史分析注入 prompt、并读取回测汇总，因此必须绑定资源归属。
+        # 未显式传入时取运行期上下文中的当前 owner，缺省 fail-closed 到 global。
+        from src.analysis_owner_context import current_analysis_owner_or_global
+
+        self.owner = owner if owner is not None else current_analysis_owner_or_global()
 
     @classmethod
-    def from_config(cls) -> "AgentMemory":
-        """Create an AgentMemory from the current config."""
+    def from_config(cls, owner: Optional["AnalysisOwner"] = None) -> "AgentMemory":
+        """Create an AgentMemory from the current config, bound to one owner."""
         try:
             from src.config import get_config
             config = get_config()
             enabled = getattr(config, "agent_memory_enabled", False)
-            return cls(enabled=enabled)
+            return cls(enabled=enabled, owner=owner)
         except Exception:
-            return cls(enabled=False)
+            return cls(enabled=False, owner=owner)
 
     # -----------------------------------------------------------------
     # Analysis history retrieval
@@ -106,7 +119,12 @@ class AgentMemory:
         try:
             from src.storage import get_db
             db = get_db()
-            records = db.get_analysis_history(code=stock_code, limit=limit)
+            # 按 owner 过滤：注入 prompt 的历史分析只能来自本 owner，绝不能串入他人分析。
+            records = db.get_analysis_history(
+                code=stock_code,
+                limit=limit,
+                **self.owner.storage_kwargs,
+            )
             entries = []
             for r in records:
                 raw_result: Dict[str, Any] = {}
@@ -213,7 +231,7 @@ class AgentMemory:
 
         try:
             from src.services.backtest_service import BacktestService
-            service = BacktestService()
+            service = BacktestService(owner=self.owner)
             summary = service.get_skill_summary(skill_id)
             if summary:
                 return {
@@ -290,7 +308,7 @@ class AgentMemory:
         """Aggregate accuracy statistics from backtest history."""
         try:
             from src.services.backtest_service import BacktestService
-            service = BacktestService()
+            service = BacktestService(owner=self.owner)
 
             if skill_id:
                 summary = service.get_skill_summary(skill_id)

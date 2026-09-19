@@ -511,6 +511,16 @@ class BacktestSummary(Base):
     scope = Column(String(16), nullable=False, index=True)  # overall/stock
     code = Column(String(16), index=True)
 
+    # 汇总是聚合结果，没有可继承 owner 的父行，因此自带 owner 列：
+    # 语义与 analysis_history 一致（user 行精确匹配可信用户；global 行为后台/管理员）。
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
+
     eval_window_days = Column(Integer, nullable=False, default=10)
     engine_version = Column(String(16), nullable=False, default='v1')
     computed_at = Column(DateTime, default=local_naive_now, index=True)
@@ -551,7 +561,13 @@ class BacktestSummary(Base):
             'code',
             'eval_window_days',
             'engine_version',
-            name='uix_backtest_summary_scope_code_window_version',
+            'owner_scope',
+            'owner_user_id',
+            name='uix_backtest_summary_scope_code_window_version_owner',
+        ),
+        Index(
+            'ix_backtest_summary_owner_scope_code',
+            'owner_user_id', 'owner_scope', 'scope', 'code',
         ),
     )
 
@@ -762,6 +778,16 @@ class ConversationMessage(Base):
     __tablename__ = 'conversation_messages'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # 资源归属（DB 兜底）：对话隔离主依据仍是 session_id 前缀 ``miniapp:{owner_id}:``，
+    # 这两列用于在数据层再加一道防线——读取时若行归属某个用户而调用方是另一个用户，
+    # 一律拒绝；NULL/global 行保持既有行为，不会隐藏任何人自己的历史。
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     session_id = Column(String(100), index=True, nullable=False)
     role = Column(String(20), nullable=False)  # user, assistant, system
     content = Column(Text, nullable=False)
@@ -774,6 +800,13 @@ class ConversationSessionState(Base):
     __tablename__ = 'conversation_session_states'
 
     session_id = Column(String(100), primary_key=True)
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     selected_skill_ids_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=local_naive_now, nullable=False)
     updated_at = Column(DateTime, default=local_naive_now, onupdate=local_naive_now, nullable=False)
@@ -785,6 +818,13 @@ class ConversationSummary(Base):
     __tablename__ = 'conversation_summaries'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     session_id = Column(String(100), nullable=False, unique=True, index=True)
     summary = Column(Text, nullable=False)
     covered_message_id = Column(Integer, nullable=False, default=0)
@@ -800,6 +840,13 @@ class AgentProviderTurn(Base):
     __tablename__ = 'agent_provider_turns'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     session_id = Column(String(100), nullable=False, index=True)
     run_id = Column(String(64), nullable=False, index=True)
     provider = Column(String(64), nullable=False, index=True)
@@ -825,6 +872,15 @@ class LLMUsage(Base):
     __tablename__ = 'llm_usage'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # 资源归属：语义与 analysis_history 一致。用户发起的调用记 user 范围 + 可信用户主键；
+    # 定时任务/大盘复盘/共享扇出计算等平台行为记 global。用于按用户统计 Token 消耗。
+    owner_user_id = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    owner_scope = Column(String(16), nullable=True, index=True)
     # 'analysis' | 'agent' | 'market_review'
     call_type = Column(String(32), nullable=False, index=True)
     model = Column(String(128), nullable=False)
@@ -891,6 +947,17 @@ class LLMUsage(Base):
     known_dynamic_marker_positions = Column(Text, nullable=True)
     called_at = Column(DateTime, default=local_naive_now, index=True)
 
+    __table_args__ = (
+        Index('ix_llm_usage_owner_called', 'owner_user_id', 'owner_scope', 'called_at'),
+    )
+
+
+# owner 列单独维护：它们由服务端按可信上下文写入，不能混进 telemetry 透传字典
+# （那会被 ``record_llm_usage`` 的 telemetry.get(column) 覆盖成 None）。
+_LLM_USAGE_OWNER_COLUMN_SQL: Dict[str, str] = {
+    "owner_user_id": "INTEGER",
+    "owner_scope": "VARCHAR(16)",
+}
 
 _LLM_USAGE_TELEMETRY_COLUMN_SQL: Dict[str, str] = {
     "provider_usage_json": "TEXT",
@@ -1887,9 +1954,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_analysis_history_owner_columns()
             self._ensure_web_password_credential_columns()
             self._ensure_miniapp_watchlist_scheduled_column()
+            self._ensure_backtest_summary_owner_columns()
             self._ensure_fundamental_snapshot_owner_columns()
             self._ensure_screening_run_owner_columns()
             self._ensure_llm_usage_telemetry_columns()
+            self._ensure_llm_usage_owner_columns()
+            self._ensure_conversation_owner_columns()
+            self._ensure_alert_rule_owner_scope_backfill()
             self._ensure_decision_signal_owner_columns()
             self._ensure_decision_signal_profile_schema()
             self._ensure_stock_daily_canonical_id()
@@ -2290,6 +2361,63 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             raise RuntimeError(
                 "miniapp watchlist scheduled-column migration verification failed: "
                 f"columns={sorted(verified_columns)}"
+            )
+
+    def _ensure_backtest_summary_owner_columns(self) -> None:
+        """Add owner columns to existing SQLite backtest summaries and re-key them.
+
+        回测汇总按 owner 归口：旧库的唯一约束不含 owner，必须替换为含 owner 的唯一索引，
+        否则不同用户的同 scope/code/window/engine 汇总会互相覆盖。
+        """
+        if not self._is_sqlite_engine:
+            return
+        table_name = BacktestSummary.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        expected = {
+            "owner_user_id": "INTEGER",
+            "owner_scope": "VARCHAR(16)",
+        }
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, column_type in expected.items():
+            if column_name in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+
+        # 旧唯一约束（不含 owner）会让多用户汇总互相覆盖：丢弃旧唯一索引并建立含 owner 的新索引。
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DROP INDEX IF EXISTS uix_backtest_summary_scope_code_window_version"
+            )
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uix_backtest_summary_scope_code_window_version_owner "
+                f"ON {table_name} "
+                "(scope, code, eval_window_days, engine_version, owner_scope, owner_user_id)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_backtest_summary_owner_scope_code "
+                f"ON {table_name} (owner_user_id, owner_scope, scope, code)"
+            )
+
+        verified_columns = {
+            column["name"]
+            for column in inspect(self._engine).get_columns(table_name)
+        }
+        missing = set(expected) - verified_columns
+        if missing:
+            raise RuntimeError(
+                "backtest summary owner-column migration verification failed: "
+                f"missing={sorted(missing)}"
             )
 
     def _ensure_fundamental_snapshot_owner_columns(self) -> None:
@@ -3142,6 +3270,126 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                             time.sleep(delay)
                         continue
                     raise
+
+    def _ensure_alert_rule_owner_scope_backfill(self) -> None:
+        """Make single-user-era alert rule ownership explicit where it is determinable.
+
+        ``alert_rules.owner_scope`` 允许为 NULL（单用户时代遗留）。能确定归属的行
+        （``user_id`` 非空）回填为 ``user``，消除"有 user_id 却无 owner_scope"的歧义。
+        无法确定归属的行（``user_id`` 与 ``owner_scope`` 皆为空）**不猜测**：保持原样，
+        继续被 ``AlertRepository.list_enabled_rules`` 的 fail-closed 条件排除，避免
+        把某个人的历史规则静默扩散成全体租户的全局规则。
+        """
+        if not self._is_sqlite_engine:
+            return
+        table_name = AlertRuleRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if not {"user_id", "owner_scope"}.issubset(columns):
+            return
+        try:
+            with self._engine.begin() as connection:
+                result = connection.exec_driver_sql(
+                    f"UPDATE {table_name} SET owner_scope = 'user' "
+                    "WHERE user_id IS NOT NULL AND owner_scope IS NULL"
+                )
+                backfilled = int(getattr(result, "rowcount", 0) or 0)
+                ambiguous = connection.exec_driver_sql(
+                    f"SELECT COUNT(1) FROM {table_name} "
+                    "WHERE user_id IS NULL AND owner_scope IS NULL"
+                ).scalar() or 0
+        except Exception as exc:
+            logger.warning("告警规则 owner_scope 回填失败，已跳过: %s", exc)
+            return
+        if backfilled:
+            logger.info("告警规则 owner_scope 回填完成：%d 条按 user 归属。", backfilled)
+        if ambiguous:
+            logger.warning(
+                "检测到 %d 条无法确定归属的历史告警规则（user_id 与 owner_scope 均为空），"
+                "已保持禁用以避免跨用户扩散；请在告警页面重新创建或由管理员显式指定归属。",
+                int(ambiguous),
+            )
+
+    def _ensure_conversation_owner_columns(self) -> None:
+        """Add owner columns to existing SQLite conversation tables (DB-level guard)."""
+        if not self._is_sqlite_engine:
+            return
+        tables = (
+            ConversationMessage.__tablename__,
+            ConversationSessionState.__tablename__,
+            ConversationSummary.__tablename__,
+            AgentProviderTurn.__tablename__,
+        )
+        expected = {
+            "owner_user_id": "INTEGER",
+            "owner_scope": "VARCHAR(16)",
+        }
+        inspector = inspect(self._engine)
+        for table_name in tables:
+            if not inspector.has_table(table_name):
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name, column_type in expected.items():
+                if column_name in existing:
+                    continue
+                try:
+                    with self._engine.begin() as connection:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                        )
+                except OperationalError as exc:
+                    if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                        raise
+            verified = {
+                column["name"]
+                for column in inspect(self._engine).get_columns(table_name)
+            }
+            missing = set(expected) - verified
+            if missing:
+                raise RuntimeError(
+                    "conversation owner-column migration verification failed: "
+                    f"table={table_name} missing={sorted(missing)}"
+                )
+
+    def _ensure_llm_usage_owner_columns(self) -> None:
+        """Add owner columns to existing SQLite llm_usage rows (per-user token stats)."""
+        if not self._is_sqlite_engine:
+            return
+        table_name = LLMUsage.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, column_type in _LLM_USAGE_OWNER_COLUMN_SQL.items():
+            if column_name in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column_name):
+                    raise
+
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_llm_usage_owner_called "
+                f"ON {table_name} (owner_user_id, owner_scope, called_at)"
+            )
+
+        verified = {
+            column["name"]
+            for column in inspect(self._engine).get_columns(table_name)
+        }
+        missing = set(_LLM_USAGE_OWNER_COLUMN_SQL) - verified
+        if missing:
+            raise RuntimeError(
+                f"llm_usage owner-column migration verification failed: missing={sorted(missing)}"
+            )
 
     def _ensure_intelligence_item_scope_values(self) -> None:
         """Backfill nullable intelligence item scopes so SQLite unique keys work."""
@@ -4956,15 +5204,51 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         digest = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
         return f"no-url:{code}:{digest}"
 
+    @staticmethod
+    def _current_conversation_owner() -> Any:
+        """Return the owner to stamp on conversation rows (fail-closed to global)."""
+        from src.analysis_owner_context import current_analysis_owner_or_global
+
+        return current_analysis_owner_or_global()
+
+    def _conversation_owner_guard_conditions(self, model: Any) -> List[Any]:
+        """Return predicates that block reading another user's conversation rows.
+
+        这是 DB 兜底（对话隔离主依据仍是 API 层的 session_id 前缀校验）：
+        - 调用方是用户 X：可读 owner 为 X 的行，以及 NULL/global 的历史行；
+          owner 为其他用户的行一律不可见。
+        - 调用方是 global（后台/机器人/CLI）：可读 global 与 NULL 行。
+        语义只"拦截"不"隐藏"，因此不会让任何用户看不到自己的对话。
+        """
+        owner = self._current_conversation_owner()
+        neutral = or_(
+            model.owner_scope.is_(None),
+            model.owner_scope == "global",
+        )
+        if getattr(owner, "scope", None) == "user":
+            return [
+                or_(
+                    neutral,
+                    and_(
+                        model.owner_scope == "user",
+                        model.owner_user_id == owner.user_id,
+                    ),
+                )
+            ]
+        return [neutral]
+
     def save_conversation_message(self, session_id: str, role: str, content: str) -> int:
         """
         保存 Agent 对话消息
         """
+        owner = self._current_conversation_owner()
         with self.session_scope() as session:
             msg = ConversationMessage(
                 session_id=session_id,
                 role=role,
-                content=content
+                content=content,
+                owner_scope=owner.scope,
+                owner_user_id=owner.user_id,
             )
             session.add(msg)
             session.flush()
@@ -4977,11 +5261,14 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         selected_skill_ids: Optional[List[str]] = None,
     ) -> int:
         """Persist a user message and an optional session Skill selection atomically."""
+        owner = self._current_conversation_owner()
         with self.session_scope() as session:
             msg = ConversationMessage(
                 session_id=session_id,
                 role="user",
                 content=content,
+                owner_scope=owner.scope,
+                owner_user_id=owner.user_id,
             )
             session.add(msg)
             session.flush()
@@ -4991,6 +5278,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 values = {
                     "session_id": session_id,
                     "selected_skill_ids_json": json.dumps(selected_skill_ids, ensure_ascii=False),
+                    "owner_scope": owner.scope,
+                    "owner_user_id": owner.user_id,
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -5023,8 +5312,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         获取 Agent 对话历史
         """
         with self.session_scope() as session:
-            stmt = select(ConversationMessage).filter(
-                ConversationMessage.session_id == session_id
+            stmt = select(ConversationMessage).where(
+                and_(
+                    ConversationMessage.session_id == session_id,
+                    *self._conversation_owner_guard_conditions(ConversationMessage),
+                )
             ).order_by(ConversationMessage.created_at.desc()).limit(limit)
             messages = session.execute(stmt).scalars().all()
 
@@ -5040,6 +5332,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     and_(
                         ConversationMessage.session_id == session_id,
                         ConversationMessage.role.in_(["user", "assistant"]),
+                        *self._conversation_owner_guard_conditions(ConversationMessage),
                     )
                 )
                 .order_by(ConversationMessage.created_at, ConversationMessage.id)
@@ -5068,7 +5361,10 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         """Return the rolling summary for a conversation session, if present."""
         with self.session_scope() as session:
             stmt = select(ConversationSummary).where(
-                ConversationSummary.session_id == session_id
+                and_(
+                    ConversationSummary.session_id == session_id,
+                    *self._conversation_owner_guard_conditions(ConversationSummary),
+                )
             )
             row = session.execute(stmt).scalar_one_or_none()
             if row is None:
@@ -5101,8 +5397,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         estimated_tokens: int,
     ) -> int:
         """Persist one provider protocol trace and enforce per-model retention."""
+        owner = self._current_conversation_owner()
         with self.session_scope() as session:
             row = AgentProviderTurn(
+                owner_scope=owner.scope,
+                owner_user_id=owner.user_id,
                 session_id=session_id,
                 run_id=run_id,
                 provider=provider,
@@ -5222,6 +5521,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         estimated_tokens: int,
     ) -> None:
         """Create or update the rolling summary for a conversation session."""
+        owner = self._current_conversation_owner()
         with self.session_scope() as session:
             now = datetime.now()
             values = {
@@ -5230,6 +5530,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 "covered_message_id": int(covered_message_id or 0),
                 "source_message_count": int(source_message_count or 0),
                 "estimated_tokens": int(estimated_tokens or 0),
+                "owner_scope": owner.scope,
+                "owner_user_id": owner.user_id,
                 "updated_at": now,
             }
             stmt = sqlite_insert(ConversationSummary).values(**values)
@@ -5394,8 +5696,17 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         stock_code: Optional[str] = None,
         **telemetry: Any,
     ) -> None:
-        """Append one LLM call record to llm_usage."""
+        """Append one LLM call record to llm_usage, attributed to the current owner.
+
+        归属取自运行期 owner 上下文（HTTP 认证中间件或 pipeline 绑定）：用户发起的调用
+        计入该用户，定时任务/大盘复盘/共享扇出计算等平台行为计入 global。
+        """
+        from src.analysis_owner_context import current_analysis_owner_or_global
+
+        owner = current_analysis_owner_or_global()
         row_values: Dict[str, Any] = {
+            "owner_scope": owner.scope,
+            "owner_user_id": owner.user_id,
             "call_type": call_type,
             "model": model or "unknown",
             "stock_code": stock_code,
@@ -5409,10 +5720,37 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         with self.session_scope() as session:
             session.add(row)
 
+    @staticmethod
+    def _llm_usage_owner_conditions(
+        owner: Optional[Any],
+        include_all_owners: bool,
+    ) -> List[Any]:
+        """Return owner predicates for llm_usage reads.
+
+        ``include_all_owners=True`` 是**显式**的平台级聚合（仅管理员端点可用）；
+        否则按 owner 收敛：用户 owner 精确匹配，缺省 fail-closed 到 global/legacy 行。
+        """
+        if include_all_owners:
+            return []
+        if owner is not None and getattr(owner, "scope", None) == "user":
+            return [
+                LLMUsage.owner_scope == "user",
+                LLMUsage.owner_user_id == owner.user_id,
+            ]
+        return [
+            or_(
+                LLMUsage.owner_scope == "global",
+                LLMUsage.owner_scope.is_(None),
+            )
+        ]
+
     def get_llm_usage_summary(
         self,
         from_dt: datetime,
         to_dt: datetime,
+        *,
+        owner: Optional[Any] = None,
+        include_all_owners: bool = False,
     ) -> Dict[str, Any]:
         """Return aggregated token usage between from_dt and to_dt.
 
@@ -5427,6 +5765,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             base_filter = and_(
                 LLMUsage.called_at >= from_dt,
                 LLMUsage.called_at <= to_dt,
+                *self._llm_usage_owner_conditions(owner, include_all_owners),
             )
 
             # Overall totals
@@ -5501,6 +5840,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         from_dt: datetime,
         to_dt: datetime,
         limit: int = 50,
+        *,
+        owner: Optional[Any] = None,
+        include_all_owners: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return recent LLM usage audit rows between from_dt and to_dt.
 
@@ -5525,6 +5867,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     and_(
                         LLMUsage.called_at >= from_dt,
                         LLMUsage.called_at <= to_dt,
+                        *self._llm_usage_owner_conditions(owner, include_all_owners),
                     )
                 )
                 .order_by(desc(LLMUsage.called_at), desc(LLMUsage.id))

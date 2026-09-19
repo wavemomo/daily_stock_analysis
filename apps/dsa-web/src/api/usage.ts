@@ -45,8 +45,19 @@ export type UsageDashboard = {
 };
 
 export const usageApi = {
-  getDashboard: async (params: { period?: UsagePeriod; limit?: number } = {}): Promise<UsageDashboard> => {
-    const response = await apiClient.get<Record<string, unknown>>('/api/v1/usage/dashboard', {
+  /**
+   * 拉取 Token 用量看板。
+   *
+   * 多用户隔离：`scope: 'platform'` 走 `/api/v1/usage/dashboard`（跨全体用户聚合，
+   * 需 `usage.read`，仅运营/管理员）；`scope: 'self'`（默认）走 `/api/v1/usage/me/dashboard`，
+   * 只返回当前登录用户自己的用量，普通成员可见。
+   */
+  getDashboard: async (
+    params: { period?: UsagePeriod; limit?: number; scope?: 'self' | 'platform' } = {},
+  ): Promise<UsageDashboard> => {
+    const path =
+      params.scope === 'platform' ? '/api/v1/usage/dashboard' : '/api/v1/usage/me/dashboard';
+    const response = await apiClient.get<Record<string, unknown>>(path, {
       params: {
         period: params.period ?? 'month',
         limit: params.limit ?? 50,

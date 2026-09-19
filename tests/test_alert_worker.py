@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import unittest
+from typing import Optional
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -270,8 +271,33 @@ class AlertWorkerTestCase(unittest.TestCase):
             "severity": "warning",
             "enabled": True,
         }
+        user_id = overrides.pop("_user_id", None)
         payload.update(overrides)
+        if user_id is not None:
+            return self.service.create_rule(payload, user_id=user_id)
         return self.service.create_rule(payload)
+
+    def _seed_user_watchlist(
+        self,
+        codes: list[str],
+        *,
+        openid: str = "alert-watchlist-user",
+        role: Optional[str] = "operator",
+    ) -> int:
+        """创建一个用户并写入其个人自选，供 watchlist 作用域的告警规则展开。
+
+        ``role`` 默认授予 operator，使该用户规则具备 ``alerts.notify`` 可外发通知；
+        传 ``None`` 则保持无角色（用于验证 fail-closed 的不外发行为）。
+        """
+        from src.services.miniapp_watchlist_service import MiniappWatchlistService
+
+        user_id = self._create_user(openid)
+        service = MiniappWatchlistService()
+        for code in codes:
+            service.add(user_id=user_id, stock_code=code)
+        if role is not None:
+            RbacService().repository.ensure_role(user_id, role)
+        return user_id
 
     def _create_user(self, openid: str = "alert-worker-user") -> int:
         with self.service.repo.db.get_session() as session:
@@ -1771,6 +1797,8 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(len(self._triggers(status="triggered")), 4)
 
     def test_p6_watchlist_expands_to_child_keys_for_db_cooldown_fallback(self) -> None:
+        # 多用户隔离后 watchlist 目标展开为规则所属用户的个人自选（不再读全局 STOCK_LIST）。
+        user_id = self._seed_user_watchlist(["600519", "000001"])
         self._create_rule(
             name="Watchlist",
             target_scope="watchlist",
@@ -1778,10 +1806,10 @@ class AlertWorkerTestCase(unittest.TestCase):
             alert_type="price_cross",
             parameters={"direction": "above", "price": 10},
             cooldown_policy={"cooldown_seconds": 60},
+            _user_id=user_id,
         )
         notifier = self._notifier()
         config = self._config()
-        config.stock_list = ["600519", "000001"]
         now = {"value": 1000.0}
 
         async def _quote(_monitor, _stock_code):
@@ -1831,16 +1859,21 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertIn("No watchlist targets", triggers[0]["diagnostics"])
 
     def test_p6_overflow_payload_is_dry_run_only_and_worker_does_not_write_degraded_history(self) -> None:
+        # 溢出上限作用于规则所属用户的个人自选（多用户隔离后不再来自全局 STOCK_LIST）。
+        user_id = self._seed_user_watchlist(
+            [f"{index:06d}" for index in range(1, 102)],
+            openid="alert-watchlist-overflow",
+        )
         rule = self._create_rule(
             name="Large watchlist",
             target_scope="watchlist",
             target="default",
             alert_type="price_cross",
             parameters={"direction": "above", "price": 10},
+            _user_id=user_id,
         )
         row = self.service.repo.get_rule(rule["id"])
         config = self._config()
-        config.stock_list = [f"{index:06d}" for index in range(1, 102)]
 
         dry_run_payloads = self.service.build_runtime_payloads(row, config=config)
         worker_payloads = self.service.build_runtime_payloads(row, config=config, include_overflow_payload=False)

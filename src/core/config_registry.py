@@ -41,7 +41,12 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "category": "notification",
         "title": "Notification",
-        "description": "Bot, webhook, and push channel related settings.",
+        "description": (
+            "Platform-level bot, webhook, and push channel settings. These channels only "
+            "carry platform-owned content (scheduled market review, administrator/background "
+            "runs). User-owned analysis reports and user alert rules are delivered solely to "
+            "each user's own bound mailbox configured in personal settings."
+        ),
         "display_order": 40,
     },
     {
@@ -2228,7 +2233,12 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "EMAIL_RECEIVERS": {
         "title": "Email Receivers",
-        "description": "Comma-separated recipient email addresses. Leave empty to send to yourself.",
+        "description": (
+            "Comma-separated recipient email addresses for platform-owned reports only "
+            "(scheduled market review, administrator/background runs). "
+            "User-owned analysis reports and user alert rules are delivered to each "
+            "user's own bound mailbox from personal settings and never to this list."
+        ),
         "category": "notification",
         "data_type": "array",
         "ui_control": "textarea",

@@ -627,7 +627,10 @@ class AlertWorker:
         target = self._effective_target(runtime_rule)
         if not target or target == "?":
             return None
-        cache_key = str(target).upper()
+        # 归属必须进缓存键：同一标的在不同规则 owner 下可见的分析历史不同，
+        # 只按标的缓存会把某个用户的私有分析快照复用给其他用户的告警。
+        owner = self._decision_signal_owner(runtime_rule)
+        cache_key = f"{owner.key}|{str(target).upper()}"
         if cache_key in self._analysis_visibility_cache:
             return self._analysis_visibility_cache[cache_key]
         overview: Optional[Dict[str, Any]] = None
@@ -635,7 +638,13 @@ class AlertWorker:
             candidates = HistoryService._history_code_filter_candidates(target)
             records: List[Any] = []
             for candidate in candidates:
-                records.extend(self.service.db.get_analysis_history(code=candidate, days=30, limit=1))
+                # 只读取本规则 owner 自己的分析历史，绝不串入他人分析上下文。
+                records.extend(self.service.db.get_analysis_history(
+                    code=candidate,
+                    days=30,
+                    limit=1,
+                    **owner.storage_kwargs,
+                ))
             records = sorted(records, key=lambda item: getattr(item, "created_at", None) or datetime.min, reverse=True)
             if records:
                 overview = extract_analysis_context_pack_overview(getattr(records[0], "context_snapshot", None))
@@ -725,7 +734,36 @@ class AlertWorker:
             content = f"{content}\n\n{signal_excerpt}"
         alert_text = NotificationBuilder.build_simple_alert(title=title, content=content, alert_type="warning")
 
+        # 多用户隔离：用户自己的告警只投递到该用户绑定的邮箱，不广播到全局静态渠道；
+        # 管理员/配置来源的全局规则保持原有全局渠道行为。
+        owner = self._decision_signal_owner(runtime_rule)
+        if owner.scope == "user":
+            receivers = self._owner_email_receivers(owner.user_id)
+            return notification_service.send_with_results(
+                alert_text,
+                route_type="alert",
+                email_receivers_override=receivers,
+                owner_scoped=True,
+            )
         return notification_service.send_with_results(alert_text, route_type="alert")
+
+    @staticmethod
+    def _owner_email_receivers(user_id: Optional[int]) -> List[str]:
+        """解析用户告警收件邮箱；无绑定/关闭/异常一律 fail-closed 返回空列表。
+
+        返回空列表意味着"跳过邮件"，绝不回退到全局收件人，避免把某用户的告警
+        误发给管理员或其他用户。
+        """
+        if not user_id:
+            return []
+        try:
+            from src.repositories.email_password_repo import EmailPasswordRepository
+
+            target = EmailPasswordRepository().get_report_email_target(int(user_id))
+        except Exception as exc:  # noqa: BLE001 - 解析失败不应影响告警主流程
+            logger.warning("[AlertWorker] 解析用户告警邮箱失败，跳过邮件: %s", exc)
+            return []
+        return [target] if target else []
 
     def _send_notification_safely(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any]) -> "NotificationDispatchResult":
         try:

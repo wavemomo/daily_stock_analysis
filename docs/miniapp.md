@@ -93,7 +93,7 @@ Web Cookie 的不安全请求（`POST`、`PUT`、`PATCH`、`DELETE`）必须同�
 
 登录和 `/me` 的用户摘要包含 `roles` 与 `permissions`。内置角色语义如下：
 
-- `member`：新用户默认角色；可维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析、选股、回测、决策信号只读与历史（本人读/删，`history.read`/`history.delete`）能力；高成本能力受服务端每日功能额度限制。默认开放常规功能栏目，仅排除管理员专属能力——系统设置（`system.read`/`system.manage`）、权限管理（`rbac.manage`）、Token 用量（`usage.read`）、情报源（`intelligence.read`/`intelligence.manage`），以及外发通知（`alerts.notify`/`agent.share`）、全局数据维护（`stocks.manage`）等全局管控动作不授予普通成员。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
+- `member`：新用户默认角色；可维护自己的会话、心得、个人自选股、持仓、告警和 Agent 会话，可使用被授予的分析、选股、回测、决策信号只读与历史（本人读/删，`history.read`/`history.delete`）能力；高成本能力受服务端每日功能额度限制。默认开放常规功能栏目，仅排除管理员专属能力——系统设置（`system.read`/`system.manage`）、权限管理（`rbac.manage`）、平台级 Token 用量聚合（`usage.read`）、情报源（`intelligence.read`/`intelligence.manage`），以及外发通知（`alerts.notify`/`agent.share`）、全局数据维护（`stocks.manage`）等全局管控动作不授予普通成员。Token 用量按用户隔离：成员凭 `account.self` 可通过 `/api/v1/usage/me/summary`、`/api/v1/usage/me/dashboard` 查看**本人**消耗，`usage.read` 才能读取 `/api/v1/usage/summary`、`/api/v1/usage/dashboard` 的**全平台**聚合；两端 Token 用量页按权限自动切换数据源。个人自选由 `watchlist.read`/`watchlist.manage` 控制，按 owner scope 隔离，与管理员维护的全局 `STOCK_LIST`（`stocks.manage`，驱动每日自动分析）相互独立。
 - `operator`：受信任的运营分析员；拥有除 `system.manage`、`rbac.manage` 外的全部权限，包含 `alerts.notify` 与 `agent.share`。
 - `admin`：拥有全部权限，包含 `alerts.notify`、`system.manage` 与 `rbac.manage`；仍不绕过个人资源 owner scope。
 
@@ -122,6 +122,13 @@ RBAC 决定用户能否调用功能；entitlement 决定已获授权用户当天
 RBAC 控制“能否使用能力”，owner scope 控制“能访问哪一条数据”，两者必须同时满足。每日心得、持仓、告警、Agent Chat、分析任务和分析历史都按可信 `principal.user_id` 过滤。请求体、模型工具参数或客户端传入的用户字段不能扩大资源可见范围。
 
 个人资源只在 `owner_user_id == principal.user_id` 时可见和可改；跨用户请求 fail closed，通常返回 `404`，避免泄露资源是否存在。`rbac.manage`、`admin` 角色和 Web Cookie 都不自动扩大个人资源范围。仅受信内部维护调用可在明确设计的独立 scope 下执行跨用户维护；任何缺失或未绑定 scope 都必须 fail closed。
+
+除请求态 owner scope 外，后台链路（定时分析、自动回测、告警巡检、Agent 记忆）通过 `src/analysis_owner_context.py` 的 ContextVar 传递当前归属：认证中间件按 principal 绑定，pipeline 处理单只股票时按任务 owner 绑定，取不到时 **fail closed 视作平台级 global**（只看全局/历史遗留数据，绝不退化成“不过滤”）。据此收敛的归属语义：
+
+- **回测**：`backtest_summaries` 带 owner 列并进唯一约束，候选集按 `analysis_history` 的 owner 过滤；每位用户只用自己的分析历史评估自己的胜率，平台级 global 单独一份。定时自动回测按「有足够陈化分析历史的 owner」逐个执行，单个 owner 失败不影响其他人。
+- **Token 用量**：`llm_usage` 按调用时的 owner 落账（用户触发→该用户，定时/复盘/扇出→global）。
+- **通知**：owner 为用户的分析报告与用户告警只投递到该用户在个人设置里绑定的邮箱，**不会**广播到企业微信/飞书/Telegram/Webhook 等平台级渠道；用户未绑定或关闭「报告发送到邮箱」时直接跳过，不回退到平台收件人。平台级非邮件渠道与 `EMAIL_RECEIVERS` 只承载平台自身内容（定时大盘复盘、管理员/后台任务），架构上支持按用户但当前不对普通成员开放。
+- **Agent 记忆与对话**：Agent 历史分析检索按 owner 过滤，避免把他人分析注入 prompt；对话四表（消息、会话状态、摘要、provider turn）落 owner 列做数据库层兜底，读取时**只拦截不隐藏**——他人行即使猜到 `session_id` 也读不到，历史遗留（NULL）与平台级行仍可正常读取。
 
 ## 数据与迁移
 

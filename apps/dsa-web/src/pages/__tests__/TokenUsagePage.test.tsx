@@ -7,8 +7,16 @@ const { get } = vi.hoisted(() => ({
   get: vi.fn(),
 }));
 
+const { useAuthMock } = vi.hoisted(() => ({
+  useAuthMock: vi.fn(),
+}));
+
 vi.mock('../../api/index', () => ({
   default: { get },
+}));
+
+vi.mock('../../hooks', () => ({
+  useAuth: useAuthMock,
 }));
 
 const dashboardResponse = {
@@ -97,6 +105,8 @@ beforeEach(() => {
   window.localStorage.setItem('dsa.uiLanguage', 'zh');
   vi.clearAllMocks();
   get.mockResolvedValue({ data: dashboardResponse });
+  // 默认按普通成员渲染：只允许查看本人用量。
+  useAuthMock.mockReturnValue({ hasPermission: () => false });
 });
 
 describe('TokenUsagePage', () => {
@@ -108,9 +118,33 @@ describe('TokenUsagePage', () => {
     expect(screen.getAllByText('openai/gpt-test')).toHaveLength(2);
     expect(screen.getAllByText('个股分析')).toHaveLength(2);
     expect(screen.getByText(/600519/)).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/me/dashboard', {
+      params: { period: 'month', limit: 50 },
+    });
+  });
+
+  it('requests only the caller own usage for members without usage.read', async () => {
+    useAuthMock.mockReturnValue({ hasPermission: (permission: string) => permission !== 'usage.read' });
+
+    renderPage();
+
+    await screen.findByRole('heading', { name: 'Token 用量监控' });
+    expect(get).toHaveBeenCalledWith('/api/v1/usage/me/dashboard', {
+      params: { period: 'month', limit: 50 },
+    });
+    expect(get).not.toHaveBeenCalledWith('/api/v1/usage/dashboard', expect.anything());
+  });
+
+  it('requests platform-wide usage for operators holding usage.read', async () => {
+    useAuthMock.mockReturnValue({ hasPermission: (permission: string) => permission === 'usage.read' });
+
+    renderPage();
+
+    await screen.findByRole('heading', { name: 'Token 用量监控' });
     expect(get).toHaveBeenCalledWith('/api/v1/usage/dashboard', {
       params: { period: 'month', limit: 50 },
     });
+    expect(get).not.toHaveBeenCalledWith('/api/v1/usage/me/dashboard', expect.anything());
   });
 
   it('renders English copy when the UI language is English', async () => {
@@ -172,7 +206,7 @@ describe('TokenUsagePage', () => {
     renderPage();
 
     await waitFor(() => {
-      expect(get).toHaveBeenCalledWith('/api/v1/usage/dashboard', {
+      expect(get).toHaveBeenCalledWith('/api/v1/usage/me/dashboard', {
         params: { period: 'month', limit: 50 },
       });
     });
@@ -180,7 +214,7 @@ describe('TokenUsagePage', () => {
     fireEvent.click(screen.getByRole('button', { name: '今日' }));
 
     await waitFor(() => {
-      expect(get).toHaveBeenLastCalledWith('/api/v1/usage/dashboard', {
+      expect(get).toHaveBeenLastCalledWith('/api/v1/usage/me/dashboard', {
         params: { period: 'today', limit: 50 },
       });
     });
@@ -208,7 +242,7 @@ describe('TokenUsagePage', () => {
     fireEvent.click(screen.getByRole('button', { name: '今日' }));
 
     await waitFor(() => {
-      expect(get).toHaveBeenLastCalledWith('/api/v1/usage/dashboard', {
+      expect(get).toHaveBeenLastCalledWith('/api/v1/usage/me/dashboard', {
         params: { period: 'today', limit: 50 },
       });
     });

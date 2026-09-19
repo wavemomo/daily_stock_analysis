@@ -191,6 +191,10 @@ class RbacService:
         normalized_method = method.upper()
         if normalized_method == 'GET' and path == '/api/v1/feature-quotas/me':
             return 'account.self'
+        # 本人 Token 用量属于个人资源：普通成员可见自己的用量；
+        # 平台级 /api/v1/usage/* 仍由 usage.read 收敛到运营/管理员。
+        if normalized_method == 'GET' and path.startswith('/api/v1/usage/me'):
+            return 'account.self'
         if normalized_method == 'POST' and path in {
             '/api/v1/stocks/extract-from-image',
             '/api/v1/stocks/parse-import',

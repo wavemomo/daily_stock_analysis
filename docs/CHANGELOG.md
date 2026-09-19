@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 回测按用户隔离：`backtest_summaries` 新增 `owner_user_id`/`owner_scope` 并纳入唯一约束（含幂等迁移，重建为 `uix_backtest_summary_scope_code_window_version_owner`），候选记录按 `analysis_history` 的归属过滤，`BacktestService` 与 4 个回测端点全程透传当前 owner；此前每位用户看到的胜率/收益统计混入了其他用户的分析历史。取不到归属时 fail closed 视作平台级 global，不再退化为“不过滤”。
+- [改进] 定时自动回测改为按用户维度执行：遍历「有足够陈化分析历史」的归属主体逐个回测（平台级 global 单独一份），单个 owner 失败不影响其他人；此前一轮无差别回测全体记录。
+- [修复] Agent 记忆不再跨用户：`AgentMemory` 新增 owner 归属并在检索历史分析时按归属过滤，避免把他人的历史分析注入 Agent prompt；其消费的回测胜率同样按 owner 取数。
+- [修复] 告警巡检不再串用他人分析：`alert_worker` 拉取近期分析快照时按规则归属过滤，可见性缓存键纳入归属；本人无历史时返回空而不是回退到他人/全局数据。
+- [新功能] Token 用量按用户隔离：`llm_usage` 新增归属列（含迁移与索引），调用落账时按当前归属写入（用户触发→该用户，定时/复盘/扇出→平台级）；新增 `/api/v1/usage/me/summary`、`/api/v1/usage/me/dashboard` 供普通成员查看**本人**消耗（`account.self`），原 `/api/v1/usage/summary`、`/api/v1/usage/dashboard` 保持**全平台**聚合（`usage.read`）；小程序与 Web 的 Token 用量页按权限自动切换数据源，成员现可见该入口。
+- [修复] 用户报告与用户告警不再外泄到平台级渠道：归属为用户的通知只投递到该用户在个人设置绑定的邮箱，不再广播到企业微信/飞书/Telegram/Webhook 等平台级渠道；未绑定或关闭「报告发送到邮箱」时直接跳过而非回退到平台收件人。平台级非邮件渠道与 `EMAIL_RECEIVERS` 仅承载平台自身内容（定时大盘复盘、管理员/后台任务）。
+- [修复] 对话数据补数据库层归属兜底：会话消息、会话状态、摘要、provider turn 四表新增归属列（含迁移），写入落归属、读取加校验，他人即使猜到 `session_id` 也读不到；采用“只拦截不隐藏”策略，历史遗留与平台级记录仍可正常读取。
+- [修复] 存量告警规则归属收敛：新增幂等迁移，为已有 `user_id` 但缺失 `owner_scope` 的规则回填为用户归属；两者皆缺失的不做猜测，保持被巡检 fail closed 排除并记录告警日志。
+- [文档] `docs/miniapp.md` 补充后台链路归属传递（ContextVar，取不到时 fail closed 视作平台级）与回测、Token 用量、通知、Agent 记忆/对话的归属语义；澄清 `EMAIL_RECEIVERS` 与平台级通知渠道仅服务平台内容（同步 `.env.example` 与系统设置文案）。
+- [测试] 新增回测/告警/Token 用量/通知/对话归属隔离的回归测试，并修正此前遗留的按全局分析池断言的过时测试。
 - [新功能] 新增 `scripts/deploy_remote.sh` 一键远程部署：本地构建 `linux/amd64` 镜像后流式传输到服务器 `docker load`，自动打回滚标签、重建容器并做健康检查，支持 `--dry-run`/`--skip-tests`/`--list`/`--rollback`；同步源码时显式排除服务器侧的 `.env` 与 `docker/docker-compose.yml`，避免覆盖生产配置与端口绑定。文档见 `docs/DEPLOY.md`。
 - [改进] 定时分析跨用户去重（analyze-once/persist-many）：不再对每位用户各跑一批，而是先聚合所有「已开启定时分析且勾选股票」的用户，按归一股票代码去重，同一只股票当轮只做一次昂贵计算（数据抓取 + 指标 + 新闻 + LLM），再按各归属用户分别落库分析历史、决策信号并按其「报告发送到邮箱」偏好投递合并报告；多用户重叠自选时显著降低重复的算力与外部调用成本。大盘复盘与自动回测每轮仍全局各跑一次。
 - [新功能] 定时分析名额改由独立功能额度 `scheduled_analysis` 控制（默认每日 10 只），替代原硬编码的每用户上限 50：管理员可在「权限与额度」按用户/套餐/白名单/全局默认调节（`0` 关闭该用户定时分析、白名单不限量），额度按自选顺序分配、不足只分析前 N 只，休市过滤或分析失败的股票自动退还额度；该额度与按需「个股分析」额度相互独立，定时分析不会占用用户的手动分析额度。

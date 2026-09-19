@@ -26,7 +26,11 @@ from typing import List, Dict, Any, Optional, Set, Tuple, Callable
 import pandas as pd
 
 from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Config
-from src.analysis_ownership import AnalysisOwner
+from src.analysis_ownership import GLOBAL_ANALYSIS_OWNER, AnalysisOwner
+from src.analysis_owner_context import (
+    bind_current_analysis_owner,
+    reset_current_analysis_owner,
+)
 from src.portfolio_ownership import LEGACY_GLOBAL_PORTFOLIO_SCOPE, PortfolioScope
 from src.repositories.analysis_repo import AnalysisRepository
 from src.storage import get_db
@@ -3441,6 +3445,12 @@ class StockAnalysisPipeline:
             code, current_time=current_time, analysis_target=analysis_target
         )
         token = set_frozen_target_date(frozen_td)
+        # 绑定本次分析的资源归属，供深层横切逻辑（Agent 记忆注入、LLM Token 计费）读取。
+        # 扇出（一次计算服务多个 owner）时不绑定用户 owner：共享计算按平台归属（global）计费，
+        # 且 Agent 记忆不得注入任一用户的私有历史。
+        owner_context_token = bind_current_analysis_owner(
+            getattr(self, "owner", None) if not fanout_owners else GLOBAL_ANALYSIS_OWNER
+        )
         effective_query_id = analysis_query_id or getattr(self, "query_id", None) or uuid.uuid4().hex
         effective_trace_id = getattr(self, "trace_id", None) or effective_query_id
         diag_token = None
@@ -3505,6 +3515,7 @@ class StockAnalysisPipeline:
         finally:
             reset_run_diagnostic_context(diag_token)
             reset_frozen_target_date(token)
+            reset_current_analysis_owner(owner_context_token)
     
     def run(
         self,
@@ -3859,6 +3870,9 @@ class StockAnalysisPipeline:
                 ):
                     # 用户归属报告：邮件只发到该用户自己的邮箱（或按开关跳过），不发全局收件人。
                     send_kwargs["email_receivers_override"] = owner_email_receivers
+                    # 同时禁止广播到全局静态渠道（企业微信/Webhook 等），避免私有报告外泄。
+                    if _supports_explicit_keyword(self.notifier.send, "owner_scoped"):
+                        send_kwargs["owner_scoped"] = True
                 sent = self.notifier.send(report_content, **send_kwargs)
                 notification_run = self._build_notification_run_snapshot(
                     channel="report",
@@ -3956,6 +3970,9 @@ class StockAnalysisPipeline:
             self.notifier.send, "email_receivers_override"
         ):
             send_kwargs["email_receivers_override"] = owner_email_receivers
+            # 用户归属报告只走该用户自己的邮箱，不广播到全局静态渠道。
+            if _supports_explicit_keyword(self.notifier.send, "owner_scoped"):
+                send_kwargs["owner_scoped"] = True
 
         try:
             sent = self.notifier.send(report_content, **send_kwargs)

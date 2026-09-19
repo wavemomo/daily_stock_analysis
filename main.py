@@ -703,7 +703,12 @@ def _save_reused_market_review_report(
 
 
 def _run_auto_backtest(config: Config) -> None:
-    """Run the independently configured auto-backtest without failing analysis."""
+    """Run the independently configured auto-backtest per analysis owner.
+
+    多用户隔离：回测与汇总都按 owner 归口，因此这里遍历「拥有够龄分析历史」的每个 owner
+    各跑一次（用户 owner 只回测其本人历史，global owner 覆盖后台/旧版 legacy 行），
+    不再无差别回测全体用户的数据。单个 owner 失败只记录该 owner，不影响其他 owner。
+    """
 
     try:
         if not getattr(config, 'backtest_enabled', False):
@@ -711,19 +716,34 @@ def _run_auto_backtest(config: Config) -> None:
 
         from src.services.backtest_service import BacktestService
 
-        logger.info("开始自动回测...")
-        service = BacktestService()
-        stats = service.run_backtest(
-            force=False,
-            eval_window_days=getattr(config, 'backtest_eval_window_days', 10),
-            min_age_days=getattr(config, 'backtest_min_age_days', 14),
-            limit=200,
+        eval_window_days = getattr(config, 'backtest_eval_window_days', 10)
+        min_age_days = getattr(config, 'backtest_min_age_days', 14)
+
+        owners = BacktestService().repo.list_backtestable_owners(
+            min_age_days=int(min_age_days)
         )
-        logger.info(
-            f"自动回测完成: processed={stats.get('processed')} "
-            f"saved={stats.get('saved')} completed={stats.get('completed')} "
-            f"insufficient={stats.get('insufficient')} errors={stats.get('errors')}"
-        )
+        if not owners:
+            logger.info("自动回测：暂无满足回测条件的分析历史，跳过。")
+            return
+
+        logger.info("开始自动回测：按 owner 维度执行 %d 个归属。", len(owners))
+        for owner in owners:
+            try:
+                stats = BacktestService(owner=owner).run_backtest(
+                    force=False,
+                    eval_window_days=eval_window_days,
+                    min_age_days=min_age_days,
+                    limit=200,
+                )
+                logger.info(
+                    "自动回测完成(owner=%s): processed=%s saved=%s completed=%s "
+                    "insufficient=%s errors=%s",
+                    owner.key,
+                    stats.get('processed'), stats.get('saved'), stats.get('completed'),
+                    stats.get('insufficient'), stats.get('errors'),
+                )
+            except Exception as exc:
+                logger.warning("自动回测失败(owner=%s，已忽略): %s", owner.key, exc)
     except Exception as exc:
         logger.warning(f"自动回测失败（已忽略）: {exc}")
 

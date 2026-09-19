@@ -11,13 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import and_, select
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
+from src.analysis_ownership import AnalysisOwner
 from src.config import get_config
 from src.core.backtest_engine import OVERALL_SENTINEL_CODE, BacktestEngine, EvaluationConfig
 from src.market_phase_summary import (
     extract_market_phase_summary,
     normalize_analysis_phase_bucket,
 )
-from src.repositories.backtest_repo import BacktestRepository
+from src.repositories.backtest_repo import BacktestRepository, analysis_owner_conditions
 from src.repositories.stock_repo import StockRepository
 from src.schemas.decision_action import build_action_fields
 from src.services.stock_code_utils import (
@@ -26,7 +27,7 @@ from src.services.stock_code_utils import (
 )
 from src.services.stock_daily_start_resolver import resolve_stock_daily_start
 from src.services.stock_daily_window_resolver import resolve_stock_daily_window
-from src.storage import BacktestResult, BacktestSummary, DatabaseManager
+from src.storage import AnalysisHistory, BacktestResult, BacktestSummary, DatabaseManager
 from src.utils.data_processing import parse_json_field
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,20 @@ class BacktestService:
 
     MAX_DYNAMIC_SUMMARY_ROWS = 2000
 
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        *,
+        owner: Optional[AnalysisOwner] = None,
+    ):
+        """Create a backtest service bound to one analysis owner.
+
+        ``owner`` 决定本服务可见与可写的范围：用户 owner 只回测/读取该用户自己的分析历史
+        与汇总；global owner 处理后台/管理员归属（含旧版 NULL 行）。``None`` 仅保留给
+        显式的跨用户维护入口，HTTP 端点必须传入可信 owner。
+        """
         self.db = db_manager or DatabaseManager.get_instance()
+        self.owner = owner
         self.repo = BacktestRepository(self.db)
         self.stock_repo = StockRepository(self.db)
 
@@ -300,6 +313,7 @@ class BacktestService:
                 engine_version=str(engine_version),
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
+                owner=self.owner,
             )
         if not force and processed == 0:
             has_matching_analysis = self._has_matching_analysis_for_run(
@@ -361,6 +375,7 @@ class BacktestService:
                 eval_window_days=eval_window_days,
                 engine_version=engine_version,
                 force=force,
+                owner=self.owner,
             )
 
         matched: List[Any] = []
@@ -376,6 +391,7 @@ class BacktestService:
                 eval_window_days=eval_window_days,
                 engine_version=engine_version,
                 force=force,
+                owner=self.owner,
             )
             if not batch:
                 break
@@ -413,6 +429,7 @@ class BacktestService:
                     eval_window_days=eval_window_days,
                     engine_version=engine_version,
                     force=True,
+                    owner=self.owner,
                 )
             )
 
@@ -571,6 +588,7 @@ class BacktestService:
             days=None,
             offset=offset,
             limit=limit,
+            owner=self.owner,
         )
         items = []
         for result, stock_name, trend_prediction, _created_at, context_snapshot, raw_result, report_type, analysis_sentiment_score in rows:
@@ -620,6 +638,7 @@ class BacktestService:
                 engine_version=engine_version,
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
+                owner=self.owner,
             )
             if count > self.MAX_DYNAMIC_SUMMARY_ROWS:
                 if phase_bucket is not None:
@@ -636,6 +655,7 @@ class BacktestService:
                     analysis_date_from=analysis_date_from,
                     analysis_date_to=analysis_date_to,
                     limit=self.MAX_DYNAMIC_SUMMARY_ROWS + 1,
+                    owner=self.owner,
                 )
                 if len(rows_with_context) > self.MAX_DYNAMIC_SUMMARY_ROWS:
                     raise ValueError(
@@ -664,6 +684,7 @@ class BacktestService:
                 engine_version=engine_version,
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
+                owner=self.owner,
             )
             return self._build_dynamic_summary(
                 rows=rows,
@@ -679,6 +700,7 @@ class BacktestService:
             code=lookup_code,
             eval_window_days=eval_window_days,
             engine_version=engine_version,
+            owner=self.owner,
         )
         if summary is None:
             return None
@@ -724,6 +746,7 @@ class BacktestService:
         analysis_date_to: Optional[date],
     ) -> Optional[int]:
         windows = self.repo.get_distinct_eval_windows(
+            owner=self.owner,
             code=code,
             engine_version=engine_version,
             analysis_date_from=analysis_date_from,
@@ -767,6 +790,7 @@ class BacktestService:
                 raise ValueError("Phase-filtered results match too many rows; narrow the analysis date range or stock code.")
             batch_limit = min(batch_size, remaining_probe_rows)
             batch = self.repo.get_results_with_context_batch(
+                owner=self.owner,
                 code=code,
                 eval_window_days=eval_window_days,
                 engine_version=engine_version,
@@ -884,13 +908,19 @@ class BacktestService:
             logger.warning(f"补全日线数据失败({refill_code}): {exc}")
 
     def _recompute_summaries(self, *, touched_codes: List[str], eval_window_days: int, engine_version: str) -> None:
+        # 汇总必须只聚合本 owner 的结果行：结果本身无 owner 列，归属继承 analysis_history，
+        # 因此这里 join AnalysisHistory 并按 owner 过滤，避免把他人回测算进本人汇总。
+        owner_conditions = analysis_owner_conditions(self.owner)
         with self.db.get_session() as session:
             # overall
             overall_rows = session.execute(
-                select(BacktestResult).where(
+                select(BacktestResult)
+                .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
+                .where(
                     and_(
                         BacktestResult.eval_window_days == eval_window_days,
                         BacktestResult.engine_version == engine_version,
+                        *owner_conditions,
                     )
                 )
             ).scalars().all()
@@ -911,11 +941,14 @@ class BacktestService:
 
                 code_conditions = BacktestRepository._build_code_conditions(BacktestResult.code, normalized_code)
                 rows = session.execute(
-                    select(BacktestResult).where(
+                    select(BacktestResult)
+                    .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
+                    .where(
                         and_(
                             *code_conditions,
                             BacktestResult.eval_window_days == eval_window_days,
                             BacktestResult.engine_version == engine_version,
+                            *owner_conditions,
                         )
                     )
                 ).scalars().all()
@@ -929,9 +962,13 @@ class BacktestService:
                 summary = self._build_summary_model(data)
                 self.repo.upsert_summary(summary)
 
-    @staticmethod
-    def _build_summary_model(summary_data: Dict[str, Any]) -> BacktestSummary:
+    def _build_summary_model(self, summary_data: Dict[str, Any]) -> BacktestSummary:
+        # 汇总行自带 owner：与产出它的结果集归属一致，避免多用户互相覆盖同一唯一键。
+        # owner=None 与读路径一致按 global 落库（fail-closed），不写 NULL 造成读写不一致。
+        owner = self.owner
         return BacktestSummary(
+            owner_scope=(owner.scope if owner is not None else "global"),
+            owner_user_id=(owner.user_id if owner is not None else None),
             scope=summary_data.get("scope"),
             code=summary_data.get("code"),
             eval_window_days=summary_data.get("eval_window_days"),

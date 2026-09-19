@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy import and_, delete, desc, func, or_, select
 
+from src.analysis_ownership import AnalysisOwner
 from src.core.backtest_engine import OVERALL_SENTINEL_CODE
 from src.services.stock_code_utils import resolve_daily_stock_identity
 
@@ -33,6 +34,42 @@ BacktestResultContextRow = Tuple[
 ]
 
 
+def analysis_owner_conditions(owner: Optional[AnalysisOwner]) -> List[object]:
+    """Return fail-closed ownership predicates on ``AnalysisHistory`` for backtests.
+
+    语义与 analysis_history 读路径完全一致：用户 owner 必须精确匹配可信用户主键；
+    global owner 额外可见旧版 NULL（legacy）行。``None`` **一律按 global 处理**（
+    fail-closed）：忘记传 owner 的调用方只能看到全局/后台归属数据，绝不会跨用户读到
+    他人的私有分析与回测。
+    """
+    if owner is not None and owner.scope == "user":
+        return [
+            AnalysisHistory.owner_scope == "user",
+            AnalysisHistory.owner_user_id == owner.user_id,
+        ]
+    return [
+        or_(
+            AnalysisHistory.owner_scope == "global",
+            AnalysisHistory.owner_scope.is_(None),
+        )
+    ]
+
+
+def summary_owner_conditions(owner: Optional[AnalysisOwner]) -> List[object]:
+    """Return ownership predicates on ``BacktestSummary``; ``None`` is fail-closed global."""
+    if owner is not None and owner.scope == "user":
+        return [
+            BacktestSummary.owner_scope == "user",
+            BacktestSummary.owner_user_id == owner.user_id,
+        ]
+    return [
+        or_(
+            BacktestSummary.owner_scope == "global",
+            BacktestSummary.owner_scope.is_(None),
+        )
+    ]
+
+
 class BacktestRepository:
     """DB access layer for backtesting."""
 
@@ -49,12 +86,14 @@ class BacktestRepository:
         eval_window_days: int,
         engine_version: str,
         force: bool,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[AnalysisHistory]:
-        """Return AnalysisHistory rows eligible for backtest."""
+        """Return AnalysisHistory rows eligible for backtest (scoped to ``owner``)."""
         cutoff_dt = datetime.now() - timedelta(days=min_age_days)
 
         with self.db.get_session() as session:
             conditions = [AnalysisHistory.created_at <= cutoff_dt]
+            conditions.extend(analysis_owner_conditions(owner))
             if code:
                 conditions.extend(self._build_code_conditions(AnalysisHistory.code, code))
             conditions.append(
@@ -79,6 +118,44 @@ class BacktestRepository:
             rows = session.execute(query).scalars().all()
             return list(rows)
 
+    def list_backtestable_owners(self, *, min_age_days: int) -> List[AnalysisOwner]:
+        """Return distinct analysis owners that have backtestable history.
+
+        供定时自动回测按用户维度逐个执行：返回每个拥有「够龄且非大盘复盘」分析历史的
+        owner；旧版 NULL/global 行归并为单个 global owner，用户行各自独立。
+        """
+        cutoff_dt = datetime.now() - timedelta(days=min_age_days)
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(AnalysisHistory.owner_scope, AnalysisHistory.owner_user_id)
+                .where(
+                    and_(
+                        AnalysisHistory.created_at <= cutoff_dt,
+                        or_(
+                            AnalysisHistory.report_type.is_(None),
+                            AnalysisHistory.report_type != MARKET_REVIEW_REPORT_TYPE,
+                        ),
+                    )
+                )
+                .distinct()
+            ).all()
+
+        owners: List[AnalysisOwner] = []
+        seen: set[str] = set()
+        has_global = False
+        for owner_scope, owner_user_id in rows:
+            if owner_scope == "user" and isinstance(owner_user_id, int) and owner_user_id > 0:
+                owner = AnalysisOwner.user(owner_user_id)
+                if owner.key not in seen:
+                    seen.add(owner.key)
+                    owners.append(owner)
+            else:
+                # global 与 legacy NULL 行同属全局归属，只跑一次。
+                has_global = True
+        if has_global:
+            owners.append(AnalysisOwner.global_owner())
+        return owners
+
     def align_existing_result_dates(
         self,
         *,
@@ -88,6 +165,7 @@ class BacktestRepository:
         engine_version: str,
         analysis_date_from: Optional[date],
         analysis_date_to: Optional[date],
+        owner: Optional[AnalysisOwner] = None,
     ) -> int:
         """Align legacy result dates to their linked analysis snapshot date.
 
@@ -109,6 +187,7 @@ class BacktestRepository:
                     AnalysisHistory.report_type != MARKET_REVIEW_REPORT_TYPE,
                 ),
             ]
+            conditions.extend(analysis_owner_conditions(owner))
             if code:
                 conditions.extend(self._build_code_conditions(AnalysisHistory.code, code))
 
@@ -183,6 +262,7 @@ class BacktestRepository:
         days: Optional[int],
         offset: int,
         limit: int,
+        owner: Optional[AnalysisOwner] = None,
     ) -> Tuple[List[BacktestResultContextRow], int]:
         with self.db.get_session() as session:
             conditions = self._build_result_conditions(
@@ -192,6 +272,7 @@ class BacktestRepository:
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
                 days=days,
+                owner=owner,
             )
 
             where_clause = and_(*conditions) if conditions else True
@@ -232,6 +313,7 @@ class BacktestRepository:
         days: Optional[int],
         offset: int,
         limit: int,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[BacktestResultContextRow]:
         """Return result rows plus AnalysisHistory.context_snapshot for dynamic filtering."""
         with self.db.get_session() as session:
@@ -242,6 +324,7 @@ class BacktestRepository:
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
                 days=days,
+                owner=owner,
             )
             where_clause = and_(*conditions) if conditions else True
             rows = session.execute(
@@ -273,6 +356,7 @@ class BacktestRepository:
         analysis_date_to: Optional[date] = None,
         days: Optional[int] = None,
         limit: Optional[int] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[Tuple[BacktestResult, Optional[str]]]:
         with self.db.get_session() as session:
             conditions = self._build_result_conditions(
@@ -282,6 +366,7 @@ class BacktestRepository:
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
                 days=days,
+                owner=owner,
             )
             where_clause = and_(*conditions) if conditions else True
             query = (
@@ -303,6 +388,7 @@ class BacktestRepository:
         analysis_date_from: Optional[date] = None,
         analysis_date_to: Optional[date] = None,
         days: Optional[int] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> int:
         """Return the number of matching BacktestResult rows without loading them."""
         with self.db.get_session() as session:
@@ -313,11 +399,13 @@ class BacktestRepository:
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
                 days=days,
+                owner=owner,
             )
             where_clause = and_(*conditions) if conditions else True
             count = session.execute(
                 select(func.count(BacktestResult.id))
                 .select_from(BacktestResult)
+                .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
                 .where(where_clause)
             ).scalar() or 0
             return int(count)
@@ -332,6 +420,7 @@ class BacktestRepository:
         analysis_date_to: Optional[date] = None,
         days: Optional[int] = None,
         limit: Optional[int] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[BacktestResult]:
         with self.db.get_session() as session:
             conditions = self._build_result_conditions(
@@ -341,10 +430,12 @@ class BacktestRepository:
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
                 days=days,
+                owner=owner,
             )
             where_clause = and_(*conditions) if conditions else True
             query = (
                 select(BacktestResult)
+                .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
                 .where(where_clause)
                 .order_by(desc(BacktestResult.analysis_date), desc(BacktestResult.evaluated_at))
             )
@@ -354,7 +445,7 @@ class BacktestRepository:
             return list(rows)
 
     def upsert_summary(self, summary: BacktestSummary) -> None:
-        """Insert or replace summary row by unique key."""
+        """Insert or replace summary row by unique key (owner is part of the key)."""
         with self.db.get_session() as session:
             existing = session.execute(
                 select(BacktestSummary)
@@ -364,6 +455,12 @@ class BacktestRepository:
                         BacktestSummary.code == summary.code,
                         BacktestSummary.eval_window_days == summary.eval_window_days,
                         BacktestSummary.engine_version == summary.engine_version,
+                        BacktestSummary.owner_scope == summary.owner_scope,
+                        (
+                            BacktestSummary.owner_user_id.is_(None)
+                            if summary.owner_user_id is None
+                            else BacktestSummary.owner_user_id == summary.owner_user_id
+                        ),
                     )
                 )
                 .limit(1)
@@ -406,12 +503,14 @@ class BacktestRepository:
         code: Optional[str],
         eval_window_days: Optional[int] = None,
         engine_version: str,
+        owner: Optional[AnalysisOwner] = None,
     ) -> Optional[BacktestSummary]:
         with self.db.get_session() as session:
             conditions = [
                 BacktestSummary.scope == scope,
                 BacktestSummary.engine_version == engine_version,
             ]
+            conditions.extend(summary_owner_conditions(owner))
             if code:
                 conditions.extend(self._build_code_conditions(BacktestSummary.code, code))
             if eval_window_days is not None:
@@ -458,6 +557,7 @@ class BacktestRepository:
         engine_version: Optional[str] = None,
         analysis_date_from: Optional[date] = None,
         analysis_date_to: Optional[date] = None,
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[int]:
         """Return sorted distinct eval_window_days for matching results."""
         with self.db.get_session() as session:
@@ -468,10 +568,12 @@ class BacktestRepository:
                 analysis_date_from=analysis_date_from,
                 analysis_date_to=analysis_date_to,
                 days=None,
+                owner=owner,
             )
             where_clause = and_(*conditions) if conditions else True
             rows = session.execute(
                 select(BacktestResult.eval_window_days)
+                .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
                 .where(where_clause)
                 .distinct()
                 .order_by(BacktestResult.eval_window_days)
@@ -487,8 +589,12 @@ class BacktestRepository:
         analysis_date_from: Optional[date],
         analysis_date_to: Optional[date],
         days: Optional[int],
+        owner: Optional[AnalysisOwner] = None,
     ) -> List[object]:
         conditions = []
+        # 结果行本身不带 owner：归属继承其 analysis_history，故所有结果查询都 join
+        # AnalysisHistory 并在此附加 owner 谓词（单一真源，避免冗余列漂移）。
+        conditions.extend(analysis_owner_conditions(owner))
         if code:
             conditions.extend(BacktestRepository._build_code_conditions(BacktestResult.code, code))
         if eval_window_days is not None:

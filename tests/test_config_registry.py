@@ -355,7 +355,6 @@ class TestSettingsHelpMetadata(unittest.TestCase):
     _SYSTEM_HIDDEN_KEYS: set[str] = set()
 
     _HELP_KEYS = (
-        "STOCK_LIST",
         "GENERATION_BACKEND",
         "GENERATION_FALLBACK_BACKEND",
         "LITELLM_MODEL",
@@ -512,8 +511,9 @@ class TestSettingsHelpMetadata(unittest.TestCase):
             for field in category["fields"]
         }
 
-        self.assertEqual(fields["STOCK_LIST"]["help_key"], "settings.base.STOCK_LIST")
-        self.assertIn("docs/full-guide.md", fields["STOCK_LIST"]["docs"][0]["href"])
+        self.assertEqual(fields["LITELLM_MODEL"]["help_key"], "settings.ai_model.LITELLM_MODEL")
+        self.assertTrue(fields["LITELLM_MODEL"]["docs"][0]["href"].startswith("https://"))
+        self.assertTrue(fields["LITELLM_MODEL"]["docs"][0]["label"])
 
 
 class TestIssue1512SettingsFields(unittest.TestCase):

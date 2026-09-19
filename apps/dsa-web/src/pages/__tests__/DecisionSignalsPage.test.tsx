@@ -83,6 +83,11 @@ vi.mock('recharts', () => ({
   ),
 }));
 
+// 基准信号时间必须相对当前时间：硬编码日期会随真实时间推移漂移出
+// 时间轴的默认查询窗口（TIMELINE_RANGE_DAYS），导致乐观 upsert 断言凭空失败。
+const BASE_SIGNAL_CREATED_AT = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+const BASE_SIGNAL_EXPIRES_AT = new Date(Date.now() + 22 * 60 * 60 * 1000).toISOString();
+
 const signal: DecisionSignalItem = {
   id: 7,
   stockCode: '600519',
@@ -110,9 +115,9 @@ const signal: DecisionSignalItem = {
   dataQualitySummary: { freshness: 'ok' },
   planQuality: 'complete',
   status: 'active',
-  expiresAt: '2026-06-18T09:30:00',
-  createdAt: '2026-06-17T09:30:00',
-  updatedAt: '2026-06-17T09:30:00',
+  expiresAt: BASE_SIGNAL_EXPIRES_AT,
+  createdAt: BASE_SIGNAL_CREATED_AT,
+  updatedAt: BASE_SIGNAL_CREATED_AT,
   metadata: { source: 'test' },
 };
 
@@ -173,7 +178,7 @@ const formattedCreatedAt = new Intl.DateTimeFormat('zh-CN', {
   day: '2-digit',
   hour: '2-digit',
   minute: '2-digit',
-}).format(new Date('2026-06-17T09:30:00Z'));
+}).format(new Date(BASE_SIGNAL_CREATED_AT));
 
 function listResponse(items: DecisionSignalItem[] = [signal], total = items.length): DecisionSignalListResponse {
   return {

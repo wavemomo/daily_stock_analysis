@@ -117,14 +117,18 @@ class TestValidateStructuredHappyPath:
 # ---------------------------------------------------------------------------
 
 class TestValidateStructuredStockList:
-    def test_empty_stock_list_is_error(self):
+    def test_empty_stock_list_is_informational_only(self):
+        """多用户模式下分析池按用户维护，全局 STOCK_LIST 留空不再是错误。"""
         cfg = _make_config(stock_list=[])
         issues = cfg.validate_structured()
-        errors = [i for i in issues if i.severity == "error"]
-        stock_errors = [i for i in errors if i.field == "STOCK_LIST"]
-        assert stock_errors
-        assert "未配置 STOCK_LIST" in stock_errors[0].message
-        assert "600519,hk00700,AAPL" in stock_errors[0].message
+        assert not any(
+            i.field == "STOCK_LIST" for i in issues if i.severity == "error"
+        )
+        infos = [
+            i for i in issues if i.field == "STOCK_LIST" and i.severity == "info"
+        ]
+        assert infos
+        assert "未配置全局 STOCK_LIST" in infos[0].message
 
     def test_configured_stock_list_no_stock_error(self):
         cfg = _make_config(stock_list=["600519", "000001"])

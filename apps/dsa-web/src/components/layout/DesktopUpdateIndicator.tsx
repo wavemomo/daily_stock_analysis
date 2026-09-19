@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Download, RefreshCw } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
@@ -25,6 +25,7 @@ export const DesktopUpdateIndicator: React.FC = () => {
   } = useDesktopUpdate();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const rawTooltipId = useId();
   const status = state?.status;
   const busy = isBusy;
   const badgeTone = getDesktopUpdateBadgeTone(status);
@@ -63,6 +64,7 @@ export const DesktopUpdateIndicator: React.FC = () => {
   const tooltip = notice?.message
     || notice?.title
     || t('layout.desktopUpdateIdleHint', { version: currentVersion || t('settings.desktopLatest') });
+  const tooltipId = `desktop-update-status-${rawTooltipId}`;
   const canOpenRelease = Boolean(state?.releaseUrl) && (status === 'update-available' || status === 'error');
   const canInstall = status === 'update-downloaded';
   const showRecheck = !busy || status === 'error';
@@ -78,9 +80,13 @@ export const DesktopUpdateIndicator: React.FC = () => {
         aria-label={t('layout.desktopUpdateEntry')}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title={tooltip}
+        aria-describedby={tooltipId}
         onClick={() => setOpen((current) => !current)}
       >
+        {/* 用可访问描述替代原生 title：原生 tooltip 对键盘与触屏不可达。 */}
+        <span id={tooltipId} className="sr-only">
+          {tooltip}
+        </span>
         {busy ? (
           <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
         ) : (

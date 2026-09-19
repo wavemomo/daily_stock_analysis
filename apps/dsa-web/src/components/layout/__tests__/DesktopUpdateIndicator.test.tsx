@@ -144,7 +144,7 @@ describe('DesktopUpdateIndicator', () => {
     await waitFor(() => expect(desktopCheckForUpdates).toHaveBeenCalledTimes(1));
   });
 
-  it('surfaces download percent in the entry tooltip', async () => {
+  it('surfaces download percent in the entry accessible description', async () => {
     desktopGetUpdateState.mockResolvedValue({
       status: 'downloading',
       currentVersion: '3.30.0',
@@ -155,7 +155,11 @@ describe('DesktopUpdateIndicator', () => {
     renderIndicator();
 
     const entry = await screen.findByRole('button', { name: '桌面端更新' });
-    expect(entry).toHaveAttribute('title', expect.stringContaining('42%'));
+    // 原生 title 已替换为 aria-describedby 指向的可访问描述（键盘/触屏可达）
+    expect(entry).not.toHaveAttribute('title');
+    const describedById = entry.getAttribute('aria-describedby');
+    expect(describedById).toBeTruthy();
+    expect(document.getElementById(describedById as string)?.textContent).toContain('42%');
     expect(desktopCheckForUpdates).not.toHaveBeenCalled();
   });
 });

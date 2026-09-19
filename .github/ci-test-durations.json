@@ -233,7 +233,6 @@
     "tests/test_stock_index_loader.py": 0.081,
     "tests/test_stock_index_remote_service.py": 0.038,
     "tests/test_stock_list_parser.py": 0.091,
-    "tests/test_stock_watchlist_api.py": 0.01,
     "tests/test_stooq_fallback.py": 0.01,
     "tests/test_storage.py": 9.759,
     "tests/test_strategy_deliberation.py": 0.028,

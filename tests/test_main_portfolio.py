@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 import main
+from src.analysis_ownership import AnalysisOwner
 from src.brokers.futu.portfolio import FutuPortfolioError
 from src.services.runtime_scheduler import RuntimeSchedulerService
 
@@ -592,6 +593,10 @@ class MainPortfolioTest(unittest.TestCase):
             backtest_min_age_days=14,
         )
         backtest_service = MagicMock()
+        # 多用户隔离后自动回测按 owner 遍历：先用无参服务列出「有够龄分析历史」的归属，
+        # 再对每个归属各建一个绑定 owner 的服务执行回测。
+        owner = AnalysisOwner.user(42)
+        backtest_service.repo.list_backtestable_owners.return_value = [owner]
         backtest_service.run_backtest.return_value = {
             "processed": 1,
             "saved": 1,
@@ -620,7 +625,13 @@ class MainPortfolioTest(unittest.TestCase):
             result = main.run_full_analysis(config, args)
 
         self.assertTrue(result)
-        backtest_class.assert_called_once_with()
+        backtest_service.repo.list_backtestable_owners.assert_called_once_with(
+            min_age_days=14,
+        )
+        self.assertEqual(
+            backtest_class.call_args_list,
+            [call(), call(owner=owner)],
+        )
         backtest_service.run_backtest.assert_called_once_with(
             force=False,
             eval_window_days=10,

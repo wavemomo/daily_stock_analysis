@@ -15,23 +15,6 @@ export interface SettingsHelpContent {
 type SettingsHelpMap = Record<string, SettingsHelpContent>;
 
 const settingsHelpZhCN: SettingsHelpMap = {
-  'settings.base.STOCK_LIST': {
-    title: '自选股列表',
-    summary: '配置需要分析的股票代码列表，是手动分析、定时任务和通知报告的基础输入。',
-    usage: '多个股票代码推荐使用英文逗号分隔；从表格或聊天中粘贴时，也会识别中文逗号、顿号、分号、空格和换行，并在保存后规范为英文逗号。',
-    valueNotes: [
-      '定时模式每次触发前会重新读取当前保存的 STOCK_LIST。',
-      '如果命令行临时传入 --stocks，只影响本次手动运行，不会锁定后续计划任务。',
-      '邮件分组里的 STOCK_GROUP_N 应写成 STOCK_LIST 的子集，只影响邮件收件人，不改变分析范围。',
-    ],
-    impact: [
-      '影响主分析任务、市场报告中的个股范围、通知推送内容和历史报告记录。',
-    ],
-    notes: [
-      '保存后的 STOCK_LIST 会统一写成英文逗号分隔。',
-      '修改后保存配置即可供后续任务读取。',
-    ],
-  },
   'settings.ai_model.GENERATION_BACKEND': {
     title: '分析生成方式',
     showFieldKey: false,
@@ -1265,18 +1248,6 @@ const settingsHelpZhCN: SettingsHelpMap = {
 };
 
 const settingsHelpEnUS: SettingsHelpMap = {
-  'settings.base.STOCK_LIST': {
-    title: 'Watchlist',
-    summary: 'Defines the stock codes used by analysis jobs and notification reports.',
-    usage: 'English commas are recommended. Pasted Chinese commas, enumeration commas, semicolons, spaces, and newlines are also recognized and normalized to English commas when saved.',
-    valueNotes: [
-      'Scheduled mode rereads the saved STOCK_LIST before each run.',
-      'A temporary --stocks argument only affects that manual run.',
-      'STOCK_GROUP_N should be a subset of STOCK_LIST and only affects grouped email routing.',
-    ],
-    impact: ['Affects analysis scope, notification content, and saved history reports.'],
-    notes: ['Saved STOCK_LIST values are written with English commas.', 'Save the setting before later tasks can read it.'],
-  },
   'settings.ai_model.GENERATION_BACKEND': {
     title: 'Analysis Generation Method',
     showFieldKey: false,

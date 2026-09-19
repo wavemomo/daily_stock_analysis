@@ -498,23 +498,23 @@ describe('SettingsField', () => {
     render(
       <SettingsField
         item={{
-          key: 'STOCK_LIST',
-          value: '600519,300750',
+          key: 'AGENT_MEMORY_ENABLED',
+          value: 'true',
           rawValueExists: true,
           isMasked: false,
           schema: {
-            key: 'STOCK_LIST',
-            category: 'base',
-            dataType: 'array',
-            uiControl: 'textarea',
+            key: 'AGENT_MEMORY_ENABLED',
+            category: 'agent',
+            dataType: 'boolean',
+            uiControl: 'switch',
             isSensitive: false,
             isRequired: false,
             isEditable: true,
             options: [],
             validation: {},
             displayOrder: 1,
-            helpKey: 'settings.base.STOCK_LIST',
-            examples: ['STOCK_LIST=600519,300750,002594'],
+            helpKey: 'settings.agent.AGENT_MEMORY_ENABLED',
+            examples: ['AGENT_MEMORY_ENABLED=true'],
             docs: [
               {
                 label: '完整指南',
@@ -524,15 +524,15 @@ describe('SettingsField', () => {
             warningCodes: [],
           },
         }}
-        value="600519,300750"
+        value="true"
         onChange={() => undefined}
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '查看 自选股列表 配置说明' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看 记忆与校准 配置说明' }));
 
-    expect(screen.getByRole('dialog', { name: '自选股列表' })).toBeInTheDocument();
-    expect(screen.getByText('STOCK_LIST=600519,300750,002594')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Agent 记忆系统' })).toBeInTheDocument();
+    expect(screen.getByText('AGENT_MEMORY_ENABLED=true')).toBeInTheDocument();
     const docLink = screen.getByRole('link', { name: /完整指南/ });
     expect(docLink).toHaveAttribute('href', 'https://example.com/full-guide');
 

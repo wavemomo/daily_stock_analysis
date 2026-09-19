@@ -774,14 +774,13 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
     def test_get_config_uses_runtime_env_as_display_fallback(self) -> None:
         self._rewrite_env(
-            "STOCK_LIST=600519",
             "LOG_LEVEL=INFO",
         )
 
         with patch.dict(
             os.environ,
             {
-                "STOCK_LIST": "300750",
+                "LOG_LEVEL": "DEBUG",
                 "LITELLM_MODEL": "openai/gpt-5",
                 "LLM_CHANNELS": "my_proxy",
                 "LLM_MY_PROXY_BASE_URL": "https://proxy.example.com/v1",
@@ -795,8 +794,9 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         items = {item["key"]: item for item in payload["items"]}
         raw_items = {item["key"]: item for item in raw_payload["items"]}
-        self.assertEqual(items["STOCK_LIST"]["value"], "600519")
-        self.assertTrue(items["STOCK_LIST"]["raw_value_exists"])
+        # 持久化在 .env 的值优先于运行时环境变量作为展示值
+        self.assertEqual(items["LOG_LEVEL"]["value"], "INFO")
+        self.assertTrue(items["LOG_LEVEL"]["raw_value_exists"])
         self.assertEqual(items["LITELLM_MODEL"]["value"], "openai/gpt-5")
         self.assertFalse(items["LITELLM_MODEL"]["raw_value_exists"])
         self.assertEqual(items["LLM_CHANNELS"]["value"], "my_proxy")
@@ -1020,7 +1020,8 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertFalse(status["ready_for_smoke"])
         self.assertEqual(status["next_step_key"], "llm_primary")
         self.assertIn("llm_primary", status["required_missing_keys"])
-        self.assertIn("stock_list", status["required_missing_keys"])
+        # 多用户模式下分析池按用户维护，全局 stock_list 不再是开箱必填项
+        self.assertNotIn("stock_list", status["required_missing_keys"])
 
     def test_get_setup_status_marks_minimal_config_complete(self) -> None:
         self._rewrite_env(

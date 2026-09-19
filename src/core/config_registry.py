@@ -76,6 +76,9 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
 ]
 
 WEB_SETTINGS_HIDDEN_FROM_UI = {
+    # 多用户模式下分析池按用户维护（个人自选），全局 STOCK_LIST 仅保留给
+    # `--stocks` 手动分析与券商持仓等全局路径，不再在设置 UI 中暴露。
+    "STOCK_LIST",
     "DATABASE_PATH",
     "SQLITE_WAL_ENABLED",
     "SQLITE_BUSY_TIMEOUT_MS",
